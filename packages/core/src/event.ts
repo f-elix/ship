@@ -118,10 +118,24 @@ export const RunEvent = Schema.TaggedUnion({
 });
 export type RunEvent = typeof RunEvent.Type;
 
+/**
+ * A stored event this build cannot decode, e.g. one written by a newer ship. Reading the
+ * log never fails on such an event; it comes back as this entry instead.
+ */
+export const UnknownEvent = Schema.TaggedStruct('UnknownEvent', {
+	/** The stored event's `_tag`. */
+	type: Schema.String,
+	/** The stored event as JSON text. */
+	json: Schema.String,
+	/** Why decoding failed. */
+	error: Schema.String
+});
+export interface UnknownEvent extends Schema.Schema.Type<typeof UnknownEvent> {}
+
 /** A stored event: its run and its 1-based position in that run's log. */
 export const RunEventEnvelope = Schema.Struct({
 	runId: RunId,
 	seq: PositiveInt,
-	event: RunEvent
+	event: Schema.Union([RunEvent, UnknownEvent])
 });
 export interface RunEventEnvelope extends Schema.Schema.Type<typeof RunEventEnvelope> {}

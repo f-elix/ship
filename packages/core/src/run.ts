@@ -99,6 +99,13 @@ export const RunState = Schema.Struct({
 });
 export interface RunState extends Schema.Schema.Type<typeof RunState> {}
 
+/**
+ * Format version of persisted run snapshots (the machine snapshot around `RunState`).
+ * Bump it when a change to `RunState` or the machine's states makes older snapshots
+ * unsafe to restore; runs saved under another version can no longer be resumed.
+ */
+export const SNAPSHOT_VERSION = 1;
+
 /** The JSON `ship run` prints on stdout when the run ends; also kept in the run store. */
 export const Summary = Schema.Struct({
 	runId: RunId,
