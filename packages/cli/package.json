@@ -30,7 +30,8 @@
 		"@effect/sql-sqlite-node": "4.1.4",
 		"@xstate/effect": "1.0.0-beta.2",
 		"effect": "4.1.4",
-		"xstate": "6.0.0-beta.3"
+		"xstate": "6.0.0-beta.3",
+		"yaml": "2.9.1"
 	},
 	"devDependencies": {
 		"@ship/core": "workspace:*",

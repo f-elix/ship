@@ -73,6 +73,17 @@ export const UnresolvedFindings = Schema.Struct({
 export interface UnresolvedFindings extends Schema.Schema.Type<typeof UnresolvedFindings> {}
 
 /**
+ * A session the next call can resume, with the session's running cost total so the next
+ * call's own cost can be told apart. Persisted whole as the implementer session.
+ */
+export const AgentSession = Schema.Struct({
+	sessionId: SessionId,
+	/** The session's `total_cost_usd` after its latest call. */
+	cumulativeCostUsd: CostUsd
+});
+export interface AgentSession extends Schema.Schema.Type<typeof AgentSession> {}
+
+/**
  * The machine context, persisted in snapshots. Values the run has not produced yet are
  * `null` so the context always has the same keys.
  */
@@ -87,7 +98,7 @@ export const RunState = Schema.Struct({
 	/** Resolved when the run is created; later config edits do not change it. */
 	config: ResolvedConfig,
 	/** Set by `implement`; every fix step resumes this session. */
-	implementerSessionId: Schema.NullOr(SessionId),
+	implementerSession: Schema.NullOr(AgentSession),
 	/** Current review round; 0 before the first review. */
 	round: NonNegativeInt,
 	/** Check-fix attempts in the current round. */

@@ -53,7 +53,7 @@ const runState = (runId: RunId): RunState => ({
 	branch: 'feature',
 	baseSha,
 	config: resolveConfig(decodeGlobalConfigSync({}), decodeProjectConfigSync({})),
-	implementerSessionId: null,
+	implementerSession: null,
 	round: 1,
 	checkFixAttempts: 0,
 	lastReviewedSha: null,
