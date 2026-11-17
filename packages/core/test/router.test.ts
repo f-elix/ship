@@ -82,6 +82,16 @@ describe('matchTriggers', () => {
 		expect(matchTriggers(triggers({}), changes(['src/index.ts']))).toEqual([]);
 	});
 
+	it('ignores the added lines of docs files', () => {
+		const t = triggers({ addedLines: ['secret'] });
+		expect(
+			matchTriggers(t, changes(['README.md'], { 'README.md': ['Keep it secret.'] }))
+		).toEqual([]);
+		expect(
+			matchTriggers(t, changes(['src/a.ts'], { 'src/a.ts': ['const secret = 1;'] }))
+		).toEqual(['added line /secret/']);
+	});
+
 	it('matches the old path of a rename and deleted files', () => {
 		const t = triggers({ paths: ['src/auth/**'] });
 		expect(

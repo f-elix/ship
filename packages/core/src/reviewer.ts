@@ -32,7 +32,7 @@ const compilableRegExp = Schema.makeFilter(
 /**
  * Deterministic triggers. A reviewer runs when any of them matches the diff under review:
  * `always`, any changed path matching a glob in `paths`, any added line matching a
- * pattern in `addedLines`, or any changed file of a kind in `fileKinds`.
+ * pattern in `addedLines` (outside `docs` files), or any changed file of a kind in `fileKinds`.
  * A reviewer with no matching trigger can still be picked by the LLM router.
  */
 export const ReviewerTriggers = Schema.Struct({
@@ -46,10 +46,15 @@ export interface ReviewerTriggers extends Schema.Schema.Type<typeof ReviewerTrig
 /** The parsed frontmatter of a reviewer markdown file. */
 export const ReviewerFrontmatter = Schema.Struct({
 	name: ReviewerName,
+	/**
+	 * One sentence on what the reviewer covers. The LLM router picks reviewers from it;
+	 * without one it reads the brief's first paragraph.
+	 */
+	description: Schema.optionalKey(Schema.NonEmptyString),
 	triggers: ReviewerTriggers.pipe(withDefault({})),
 	/** Overrides the configured `review` model for this reviewer. */
 	model: Schema.optionalKey(ModelId),
-	/** Triage files must-fix findings from a non-blocking reviewer as tradeoffs, so they never start a fix round. */
+	/** Must-fix findings from a non-blocking reviewer are filed as tradeoffs, so they never start a fix round. */
 	blocking: Schema.Boolean.pipe(withDefault(true))
 });
 export interface ReviewerFrontmatter extends Schema.Schema.Type<typeof ReviewerFrontmatter> {}
