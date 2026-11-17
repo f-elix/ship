@@ -1,9 +1,17 @@
+export * from './baseline.ts';
+export * from './checks.ts';
+export * from './config-loader.ts';
 export * from './config.ts';
 export * from './event.ts';
 export * from './finding.ts';
+export * from './git.ts';
 export * from './json-schema.ts';
+export * from './locks.ts';
 export * from './primitives.ts';
+export { DEFAULT_OUTPUT_TAIL, type OutputTailLimits } from './process.ts';
+export * from './project-key.ts';
 export * from './reviewer.ts';
 export * from './rpc.ts';
 export * from './run.ts';
+export * from './ship-paths.ts';
 export * from './state-path.ts';

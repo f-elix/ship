@@ -1,15 +1,19 @@
 import { SqliteClient } from '@effect/sql-sqlite-node';
 import { assert, describe, expect, it } from '@effect/vitest';
 import {
+	configParseOptions,
 	GitSha,
+	GlobalConfig,
+	ProjectConfig,
 	ProjectKey,
+	resolveConfig,
 	RunEvent,
 	RunId,
 	SNAPSHOT_VERSION,
 	type RunState,
 	type Summary
 } from '@ship/core';
-import { DateTime, Deferred, Effect, Fiber, Layer, Stream } from 'effect';
+import { DateTime, Deferred, Effect, Fiber, Layer, Schema, Stream } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { TestClock } from 'effect/testing';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -32,6 +36,9 @@ const TempDb = Layer.unwrap(Effect.map(tempDbFile, (filename) => SqliteClient.la
 /** The store plus raw SQL access, for checks the store's API cannot express. */
 const TestLayer = RunStore.layer.pipe(Layer.provideMerge(TempDb));
 
+const decodeGlobalConfigSync = Schema.decodeUnknownSync(GlobalConfig, configParseOptions);
+const decodeProjectConfigSync = Schema.decodeUnknownSync(ProjectConfig, configParseOptions);
+
 const projectKey = ProjectKey.make('github.com/f-elix/ship');
 const baseSha = GitSha.make('a'.repeat(40));
 const newRun = { projectKey, cwd: '/repo', planDir: '/plans/feature', branch: 'feature', baseSha };
@@ -45,6 +52,7 @@ const runState = (runId: RunId): RunState => ({
 	planDir: '/plans/feature',
 	branch: 'feature',
 	baseSha,
+	config: resolveConfig(decodeGlobalConfigSync({}), decodeProjectConfigSync({})),
 	implementerSessionId: null,
 	round: 1,
 	checkFixAttempts: 0,

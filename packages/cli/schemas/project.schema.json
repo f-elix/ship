@@ -23,7 +23,7 @@
 					"fix": {
 						"type": "string",
 						"minLength": 1,
-						"description": "Shell command run before an LLM fix when the check fails; `{files}` expands to the changed files"
+						"description": "Shell command run just before the check on every pass except the baseline, so an LLM fix only sees what it leaves failing; `{files}` expands to the changed files"
 					},
 					"lock": {
 						"type": "string",
@@ -39,6 +39,11 @@
 				"additionalProperties": false
 			},
 			"default": []
+		},
+		"format": {
+			"type": "string",
+			"minLength": 1,
+			"description": "Shell command run on the changed files after every agent step, before checks; `{files}` expands to the changed files"
 		},
 		"reviewers": {
 			"type": "object",

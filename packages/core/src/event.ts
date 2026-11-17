@@ -21,7 +21,7 @@ import { EscalationReason, Summary } from './run.ts';
 
 const at = { at: Timestamp };
 
-/** `run` is the check's command; `fix` is its fix command, run before an LLM fix. */
+/** `run` is the check's command; `fix` is its fix command, run just before `run`. */
 const CheckCommand = Schema.Literals(['run', 'fix']);
 
 const checkFields = {
@@ -68,7 +68,12 @@ export const RunEvent = Schema.TaggedUnion({
 		/** Trimmed tail of the combined output. */
 		outputTail: Schema.String
 	},
-	LockWaiting: { ...at, ...lockFields },
+	LockWaiting: {
+		...at,
+		...lockFields,
+		/** 1-based place in the resource's queue when the wait began. */
+		position: Schema.optionalKey(PositiveInt)
+	},
 	LockAcquired: { ...at, ...lockFields, waitedMs: Millis },
 	LockReleased: { ...at, ...lockFields },
 	/** Reviewers routed for the round and the range they review, `fromSha..toSha`. */

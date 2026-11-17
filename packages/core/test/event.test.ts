@@ -18,6 +18,7 @@ import {
 	jsonRoundTrip,
 	nit,
 	projectKey,
+	resolvedConfig,
 	runId,
 	sessionId,
 	verifiedFinding
@@ -150,6 +151,7 @@ describe('run domain', () => {
 			planDir: '/plans/feature',
 			branch: 'feature',
 			baseSha,
+			config: resolvedConfig,
 			implementerSessionId: sessionId,
 			round: 2,
 			checkFixAttempts: 1,

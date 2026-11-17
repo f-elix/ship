@@ -1,6 +1,6 @@
-import { Duration, Schema, SchemaGetter, SchemaTransformation, Struct } from 'effect';
+import { Duration, Record, Schema, SchemaGetter, SchemaTransformation, Struct } from 'effect';
 import { withDefault } from './defaults.ts';
-import { ModelId, NonNegativeInt, PositiveInt, type Step } from './primitives.ts';
+import { Millis, ModelId, NonNegativeInt, PositiveInt, type Step } from './primitives.ts';
 import { ReviewerName } from './reviewer.ts';
 
 /** Decode options for config files: unknown keys are errors, so typos do not pass silently. */
@@ -24,7 +24,7 @@ const LockPermits = Schema.Record(LockResource, PositiveInt);
  * Permits per lock resource. `cpu` always exists (2 permits unless overridden),
  * so declaring `{ "db": 1 }` keeps the default `cpu` resource.
  */
-export const Locks = LockPermits.pipe(
+export const LockPermitsConfig = LockPermits.pipe(
 	Schema.decodeTo(
 		LockPermits,
 		SchemaTransformation.transform<typeof LockPermits.Type, typeof LockPermits.Type>({
@@ -48,7 +48,7 @@ export const Check = Schema.Struct({
 	fix: Schema.optionalKey(
 		Schema.NonEmptyString.annotate({
 			description:
-				'Shell command run before an LLM fix when the check fails; `{files}` expands to the changed files'
+				'Shell command run just before the check on every pass except the baseline, so an LLM fix only sees what it leaves failing; `{files}` expands to the changed files'
 		})
 	),
 	lock: LockResource.pipe(
@@ -172,7 +172,7 @@ const TIMEOUTS_DESCRIPTION = 'Timeout per step; time spent waiting for a lock do
 
 export const GlobalConfig = Schema.Struct({
 	$schema: SchemaRef,
-	locks: Locks,
+	locks: LockPermitsConfig,
 	models: Models.pipe(withDefault({}, MODELS_DESCRIPTION)),
 	caps: Caps.pipe(withDefault({}, CAPS_DESCRIPTION)),
 	timeouts: Timeouts.pipe(withDefault({}, TIMEOUTS_DESCRIPTION))
@@ -208,6 +208,12 @@ const uniqueCheckNames = Schema.makeFilter(
 export const ProjectConfig = Schema.Struct({
 	$schema: SchemaRef,
 	checks: Schema.Array(Check).check(uniqueCheckNames).pipe(withDefault([])),
+	format: Schema.optionalKey(
+		Schema.NonEmptyString.annotate({
+			description:
+				'Shell command run on the changed files after every agent step, before checks; `{files}` expands to the changed files'
+		})
+	),
 	reviewers: ReviewersConfig.pipe(withDefault({})),
 	pr: PrConfig.pipe(withDefault({})),
 	models: Schema.optionalKey(
@@ -227,6 +233,40 @@ export const ProjectConfig = Schema.Struct({
 	)
 }).annotate({ title: 'ship project config', description: '~/.ship/projects/<project>.json' });
 export interface ProjectConfig extends Schema.Schema.Type<typeof ProjectConfig> {}
+
+// --- Resolved config: what a run uses ---
+
+/**
+ * The global config with the project's overrides applied, stored in `RunState` when a
+ * run is created so a later config edit does not change a run in flight.
+ *
+ * Lock permits are left out: they belong to the daemon's semaphores, not to a run.
+ * Timeouts are milliseconds, so the value stays the same through the snapshot's JSON.
+ */
+export const ResolvedConfig = Schema.Struct({
+	models: Schema.Struct(modelFields),
+	caps: Schema.Struct(capFields),
+	timeouts: Schema.Struct(Record.map(timeoutFields, () => Millis)),
+	checks: Schema.Array(Check),
+	format: Schema.NullOr(Schema.NonEmptyString),
+	reviewers: ReviewersConfig,
+	pr: PrConfig
+});
+export interface ResolvedConfig extends Schema.Schema.Type<typeof ResolvedConfig> {}
+
+/** Applies the project's overrides to the global config. */
+export const resolveConfig = (global: GlobalConfig, project: ProjectConfig): ResolvedConfig => {
+	const timeouts = { ...global.timeouts, ...project.timeouts };
+	return {
+		models: { ...global.models, ...project.models },
+		caps: { ...global.caps, ...project.caps },
+		timeouts: Record.map(timeouts, Duration.toMillis),
+		checks: project.checks,
+		format: project.format ?? null,
+		reviewers: project.reviewers,
+		pr: project.pr
+	};
+};
 
 export const decodeGlobalConfig = (input: unknown) =>
 	Schema.decodeUnknownEffect(GlobalConfig, configParseOptions)(input);
