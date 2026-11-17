@@ -13,6 +13,8 @@ pnpm check   # lint, typecheck, tests, format check
 pnpm build   # bundles packages/cli to dist/bin.mjs
 ```
 
+ship keeps its config, run store and daemon socket in `~/.ship`; set `SHIP_HOME` to use another directory.
+
 | Package           | Role                                                           |
 | ----------------- | -------------------------------------------------------------- |
 | `packages/core`   | Pipeline state machine, step actors, services, RPC contract    |

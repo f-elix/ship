@@ -21,12 +21,12 @@ import type {
 	RunState,
 	UnresolvedFindings
 } from './run.ts';
-import { ShipHome } from './ship-paths.ts';
+import { PLAN_FILES, ShipHome } from './ship-paths.ts';
 
 // --- Shared helpers ---
 
-const specPath = (state: RunState) => `${state.planDir}/spec.md`;
-const planPath = (state: RunState) => `${state.planDir}/implementation-plan.md`;
+const specPath = (state: RunState) => `${state.planDir}/${PLAN_FILES.spec}`;
+const planPath = (state: RunState) => `${state.planDir}/${PLAN_FILES.plan}`;
 const planName = (state: RunState) => state.planDir.slice(state.planDir.lastIndexOf('/') + 1);
 
 /** The message of the round's commit, and of the single commit a squash leaves. */
