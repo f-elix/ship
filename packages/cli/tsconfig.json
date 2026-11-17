@@ -5,6 +5,16 @@
 		"outDir": "../../node_modules/.tsc/cli",
 		"resolveJsonModule": true
 	},
-	"include": ["src", "test", "package.json"],
-	"references": [{ "path": "../core" }, { "path": "../store" }, { "path": "../daemon" }]
+	"include": ["src", "scripts", "test", "package.json"],
+	"references": [
+		{
+			"path": "../core"
+		},
+		{
+			"path": "../store"
+		},
+		{
+			"path": "../daemon"
+		}
+	]
 }

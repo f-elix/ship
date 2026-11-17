@@ -9,6 +9,7 @@
 	},
 	"scripts": {
 		"build": "pnpm --filter @f-elix/ship build",
+		"gen:schemas": "node packages/cli/scripts/gen-schemas.ts",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"lint": "oxlint --max-warnings 0",

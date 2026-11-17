@@ -1,0 +1,245 @@
+import { Duration, Schema, SchemaGetter, SchemaTransformation, Struct } from 'effect';
+import { withDefault } from './defaults.ts';
+import { ModelId, NonNegativeInt, PositiveInt, type Step } from './primitives.ts';
+import { ReviewerName } from './reviewer.ts';
+
+/** Decode options for config files: unknown keys are errors, so typos do not pass silently. */
+export const configParseOptions = { onExcessProperty: 'error' } as const;
+
+const SchemaRef = Schema.optionalKey(
+	Schema.String.annotate({ description: 'JSON Schema reference for editor completion' })
+);
+
+// --- Locks ---
+
+export const LockResource = Schema.String.check(
+	Schema.isPattern(/^[a-z][a-z0-9-]*$/u, { expected: 'a lowercase lock resource name' })
+);
+
+export const DEFAULT_LOCK_RESOURCE = 'cpu';
+
+const LockPermits = Schema.Record(LockResource, PositiveInt);
+
+/**
+ * Permits per lock resource. `cpu` always exists (2 permits unless overridden),
+ * so declaring `{ "db": 1 }` keeps the default `cpu` resource.
+ */
+export const Locks = LockPermits.pipe(
+	Schema.decodeTo(
+		LockPermits,
+		SchemaTransformation.transform<typeof LockPermits.Type, typeof LockPermits.Type>({
+			decode: (permits) => ({ [DEFAULT_LOCK_RESOURCE]: 2, ...permits }),
+			encode: (permits) => permits
+		})
+	),
+	withDefault(
+		{},
+		'Concurrent check permits per lock resource; `cpu` defaults to 2 when not declared'
+	)
+);
+
+// --- Check ---
+
+export const Check = Schema.Struct({
+	name: Schema.NonEmptyString,
+	run: Schema.NonEmptyString.annotate({
+		description: 'Shell command; `{files}` expands to the changed files'
+	}),
+	fix: Schema.optionalKey(
+		Schema.NonEmptyString.annotate({
+			description:
+				'Shell command run before an LLM fix when the check fails; `{files}` expands to the changed files'
+		})
+	),
+	lock: LockResource.pipe(
+		withDefault(DEFAULT_LOCK_RESOURCE, 'Lock resource held while the check runs')
+	)
+});
+export interface Check extends Schema.Schema.Type<typeof Check> {}
+
+// --- Models, caps, timeouts ---
+// Each group has field schemas without defaults (reused for project overrides)
+// and a global struct that fills every field.
+
+// `fixChecks` resumes the implementer session with the `fix` model; `escalate` writes
+// its PR body with the `pr` model. `baseline`, `checks` and `triage` run no agent.
+const modelFields = {
+	implement: ModelId,
+	fix: ModelId,
+	route: ModelId,
+	review: ModelId,
+	verify: ModelId,
+	pr: ModelId
+};
+
+export const Models = Schema.Struct(
+	Struct.evolve(modelFields, {
+		implement: withDefault('opus'),
+		fix: withDefault('opus'),
+		route: withDefault('haiku'),
+		review: withDefault('sonnet'),
+		verify: withDefault('opus'),
+		pr: withDefault('haiku')
+	})
+);
+export interface Models extends Schema.Schema.Type<typeof Models> {}
+
+const capFields = {
+	checkFixAttempts: NonNegativeInt.annotate({
+		description: 'Check-fix attempts per round before escalating (M)'
+	}),
+	reviewRounds: PositiveInt.annotate({ description: 'Review rounds before escalating (N)' })
+};
+
+export const Caps = Schema.Struct(
+	Struct.evolve(capFields, {
+		checkFixAttempts: withDefault(3),
+		reviewRounds: withDefault(3)
+	})
+);
+export interface Caps extends Schema.Schema.Type<typeof Caps> {}
+
+const TIMEOUT_PATTERN = /^\d+(?:\.\d+)?\s+(?:seconds?|minutes?|hours?)$/u;
+
+const formatTimeout = (duration: Duration.Duration): string => {
+	const ms = Duration.toMillis(duration);
+	const [amount, unit] =
+		ms % 3_600_000 === 0
+			? [ms / 3_600_000, 'hour']
+			: ms % 60_000 === 0
+				? [ms / 60_000, 'minute']
+				: [ms / 1000, 'second'];
+	return `${amount} ${unit}${amount === 1 ? '' : 's'}`;
+};
+
+/**
+ * A step timeout written as `"<amount> <unit>"` with unit seconds, minutes or hours,
+ * e.g. `"20 minutes"`. Decodes to a `Duration` and encodes back to the largest whole unit.
+ */
+export const Timeout = Schema.String.check(
+	Schema.isPattern(TIMEOUT_PATTERN, {
+		expected: 'a duration such as "90 seconds", "20 minutes" or "1 hour"'
+	})
+).pipe(
+	Schema.decodeTo(
+		Schema.Duration.check(
+			Schema.makeFilter((d: Duration.Duration) => Duration.isPositive(d), {
+				expected: 'a positive duration'
+			})
+		),
+		new SchemaTransformation.Transformation(
+			SchemaTransformation.durationFromString.decode,
+			SchemaGetter.transform(formatTimeout)
+		)
+	)
+);
+
+// Every step except the deterministic `triage` has a timeout.
+const timeoutFields = {
+	baseline: Timeout,
+	implement: Timeout,
+	checks: Timeout,
+	fixChecks: Timeout,
+	route: Timeout,
+	review: Timeout,
+	verify: Timeout,
+	fix: Timeout,
+	escalate: Timeout,
+	pr: Timeout
+} satisfies Record<Exclude<Step, 'triage'>, typeof Timeout>;
+
+export const Timeouts = Schema.Struct(
+	Struct.evolve(timeoutFields, {
+		baseline: withDefault('30 minutes'),
+		implement: withDefault('1 hour'),
+		checks: withDefault('30 minutes'),
+		fixChecks: withDefault('20 minutes'),
+		route: withDefault('5 minutes'),
+		review: withDefault('20 minutes'),
+		verify: withDefault('15 minutes'),
+		fix: withDefault('30 minutes'),
+		escalate: withDefault('10 minutes'),
+		pr: withDefault('10 minutes')
+	})
+);
+export interface Timeouts extends Schema.Schema.Type<typeof Timeouts> {}
+
+const MODELS_DESCRIPTION = 'Agent model per step';
+const CAPS_DESCRIPTION = 'Loop caps before escalating';
+const TIMEOUTS_DESCRIPTION = 'Timeout per step; time spent waiting for a lock does not count';
+
+// --- Global config: ~/.ship/config.json ---
+
+export const GlobalConfig = Schema.Struct({
+	$schema: SchemaRef,
+	locks: Locks,
+	models: Models.pipe(withDefault({}, MODELS_DESCRIPTION)),
+	caps: Caps.pipe(withDefault({}, CAPS_DESCRIPTION)),
+	timeouts: Timeouts.pipe(withDefault({}, TIMEOUTS_DESCRIPTION))
+}).annotate({ title: 'ship global config', description: '~/.ship/config.json' });
+export interface GlobalConfig extends Schema.Schema.Type<typeof GlobalConfig> {}
+
+// --- Project config: ~/.ship/projects/<project>.json ---
+
+export const ReviewersConfig = Schema.Struct({
+	disable: Schema.Array(ReviewerName).pipe(
+		withDefault([], 'Built-in reviewers to disable, by name')
+	),
+	llmRouter: Schema.Boolean.pipe(
+		withDefault(true, 'Run the LLM router after the deterministic triggers')
+	)
+});
+export interface ReviewersConfig extends Schema.Schema.Type<typeof ReviewersConfig> {}
+
+export const PrConfig = Schema.Struct({
+	draft: Schema.Boolean.pipe(
+		withDefault(true, 'Open the PR as a draft; always a draft when escalated')
+	),
+	squash: Schema.Boolean.pipe(withDefault(true, 'Squash to one commit before opening the PR'))
+});
+export interface PrConfig extends Schema.Schema.Type<typeof PrConfig> {}
+
+const uniqueCheckNames = Schema.makeFilter(
+	(checks: ReadonlyArray<Check>) =>
+		new Set(checks.map((check) => check.name)).size === checks.length,
+	{ expected: 'checks with unique names' }
+);
+
+export const ProjectConfig = Schema.Struct({
+	$schema: SchemaRef,
+	checks: Schema.Array(Check).check(uniqueCheckNames).pipe(withDefault([])),
+	reviewers: ReviewersConfig.pipe(withDefault({})),
+	pr: PrConfig.pipe(withDefault({})),
+	models: Schema.optionalKey(
+		Schema.Struct(Struct.map(modelFields, Schema.optionalKey)).annotate({
+			description: `${MODELS_DESCRIPTION}; overrides the global config`
+		})
+	),
+	caps: Schema.optionalKey(
+		Schema.Struct(Struct.map(capFields, Schema.optionalKey)).annotate({
+			description: `${CAPS_DESCRIPTION}; overrides the global config`
+		})
+	),
+	timeouts: Schema.optionalKey(
+		Schema.Struct(Struct.map(timeoutFields, Schema.optionalKey)).annotate({
+			description: `${TIMEOUTS_DESCRIPTION}; overrides the global config`
+		})
+	)
+}).annotate({ title: 'ship project config', description: '~/.ship/projects/<project>.json' });
+export interface ProjectConfig extends Schema.Schema.Type<typeof ProjectConfig> {}
+
+export const decodeGlobalConfig = (input: unknown) =>
+	Schema.decodeUnknownEffect(GlobalConfig, configParseOptions)(input);
+
+export const decodeProjectConfig = (input: unknown) =>
+	Schema.decodeUnknownEffect(ProjectConfig, configParseOptions)(input);
+
+/**
+ * Checks whose lock resource has no permits in the global config. A config loader
+ * reports these, since a check on an undeclared resource could never acquire its lock.
+ */
+export const checksWithUnknownLock = (
+	global: GlobalConfig,
+	project: ProjectConfig
+): ReadonlyArray<Check> =>
+	project.checks.filter((check) => !Object.hasOwn(global.locks, check.lock));
