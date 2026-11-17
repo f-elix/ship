@@ -1,0 +1,39 @@
+{
+	"name": "@f-elix/ship",
+	"version": "0.0.0",
+	"description": "Runs the implement, checks, review, fix and PR loop for coding agents",
+	"license": "MIT",
+	"author": "Felix Guérin",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/f-elix/ship.git",
+		"directory": "packages/cli"
+	},
+	"type": "module",
+	"bin": {
+		"ship": "./dist/bin.mjs"
+	},
+	"files": [
+		"dist"
+	],
+	"engines": {
+		"node": ">=24.11"
+	},
+	"scripts": {
+		"build": "tsdown",
+		"prepack": "tsdown"
+	},
+	"dependencies": {
+		"@anthropic-ai/claude-agent-sdk": "0.3.326",
+		"@effect/platform-node": "4.1.4",
+		"@effect/sql-sqlite-node": "4.1.4",
+		"@xstate/effect": "1.0.0-beta.2",
+		"effect": "4.1.4",
+		"xstate": "6.0.0-beta.3"
+	},
+	"devDependencies": {
+		"@ship/core": "workspace:*",
+		"@ship/daemon": "workspace:*",
+		"@ship/store": "workspace:*"
+	}
+}

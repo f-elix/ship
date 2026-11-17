@@ -1,0 +1,15 @@
+{
+	"name": "@ship/daemon",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@effect/platform-node": "4.1.4",
+		"@ship/core": "workspace:*",
+		"@ship/store": "workspace:*",
+		"effect": "4.1.4"
+	}
+}

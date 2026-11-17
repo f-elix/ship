@@ -1,0 +1,10 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"rootDir": ".",
+		"outDir": "../../node_modules/.tsc/cli",
+		"resolveJsonModule": true
+	},
+	"include": ["src", "test", "package.json"],
+	"references": [{ "path": "../core" }, { "path": "../store" }, { "path": "../daemon" }]
+}

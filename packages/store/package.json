@@ -1,0 +1,14 @@
+{
+	"name": "@ship/store",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@effect/sql-sqlite-node": "4.1.4",
+		"@ship/core": "workspace:*",
+		"effect": "4.1.4"
+	}
+}
