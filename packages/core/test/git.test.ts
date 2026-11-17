@@ -1,6 +1,6 @@
 import { assert, describe, expect, it } from '@effect/vitest';
-import { Effect, Exit } from 'effect';
-import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { Effect } from 'effect';
+import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	Git,
@@ -225,48 +225,6 @@ describe('Git', () => {
 			const lines = readFileSync(excludeFile, 'utf8').trimEnd().split('\n');
 			expect(lines.slice(-2)).toEqual(['/plans/feature \\[1\\]/', '/notes.md']);
 			expect(run('status', '--porcelain')).toBe('');
-		}).pipe(Effect.scoped, Effect.provide(GitLive))
-	);
-
-	it.effect('opens a detached worktree and removes it when the scope closes', () =>
-		Effect.gen(function* () {
-			const { dir, git: run, write, repo } = yield* tempRepo;
-			const git = yield* Git;
-			const base = sha(run('rev-parse', 'HEAD'));
-			write('later.txt', 'later\n');
-			yield* git.commit(repo, 'Later');
-			const path = join(dir, 'runs/run-1/baseline');
-
-			// A leftover from an interrupted run is replaced.
-			mkdirSync(path, { recursive: true });
-			const opened = yield* Effect.scoped(
-				Effect.gen(function* () {
-					const worktree = yield* git.worktree(repo, { path, sha: base });
-					expect(existsSync(join(worktree, 'README.md'))).toBe(true);
-					expect(existsSync(join(worktree, 'later.txt'))).toBe(false);
-					expect(yield* git.headSha({ ...repo, cwd: worktree })).toBe(base);
-					return worktree;
-				})
-			);
-			expect(opened).toBe(path);
-			expect(existsSync(path)).toBe(false);
-			expect(run('worktree', 'list', '--porcelain')).not.toContain(path);
-		}).pipe(Effect.scoped, Effect.provide(GitLive))
-	);
-
-	it.effect('removes the worktree when interrupted', () =>
-		Effect.gen(function* () {
-			const { dir, git: run, repo } = yield* tempRepo;
-			const git = yield* Git;
-			const path = join(dir, 'baseline');
-			const exit = yield* Effect.scoped(
-				Effect.andThen(
-					git.worktree(repo, { path, sha: sha(run('rev-parse', 'HEAD')) }),
-					Effect.interrupt
-				)
-			).pipe(Effect.exit);
-			expect(Exit.hasInterrupts(exit)).toBe(true);
-			expect(existsSync(path)).toBe(false);
 		}).pipe(Effect.scoped, Effect.provide(GitLive))
 	);
 });

@@ -1,3 +1,4 @@
+import { Context, Layer } from 'effect';
 import type { ProjectKey, RunId } from './primitives.ts';
 import { projectKeySegments } from './project-key.ts';
 
@@ -17,9 +18,12 @@ export const shipPaths = (home: string) => {
 		db: `${home}/ship.db`,
 		socket: `${home}/daemon.sock`,
 		run,
-		transcripts: (runId: RunId) => `${run(runId)}/transcripts`,
-		/** Temporary worktree at the base commit for the baseline checks. */
-		baseline: (runId: RunId) => `${run(runId)}/baseline`
+		transcripts: (runId: RunId) => `${run(runId)}/transcripts`
 	};
 };
 export type ShipPaths = ReturnType<typeof shipPaths>;
+
+/** Ship's home directory paths, for steps that read reviewers or write transcripts. */
+export class ShipHome extends Context.Service<ShipHome, ShipPaths>()('@ship/core/ShipHome') {
+	static readonly layer = (home: string) => Layer.succeed(this, shipPaths(home));
+}

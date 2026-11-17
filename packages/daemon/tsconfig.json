@@ -4,6 +4,6 @@
 		"rootDir": ".",
 		"outDir": "../../node_modules/.tsc/daemon"
 	},
-	"include": ["src"],
+	"include": ["src", "test"],
 	"references": [{ "path": "../core" }, { "path": "../store" }]
 }

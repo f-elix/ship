@@ -1,4 +1,4 @@
-import { Context, Effect, FileSystem, Layer, Schema, type Scope } from 'effect';
+import { Context, Effect, FileSystem, Layer, Schema } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import { GitSha, type Env, type ProjectKey } from './primitives.ts';
 import { exec, type ProcessOutput } from './process.ts';
@@ -105,14 +105,6 @@ export interface GitShape {
 	 * when it was already listed or lies outside the repo.
 	 */
 	readonly excludePath: (repo: GitRepo, path: string) => Effect.Effect<boolean, GitError>;
-	/**
-	 * A detached worktree of `sha` at `path`, removed when the scope closes. A leftover
-	 * worktree at `path` from an interrupted run is removed first.
-	 */
-	readonly worktree: (
-		repo: GitRepo,
-		options: { readonly path: string; readonly sha: GitSha }
-	) => Effect.Effect<string, GitError, Scope.Scope>;
 }
 
 // --- Parsing ---
@@ -491,36 +483,6 @@ const make = Effect.gen(function* () {
 		return true;
 	});
 
-	const removeWorktree = (repo: GitRepo, path: string) =>
-		// Each step is best effort and runs even when the one before it failed.
-		Effect.forEach(
-			[
-				runWith(repo, ['worktree', 'remove', '--force', path], [0, 128]),
-				fs.remove(path, { recursive: true, force: true }),
-				run(repo, ['worktree', 'prune'])
-			],
-			(step) => Effect.ignore(step, { log: true }),
-			{ discard: true }
-		);
-
-	const worktree = Effect.fn('Git.worktree')(function* (
-		repo: GitRepo,
-		options: { readonly path: string; readonly sha: GitSha }
-	) {
-		const { path, sha } = options;
-		return yield* Effect.acquireRelease(
-			Effect.gen(function* () {
-				yield* removeWorktree(repo, path);
-				yield* fs
-					.makeDirectory(path.slice(0, path.lastIndexOf('/')), { recursive: true })
-					.pipe(Effect.mapError(fsError(repo, ['worktree', 'add', path])));
-				yield* run(repo, ['worktree', 'add', '--detach', '--quiet', path, sha]);
-				return path;
-			}),
-			() => removeWorktree(repo, path)
-		);
-	});
-
 	return Git.of({
 		repoRoot,
 		originUrl,
@@ -537,8 +499,7 @@ const make = Effect.gen(function* () {
 		commit,
 		squash,
 		push,
-		excludePath,
-		worktree
+		excludePath
 	});
 });
 

@@ -1,17 +1,4 @@
-import type { Env, RunState } from '@ship/core';
-
-/**
- * A persisted machine snapshot, as XState's `getPersistedSnapshot()` returns it, around a
- * `RunState` context. Keys other than `value` and `context` are stored as they are.
- *
- * The caller's env is recognized by its key: anything that carries it, such as an invoked
- * actor's input, must hold it in a property named `env`, never spread or renamed.
- */
-export type PersistedRunSnapshot = {
-	readonly value: unknown;
-	readonly context: RunState;
-	readonly [key: string]: unknown;
-};
+import type { Env, PersistedRunSnapshot } from '@ship/core';
 
 /** Where a stripped `env` property sat, as keys from the snapshot root. */
 export type EnvPath = ReadonlyArray<string>;

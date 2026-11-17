@@ -1,6 +1,6 @@
 import { Schema } from 'effect';
 import { ResolvedConfig } from './config.ts';
-import { VerifiedFinding } from './finding.ts';
+import { Finding, VerifiedFinding } from './finding.ts';
 import {
 	AbsolutePath,
 	CostUsd,
@@ -32,7 +32,13 @@ export type RunStatus = typeof RunStatus.Type;
 export const TerminalRunStatus = RunStatus.pick(['done', 'escalated', 'failed', 'cancelled']);
 export type TerminalRunStatus = typeof TerminalRunStatus.Type;
 
-export const EscalationReason = Schema.Literals(['check-fix-cap', 'review-cap', 'stall']);
+/** `timeout`: a step timed out after the run had already committed work. */
+export const EscalationReason = Schema.Literals([
+	'check-fix-cap',
+	'review-cap',
+	'stall',
+	'timeout'
+]);
 export type EscalationReason = typeof EscalationReason.Type;
 
 export const CheckResult = Schema.Struct({
@@ -73,6 +79,20 @@ export const UnresolvedFindings = Schema.Struct({
 export interface UnresolvedFindings extends Schema.Schema.Type<typeof UnresolvedFindings> {}
 
 /**
+ * The review round in progress, from `route` until `verify` turns it into a
+ * {@link ReviewRound}: what `review` runs and what `verify` checks.
+ */
+export const ReviewInProgress = Schema.Struct({
+	round: PositiveInt,
+	fromSha: GitSha,
+	toSha: GitSha,
+	reviewers: Schema.Array(ReviewerName),
+	/** What the reviewers reported; empty until `review` ends. */
+	findings: Schema.Array(Finding)
+});
+export interface ReviewInProgress extends Schema.Schema.Type<typeof ReviewInProgress> {}
+
+/**
  * A session the next call can resume, with the session's running cost total so the next
  * call's own cost can be told apart. Persisted whole as the implementer session.
  */
@@ -104,12 +124,19 @@ export const RunState = Schema.Struct({
 	/** Check-fix attempts in the current round. */
 	checkFixAttempts: NonNegativeInt,
 	lastReviewedSha: Schema.NullOr(GitSha),
+	review: Schema.NullOr(ReviewInProgress),
 	reviewRounds: Schema.Array(ReviewRound),
 	unresolved: UnresolvedFindings,
 	checks: Schema.Array(CheckRound),
+	/**
+	 * Running cost for display while the run is live. The summary sums the `AgentCost`
+	 * events instead, which also count a step's spending before a resume re-ran it.
+	 */
 	costUsd: CostUsd,
 	prUrl: Schema.NullOr(Url),
-	escalationReason: Schema.NullOr(EscalationReason)
+	escalationReason: Schema.NullOr(EscalationReason),
+	/** Why the run failed; set only when it ends `failed`. */
+	error: Schema.NullOr(Schema.String)
 });
 export interface RunState extends Schema.Schema.Type<typeof RunState> {}
 
