@@ -19,6 +19,7 @@ export const AbsolutePath = Schema.String.check(
 
 /** The caller's environment (`PATH`, etc.); checks and agents run with it, not the daemon's. */
 export const Env = Schema.Record(Schema.String, Schema.String);
+export type Env = typeof Env.Type;
 
 export const Url = Schema.String.check(
 	Schema.isPattern(/^https?:\/\/\S+$/u, { expected: 'an http(s) URL' })

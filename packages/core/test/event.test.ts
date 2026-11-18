@@ -6,6 +6,7 @@ import {
 	RunEventEnvelope,
 	RunState,
 	Summary,
+	UnknownEvent,
 	type RunEvent as RunEventType
 } from '../src/index.ts';
 import {
@@ -105,6 +106,19 @@ describe('RunEvent', () => {
 			const envelope = { runId, seq: index + 1, event };
 			expect(jsonRoundTrip(RunEventEnvelope, envelope)).toEqual(envelope);
 		});
+	});
+
+	it('round-trips an unknown event inside an envelope', () => {
+		const envelope = {
+			runId,
+			seq: 3,
+			event: UnknownEvent.make({
+				type: 'RunExploded',
+				json: '{"_tag":"RunExploded"}',
+				error: 'x'
+			})
+		};
+		expect(jsonRoundTrip(RunEventEnvelope, envelope)).toEqual(envelope);
 	});
 
 	it('encodes timestamps as ISO strings', () => {
