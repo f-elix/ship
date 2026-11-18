@@ -14,7 +14,8 @@
 		"ship": "./dist/bin.mjs"
 	},
 	"files": [
-		"dist"
+		"dist",
+		"schemas"
 	],
 	"engines": {
 		"node": ">=26.13"

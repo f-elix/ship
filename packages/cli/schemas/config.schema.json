@@ -1,0 +1,144 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"type": "object",
+	"properties": {
+		"$schema": {
+			"type": "string",
+			"description": "JSON Schema reference for editor completion"
+		},
+		"locks": {
+			"type": "object",
+			"patternProperties": {
+				"^[a-z][a-z0-9-]*$": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				}
+			},
+			"additionalProperties": false,
+			"description": "Concurrent check permits per lock resource; `cpu` defaults to 2 when not declared",
+			"default": {}
+		},
+		"models": {
+			"type": "object",
+			"properties": {
+				"implement": {
+					"type": "string",
+					"minLength": 1,
+					"default": "opus"
+				},
+				"fix": {
+					"type": "string",
+					"minLength": 1,
+					"default": "opus"
+				},
+				"route": {
+					"type": "string",
+					"minLength": 1,
+					"default": "haiku"
+				},
+				"review": {
+					"type": "string",
+					"minLength": 1,
+					"default": "sonnet"
+				},
+				"verify": {
+					"type": "string",
+					"minLength": 1,
+					"default": "opus"
+				},
+				"pr": {
+					"type": "string",
+					"minLength": 1,
+					"default": "haiku"
+				}
+			},
+			"additionalProperties": false,
+			"description": "Agent model per step",
+			"default": {}
+		},
+		"caps": {
+			"type": "object",
+			"properties": {
+				"checkFixAttempts": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991,
+					"description": "Check-fix attempts per round before escalating (M)",
+					"default": 3
+				},
+				"reviewRounds": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"description": "Review rounds before escalating (N)",
+					"default": 3
+				}
+			},
+			"additionalProperties": false,
+			"description": "Loop caps before escalating",
+			"default": {}
+		},
+		"timeouts": {
+			"type": "object",
+			"properties": {
+				"baseline": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "30 minutes"
+				},
+				"implement": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "1 hour"
+				},
+				"checks": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "30 minutes"
+				},
+				"fixChecks": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "20 minutes"
+				},
+				"route": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "5 minutes"
+				},
+				"review": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "20 minutes"
+				},
+				"verify": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "15 minutes"
+				},
+				"fix": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "30 minutes"
+				},
+				"escalate": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "10 minutes"
+				},
+				"pr": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$",
+					"default": "10 minutes"
+				}
+			},
+			"additionalProperties": false,
+			"description": "Timeout per step; time spent waiting for a lock does not count",
+			"default": {}
+		}
+	},
+	"additionalProperties": false,
+	"title": "ship global config",
+	"description": "~/.ship/config.json"
+}

@@ -4,6 +4,6 @@
 		"rootDir": ".",
 		"outDir": "../../node_modules/.tsc/core"
 	},
-	"include": ["src"],
+	"include": ["src", "test"],
 	"references": []
 }

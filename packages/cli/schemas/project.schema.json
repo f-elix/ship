@@ -1,0 +1,182 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"type": "object",
+	"properties": {
+		"$schema": {
+			"type": "string",
+			"description": "JSON Schema reference for editor completion"
+		},
+		"checks": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"name": {
+						"type": "string",
+						"minLength": 1
+					},
+					"run": {
+						"type": "string",
+						"minLength": 1,
+						"description": "Shell command; `{files}` expands to the changed files"
+					},
+					"fix": {
+						"type": "string",
+						"minLength": 1,
+						"description": "Shell command run before an LLM fix when the check fails; `{files}` expands to the changed files"
+					},
+					"lock": {
+						"type": "string",
+						"pattern": "^[a-z][a-z0-9-]*$",
+						"description": "Lock resource held while the check runs",
+						"default": "cpu"
+					}
+				},
+				"required": [
+					"name",
+					"run"
+				],
+				"additionalProperties": false
+			},
+			"default": []
+		},
+		"reviewers": {
+			"type": "object",
+			"properties": {
+				"disable": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+					},
+					"description": "Built-in reviewers to disable, by name",
+					"default": []
+				},
+				"llmRouter": {
+					"type": "boolean",
+					"description": "Run the LLM router after the deterministic triggers",
+					"default": true
+				}
+			},
+			"additionalProperties": false,
+			"default": {}
+		},
+		"pr": {
+			"type": "object",
+			"properties": {
+				"draft": {
+					"type": "boolean",
+					"description": "Open the PR as a draft; always a draft when escalated",
+					"default": true
+				},
+				"squash": {
+					"type": "boolean",
+					"description": "Squash to one commit before opening the PR",
+					"default": true
+				}
+			},
+			"additionalProperties": false,
+			"default": {}
+		},
+		"models": {
+			"type": "object",
+			"properties": {
+				"implement": {
+					"type": "string",
+					"minLength": 1
+				},
+				"fix": {
+					"type": "string",
+					"minLength": 1
+				},
+				"route": {
+					"type": "string",
+					"minLength": 1
+				},
+				"review": {
+					"type": "string",
+					"minLength": 1
+				},
+				"verify": {
+					"type": "string",
+					"minLength": 1
+				},
+				"pr": {
+					"type": "string",
+					"minLength": 1
+				}
+			},
+			"additionalProperties": false,
+			"description": "Agent model per step; overrides the global config"
+		},
+		"caps": {
+			"type": "object",
+			"properties": {
+				"checkFixAttempts": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991,
+					"description": "Check-fix attempts per round before escalating (M)"
+				},
+				"reviewRounds": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991,
+					"description": "Review rounds before escalating (N)"
+				}
+			},
+			"additionalProperties": false,
+			"description": "Loop caps before escalating; overrides the global config"
+		},
+		"timeouts": {
+			"type": "object",
+			"properties": {
+				"baseline": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				},
+				"implement": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				},
+				"checks": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				},
+				"fixChecks": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				},
+				"route": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				},
+				"review": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				},
+				"verify": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				},
+				"fix": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				},
+				"escalate": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				},
+				"pr": {
+					"type": "string",
+					"pattern": "^\\d+(?:\\.\\d+)?\\s+(?:seconds?|minutes?|hours?)$"
+				}
+			},
+			"additionalProperties": false,
+			"description": "Timeout per step; time spent waiting for a lock does not count; overrides the global config"
+		}
+	},
+	"additionalProperties": false,
+	"title": "ship project config",
+	"description": "~/.ship/projects/<project>.json"
+}
