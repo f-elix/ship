@@ -1,7 +1,7 @@
 import { Clock, Context, DateTime, Duration, Effect, Layer, Schema } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
-import type { Check } from './config.ts';
-import type { RunEvent } from './event.ts';
+import type { Check, ResolvedConfig } from './config.ts';
+import type { CheckEvent } from './event.ts';
 import type { ChangedFile } from './git.ts';
 import { LockEvent, Locks, type UnknownLockResource } from './locks.ts';
 import type { Env } from './primitives.ts';
@@ -9,15 +9,6 @@ import { DEFAULT_OUTPUT_TAIL, execTail, type OutputTailLimits } from './process.
 import type { CheckResult, CheckRound } from './run.ts';
 
 // --- Public types ---
-
-/** The events a check pass produces, ready to append to the run's log. */
-export type CheckEvent = Extract<
-	RunEvent,
-	{
-		readonly _tag:
-			'CheckStarted' | 'CheckFinished' | 'LockWaiting' | 'LockAcquired' | 'LockReleased';
-	}
->;
 
 /** Which pass this is; copied into every event and the returned `CheckRound`. */
 export interface CheckPass {
@@ -133,6 +124,26 @@ export const expandFiles = (command: string, files: ReadonlyArray<string>): stri
 /** The changed files a `{files}` command can be given: every one that still exists. */
 export const filesForChecks = (changed: ReadonlyArray<ChangedFile>): ReadonlyArray<string> =>
 	changed.filter((file) => file.status !== 'deleted').map((file) => file.path);
+
+/**
+ * The baseline pass: every check once, before any change, so with no fix commands and no
+ * changed files (a check using `{files}` is skipped), each command limited by the baseline
+ * timeout.
+ */
+export const baselinePass = (input: {
+	readonly cwd: string;
+	readonly env: Env;
+	readonly config: ResolvedConfig;
+	readonly onEvent?: (event: CheckEvent) => Effect.Effect<void>;
+}): RunChecksInput => ({
+	cwd: input.cwd,
+	env: input.env,
+	checks: input.config.checks,
+	files: [],
+	pass: { baseline: true, round: 0, attempt: 0 },
+	timeoutMs: input.config.timeouts.baseline,
+	...(input.onEvent === undefined ? {} : { onEvent: input.onEvent })
+});
 
 // --- Implementation ---
 

@@ -1,0 +1,7 @@
+{
+	"name": "docs-site",
+	"scripts": {
+		"lint": "eslint docs",
+		"typecheck": "tsc --noEmit"
+	}
+}

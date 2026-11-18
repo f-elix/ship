@@ -11,7 +11,7 @@ import {
 	type UnknownEvent
 } from '@ship/core/contract';
 import { readDaemonPid } from '@ship/daemon/client';
-import { Console, Context, Effect, Option, Ref, Schema, Stream } from 'effect';
+import { Console, Effect, Option, Schema, Stream } from 'effect';
 import { Argument, Command, Flag } from 'effect/cli';
 import { resolve } from 'node:path';
 import {
@@ -24,18 +24,10 @@ import {
 	type Connection,
 	type Rpc
 } from './connection.ts';
+import { setExitCode } from './exit-code.ts';
+import { init } from './init.ts';
 import { Invocation } from './invocation.ts';
 import { exitCodeFor, makeEventFormatter, runDetails, runTable } from './render.ts';
-
-/** The process exit code a command sets when it ends normally; 0 unless set. */
-export class ExitCode extends Context.Service<ExitCode, Ref.Ref<number>>()(
-	'@f-elix/ship/ExitCode'
-) {}
-
-const setExitCode = (code: number) =>
-	Effect.gen(function* () {
-		yield* Ref.set(yield* ExitCode, code);
-	});
 
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 const encodeSummary = Schema.encodeSync(Summary);
@@ -352,5 +344,5 @@ export const ship = Command.make('ship').pipe(
 	Command.withDescription(
 		'Run the scripted part of a coding-agent workflow: implement, checks, review, fix, PR.'
 	),
-	Command.withSubcommands([run, resume, cancel, status, list, logs, daemon])
+	Command.withSubcommands([run, resume, cancel, status, list, logs, daemon, init])
 );

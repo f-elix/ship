@@ -83,7 +83,16 @@ describe('command parsing', () => {
 
 			const help = yield* cli(['--help'], { home });
 			expect(help.code).toBe(0);
-			for (const command of ['run', 'resume', 'cancel', 'status', 'list', 'logs', 'daemon']) {
+			for (const command of [
+				'run',
+				'resume',
+				'cancel',
+				'status',
+				'list',
+				'logs',
+				'daemon',
+				'init'
+			]) {
 				expect(help.stdout).toMatch(new RegExp(`^  ${command} `, 'mu'));
 			}
 			expect(help.stdout).not.toContain('serve');

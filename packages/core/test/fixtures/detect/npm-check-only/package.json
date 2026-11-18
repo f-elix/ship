@@ -1,0 +1,8 @@
+{
+	"name": "single",
+	"scripts": {
+		"build": "tsc",
+		"check": "npm run build && node --test",
+		"test": "echo \"Error: no test specified\" && exit 1"
+	}
+}

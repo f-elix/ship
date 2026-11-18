@@ -3,7 +3,7 @@
 Runs the scripted part of a coding-agent workflow: implement → checks → review → fix → pull request.
 Planning stays an interactive conversation; `ship run <plan-dir>` takes it from there and stops when a PR is up.
 
-Status: early development. The commands below work; `ship init` is not there yet, so project configs are written by hand.
+Status: early development. It is not on npm yet.
 
 ## Install
 
@@ -17,9 +17,22 @@ cd packages/cli && pnpm pack && npm i -g ./f-elix-ship-*.tgz
 
 `npm rm -g @f-elix/ship` uninstalls it.
 
-## Usage
+## Set up a project
 
-Each project needs a config at `~/.ship/projects/<host>/<owner>/<repo>.json` (its checks and reviewers; see `packages/cli/schemas/project.schema.json`). Machine-wide settings go in `~/.ship/config.json` (`packages/cli/schemas/config.schema.json`).
+Each project needs a config at `~/.ship/projects/<host>/<owner>/<repo>.json`: its checks, format command, reviewers and PR options (see `packages/cli/schemas/project.schema.json`). The key is the normalized `origin` URL, or the repo path when there is no `origin`. Machine-wide settings, such as lock permits, go in `~/.ship/config.json` (`packages/cli/schemas/config.schema.json`).
+
+`ship init` writes the project config in two steps, so an agent can review the draft with you in between. The `ship-init` skill in `skills/ship-init/` drives it; copy it into your agent's skills folder.
+
+```sh
+ship init --detect > /tmp/ship-draft.json   # draft on stdout; project key and notes on stderr
+ship init --write /tmp/ship-draft.json      # validate, save, run every check once
+```
+
+`--detect` reads `package.json` scripts (with the package manager from `packageManager` or the lockfile), `Makefile` and `justfile` targets and `Cargo.toml`, and lists `.github/workflows` commands as hints. It drafts at most one check each for format, lint, typecheck and test: when several sources offer one, a `justfile` wins over a `Makefile`, then `package.json`, then `Cargo.toml`. An aggregate `check` script is used only when there is no granular one. Checks lock `cpu`; `test` locks `db` when a database package, crate or compose image suggests tests share one.
+
+`--write` reports every validation error, refuses a lock resource that `~/.ship/config.json` gives no permits, and refuses to replace an existing config unless `--force`. It saves the config with `$schema` set, then runs every check once through the daemon, so the checks share lock permits with active runs. Like a run's baseline, it skips fix commands and checks that use `{files}`. Keep the draft outside the repo: an untracked file there is part of what the checks see, and makes the tree dirty for `ship run`. Each check's result and the end of a failing check's output go to stdout, and it exits 1 when a check fails. The config stays saved, so you know about baseline failures before the first run.
+
+## Usage
 
 Run from a feature branch with a clean working tree, with a plan dir holding `spec.md` and `implementation-plan.md`:
 
@@ -49,6 +62,8 @@ Ctrl-C detaches instead of cancelling, and prints how to follow, check or cancel
 | `ship daemon status`                 | The daemon's version, pid, socket, log and active runs; starts it if it is not running |
 | `ship daemon stop [--force]`         | Stop the daemon                                                                        |
 | `ship daemon restart [--force]`      | Restart it, e.g. after upgrading ship or editing lock permits                          |
+| `ship init --detect`                 | Print a draft project config for the current directory                                 |
+| `ship init --write <file> [--force]` | Validate and save the project config, then run every check once                        |
 
 Runs are hosted by a background daemon, which the commands that need it start when it is not running (`ship daemon stop` does not); its output goes to `daemon.log` in ship's home. The CLI and the daemon must be the same version: after an upgrade, commands ask for `ship daemon restart`. Stopping or restarting the daemon is refused while runs are active; `--force` interrupts them, and `ship resume <id>` continues them later.
 

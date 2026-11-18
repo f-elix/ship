@@ -146,6 +146,16 @@ export const endsFollow = (
 ): event is Extract<RunEvent, { _tag: 'RunFinished' | 'RunInterrupted' }> =>
 	event._tag === 'RunFinished' || event._tag === 'RunInterrupted';
 
+/** The events of one pass of checks: what `Checks.run` emits and `runChecks` streams. */
+export const CheckEvent = Schema.Union([
+	RunEvent.cases.CheckStarted,
+	RunEvent.cases.CheckFinished,
+	RunEvent.cases.LockWaiting,
+	RunEvent.cases.LockAcquired,
+	RunEvent.cases.LockReleased
+]);
+export type CheckEvent = typeof CheckEvent.Type;
+
 /** A stored event: its run and its 1-based position in that run's log. */
 export const RunEventEnvelope = Schema.Struct({
 	runId: RunId,
