@@ -2,6 +2,9 @@ import { Context, Layer } from 'effect';
 import type { ProjectKey, RunId } from './primitives.ts';
 import { projectKeySegments } from './project-key.ts';
 
+/** The files a plan dir holds; `ship run` requires both. */
+export const PLAN_FILES = { spec: 'spec.md', plan: 'implementation-plan.md' } as const;
+
 /**
  * Where ship keeps its files under its home directory, normally `~/.ship`. A project key
  * becomes nested directories: `github.com/f-elix/ship` maps to
@@ -9,7 +12,8 @@ import { projectKeySegments } from './project-key.ts';
  */
 export const shipPaths = (home: string) => {
 	const project = (key: ProjectKey) => [home, 'projects', ...projectKeySegments(key)].join('/');
-	const run = (runId: RunId) => `${home}/runs/${runId}`;
+	const runs = `${home}/runs`;
+	const run = (runId: RunId) => `${runs}/${runId}`;
 	return {
 		home,
 		globalConfig: `${home}/config.json`,
@@ -17,6 +21,11 @@ export const shipPaths = (home: string) => {
 		projectReviewers: (key: ProjectKey) => `${project(key)}/reviewers`,
 		db: `${home}/ship.db`,
 		socket: `${home}/daemon.sock`,
+		/** The daemon's process id: its claim on the home, written before it listens. */
+		pidFile: `${home}/daemon.pid`,
+		/** Where the daemon writes its log. */
+		daemonLog: `${home}/daemon.log`,
+		runs,
 		run,
 		transcripts: (runId: RunId) => `${run(runId)}/transcripts`
 	};

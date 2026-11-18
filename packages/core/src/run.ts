@@ -140,6 +140,29 @@ export const RunState = Schema.Struct({
 });
 export interface RunState extends Schema.Schema.Type<typeof RunState> {}
 
+/** What a run starts from; {@link initialRunState} fills in the rest. */
+export type NewRunState = Pick<
+	RunState,
+	'runId' | 'projectKey' | 'cwd' | 'env' | 'planDir' | 'branch' | 'baseSha' | 'config'
+>;
+
+/** The context of a run that has not taken a step yet. */
+export const initialRunState = (start: NewRunState): RunState => ({
+	...start,
+	implementerSession: null,
+	round: 0,
+	checkFixAttempts: 0,
+	lastReviewedSha: null,
+	review: null,
+	reviewRounds: [],
+	unresolved: { mustFix: [], tradeoffs: [], nits: [] },
+	checks: [],
+	costUsd: 0,
+	prUrl: null,
+	escalationReason: null,
+	error: null
+});
+
 /**
  * Format version of persisted run snapshots (the machine snapshot around `RunState`).
  * Bump it when a change to `RunState` or the machine's states makes older snapshots

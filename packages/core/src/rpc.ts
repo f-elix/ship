@@ -21,8 +21,11 @@ export class RunNotFound extends Schema.TaggedError<RunNotFound>()('RunNotFound'
 
 export const PreconditionReason = Schema.Literals([
 	'not-a-git-repo',
+	'detached-head',
+	'unknown-default-branch',
 	'on-default-branch',
 	'missing-plan-files',
+	'dirty-tree',
 	'unknown-project-config',
 	'invalid-config'
 ]);
@@ -41,6 +44,21 @@ export class PreconditionFailed extends Schema.TaggedError<PreconditionFailed>()
 export class InvalidRunStatus extends Schema.TaggedError<InvalidRunStatus>()('InvalidRunStatus', {
 	runId: RunId,
 	status: RunStatus
+}) {}
+
+/** The run's stored snapshot cannot be restored, so the run stays `interrupted`. */
+export class SnapshotNotResumable extends Schema.TaggedError<SnapshotNotResumable>()(
+	'SnapshotNotResumable',
+	{ runId: RunId, reason: Schema.String }
+) {
+	override get message(): string {
+		return `Run ${this.runId} cannot be resumed: ${this.reason}`;
+	}
+}
+
+/** `stop` without `force` while runs are active. */
+export class DaemonBusy extends Schema.TaggedError<DaemonBusy>()('DaemonBusy', {
+	activeRuns: PositiveInt
 }) {}
 
 /** CLI and daemon versions differ; the CLI tells the user to `ship daemon restart`. */
@@ -88,14 +106,20 @@ export class ShipRpcs extends RpcGroup.make(
 		error: PreconditionFailed
 	}),
 	/**
-	 * Re-enters the run's current state and re-runs its step. `env` is the resuming
-	 * caller's environment and replaces the one the run was started with. Config files are
-	 * read again, so a missing or invalid config fails the precondition.
+	 * Resumes an `interrupted` run: re-enters its current state and re-runs its step. `env`
+	 * is the resuming caller's environment and replaces the one the run was started with.
+	 * Config is fixed when the run starts, so resuming reads no config files. Fails with
+	 * `SnapshotNotResumable` when the stored snapshot cannot be restored; the run then
+	 * stays `interrupted` and can only be cancelled.
 	 */
 	Rpc.make('resume', {
 		payload: { runId: RunId, env: Env },
-		error: Schema.Union([RunNotFound, InvalidRunStatus, PreconditionFailed])
+		error: Schema.Union([RunNotFound, InvalidRunStatus, SnapshotNotResumable])
 	}),
+	/**
+	 * Stops a run and waits until it is finished as `cancelled`. An `interrupted` run is
+	 * finished from its event log, without resuming it.
+	 */
 	Rpc.make('cancel', {
 		payload: runIdPayload,
 		error: Schema.Union([RunNotFound, InvalidRunStatus])
@@ -105,7 +129,7 @@ export class ShipRpcs extends RpcGroup.make(
 		success: RunInfo,
 		error: RunNotFound
 	}),
-	/** Most recently updated first. */
+	/** Most recently updated first. A run's status is `waiting` while it waits for a check lock. */
 	Rpc.make('list', {
 		payload: {
 			projectKey: Schema.optionalKey(ProjectKey),
@@ -124,5 +148,14 @@ export class ShipRpcs extends RpcGroup.make(
 		success: RunEventEnvelope,
 		error: RunNotFound,
 		stream: true
+	}),
+	/**
+	 * Shuts the daemon down after replying: active runs are interrupted (they become
+	 * `interrupted`, ready for `resume`), the server closes and the socket is removed.
+	 * Fails with `DaemonBusy` while runs are active, unless `force` is set.
+	 */
+	Rpc.make('stop', {
+		payload: { force: Schema.optionalKey(Schema.Boolean) },
+		error: DaemonBusy
 	})
 ) {}

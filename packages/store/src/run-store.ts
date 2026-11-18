@@ -82,6 +82,14 @@ export interface RunStoreShape extends RunJournalShape {
 	 * Returns the interrupted runs' ids.
 	 */
 	readonly markInterrupted: Effect.Effect<ReadonlyArray<RunId>>;
+	/**
+	 * Sets one `running` run to `interrupted` and appends `RunInterrupted`, for a run whose
+	 * machine stopped without finishing it. Fails with `InvalidRunStatus` when it is not
+	 * `running`.
+	 */
+	readonly interrupt: (
+		runId: RunId
+	) => Effect.Effect<RunEventEnvelope, RunNotFound | InvalidRunStatus>;
 }
 
 // --- Rows ---
@@ -463,6 +471,19 @@ const make = Effect.gen(function* () {
 		return envelopes.map((envelope) => envelope.runId);
 	}).pipe(Effect.withSpan('RunStore.markInterrupted'), orDieStorage);
 
+	const interrupt = Effect.fn('RunStore.interrupt')(function* (runId: RunId) {
+		const at = yield* DateTime.now;
+		return yield* appending(
+			Effect.gen(function* () {
+				yield* updateRun(runId, (status) => status === 'running', {
+					status: 'interrupted'
+				});
+				return yield* insertEvent(runId, RunEvent.cases.RunInterrupted.make({ at }));
+			}),
+			(envelope) => [envelope]
+		);
+	}, orDieStorage);
+
 	const markResumed = Effect.fn('RunStore.markResumed')(function* (runId: RunId) {
 		const at = yield* DateTime.now;
 		return yield* appending(
@@ -487,6 +508,7 @@ const make = Effect.gen(function* () {
 		list,
 		finish,
 		markInterrupted,
+		interrupt,
 		markResumed
 	};
 	return store;

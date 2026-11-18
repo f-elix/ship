@@ -1,6 +1,7 @@
 import { NodeServices } from '@effect/platform-node';
 import { assert, describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, Layer, Queue, Schedule } from 'effect';
+import { TestClock } from 'effect/testing';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -56,37 +57,51 @@ const describeEvent = (event: CheckEvent): string =>
 		: `${event._tag}:${event.check}`;
 
 describe('Checks', () => {
-	it.live('times each command once it holds its lock, not while it waits', () =>
+	it.effect('times each command once it holds its lock, not while it waits', () =>
 		Effect.gen(function* () {
 			const dir = yield* tempDir;
 			const locks = yield* Locks;
 			const held = yield* Deferred.make<void>();
+			const release = yield* Deferred.make<void>();
 			const holder = yield* locks
 				.withPermit(
 					'cpu',
-					Effect.andThen(Deferred.succeed(held, undefined), Effect.sleep('400 millis'))
+					Effect.andThen(Deferred.succeed(held, undefined), Deferred.await(release))
 				)
 				.pipe(Effect.forkChild);
 			yield* Deferred.await(held);
 
-			// Waits about 400ms for the lock, longer than its 300ms limit, then runs at once.
-			const { round } = yield* runChecks({
+			// The test clock moves past the limit only while the check waits for the lock.
+			const events = yield* Queue.unbounded<CheckEvent>();
+			const waiting = yield* runChecks({
 				cwd: dir,
 				files: [],
 				checks: [check('quick', 'true')],
-				timeoutMs: 300
-			});
+				timeoutMs: 300,
+				onEvent: (event) => Queue.offer(events, event)
+			}).pipe(Effect.forkChild);
+			while ((yield* Queue.take(events))._tag !== 'LockWaiting');
+			yield* TestClock.adjust('1 second');
+			yield* Deferred.succeed(release, undefined);
+			const { round } = yield* Fiber.join(waiting);
 			expect(round.results.map((result) => result.exitCode)).toEqual([0]);
 			yield* Fiber.join(holder);
 
-			const error = yield* Effect.flip(
-				runChecks({
-					cwd: dir,
-					files: [],
-					checks: [check('slow', 'sleep 5')],
-					timeoutMs: 100
-				})
-			);
+			// Once the command runs, the same clock times it out.
+			const slow = yield* runChecks({
+				cwd: dir,
+				files: [],
+				checks: [check('slow', 'sleep 5')],
+				timeoutMs: 100,
+				onEvent: (event) => Queue.offer(events, event)
+			}).pipe(Effect.flip, Effect.forkChild);
+			while ((yield* Queue.take(events))._tag !== 'CheckStarted');
+			// The timer starts just after `CheckStarted`, so keep moving until it fires.
+			while (slow.pollUnsafe() === undefined) {
+				yield* TestClock.adjust('100 millis');
+				yield* Effect.yieldNow;
+			}
+			const error = yield* Fiber.join(slow);
 			expect(error).toBeInstanceOf(CheckTimeout);
 			expect(error).toMatchObject({ check: 'slow', commandLine: 'sleep 5', timeoutMs: 100 });
 		}).pipe(Effect.scoped, Effect.provide(ChecksLive))

@@ -1,20 +1,10 @@
 import { createEffectActor, type RequirementsFrom } from '@xstate/effect';
-import {
-	Cause,
-	Data,
-	DateTime,
-	Deferred,
-	Effect,
-	Exit,
-	Predicate,
-	Queue,
-	Schema,
-	Scope
-} from 'effect';
+import { Cause, Data, DateTime, Deferred, Effect, Exit, Predicate, Queue, Scope } from 'effect';
+import type { StateValue } from 'xstate';
 import type { RunEvent } from './event.ts';
 import { describeDefect, pipelineMachine, stepInput, type PipelineMachine } from './pipeline.ts';
-import { RunId, type Env } from './primitives.ts';
-import type { InvalidRunStatus, RunNotFound } from './rpc.ts';
+import type { Env, RunId } from './primitives.ts';
+import { SnapshotNotResumable, type InvalidRunStatus, type RunNotFound } from './rpc.ts';
 import {
 	RunJournal,
 	SnapshotLoad,
@@ -43,16 +33,6 @@ export interface RunHandle {
 
 /** The services the pipeline's steps use; the driver adds `RunReporter` itself. */
 export type PipelineServices = Exclude<RequirementsFrom<PipelineMachine>, RunReporter>;
-
-/** The run's stored snapshot cannot be restored, so the run stays `interrupted`. */
-export class SnapshotNotResumable extends Schema.TaggedError<SnapshotNotResumable>()(
-	'SnapshotNotResumable',
-	{ runId: RunId, reason: Schema.String }
-) {
-	override get message(): string {
-		return `Run ${this.runId} cannot be resumed: ${this.reason}`;
-	}
-}
 
 // --- Driver ---
 
@@ -101,6 +81,14 @@ const finishFromLog = Effect.fnUntraced(function* (runId: RunId, end: RunEnd) {
 	const summary = buildSummary({ runId, status: end.status, events, error: end.error });
 	yield* journal.finish(summary);
 	return summary;
+});
+
+/**
+ * Finishes a run that has no machine running, such as an `interrupted` one, as
+ * `cancelled`. The summary comes from the event log, so no snapshot or env is needed.
+ */
+export const cancelFromLog = Effect.fn('cancelFromLog')(function* (runId: RunId) {
+	return yield* finishFromLog(runId, { status: 'cancelled', error: null });
 });
 
 /**
@@ -269,6 +257,13 @@ const rerunFinishedChildren = (snapshot: PersistedRunSnapshot): unknown => {
 	);
 };
 
+/** Whether `value` is shaped like a state value: a state name, or nested state names. */
+const isStateValue = (value: unknown): value is StateValue =>
+	typeof value === 'string' ||
+	(Predicate.isObject(value) &&
+		!Array.isArray(value) &&
+		Object.values(value).every((child) => child === undefined || isStateValue(child)));
+
 const describeLoad = (load: SnapshotLoad): string =>
 	SnapshotLoad.$match(load, {
 		Found: () => 'found',
@@ -281,7 +276,7 @@ const describeLoad = (load: SnapshotLoad): string =>
 /**
  * Resumes an interrupted run from its last snapshot with the caller's fresh `env`. The
  * step that was in flight runs again. The run is marked resumed only once its snapshot
- * loaded, so a run that cannot be restored stays `interrupted`. A run that stopped after
+ * loaded and fits the machine, so a run that cannot be restored stays `interrupted`. A run that stopped after
  * its machine reached a final state, but before it was finished, is finished now.
  */
 export const resumeRun = Effect.fn('resumeRun')(function* (runId: RunId, env: Env) {
@@ -291,6 +286,21 @@ export const resumeRun = Effect.fn('resumeRun')(function* (runId: RunId, env: En
 		return yield* new SnapshotNotResumable({ runId, reason: describeLoad(load) });
 	}
 	const { snapshot } = load;
+	// A snapshot that loads can still name states this machine does not have.
+	yield* Effect.try({
+		try: () => {
+			if (!isStateValue(snapshot.value)) throw new Error('it has no state value');
+			return pipelineMachine.resolveState({
+				value: snapshot.value,
+				context: snapshot.context
+			});
+		},
+		catch: (error) =>
+			new SnapshotNotResumable({
+				runId,
+				reason: `its snapshot does not fit this ship's pipeline: ${describeDefect(error)}`
+			})
+	});
 	if (snapshot['status'] === 'done') {
 		const path = statePath(snapshot.value);
 		yield* journal.markResumed(runId);

@@ -338,6 +338,20 @@ describe('RunStore', () => {
 			}).pipe(Effect.provide(TestLayer))
 		);
 
+		it.effect('interrupts one running run', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const { runId } = yield* store.create(newRun);
+				const other = yield* store.create(newRun);
+				const interrupted = yield* store.interrupt(runId);
+				expect(interrupted).toMatchObject({ seq: 2, event: { _tag: 'RunInterrupted' } });
+				expect((yield* store.get(runId)).status).toBe('interrupted');
+				expect((yield* store.get(other.runId)).status).toBe('running');
+				const again = yield* Effect.flip(store.interrupt(runId));
+				expect(again).toMatchObject({ _tag: 'InvalidRunStatus', status: 'interrupted' });
+			}).pipe(Effect.provide(TestLayer))
+		);
+
 		it.effect('resumes only an interrupted run', () =>
 			Effect.gen(function* () {
 				const store = yield* RunStore;
