@@ -1,4 +1,5 @@
 import { Schema } from 'effect';
+import { ResolvedConfig } from './config.ts';
 import { VerifiedFinding } from './finding.ts';
 import {
 	AbsolutePath,
@@ -83,6 +84,8 @@ export const RunState = Schema.Struct({
 	planDir: AbsolutePath,
 	branch: Schema.NonEmptyString,
 	baseSha: GitSha,
+	/** Resolved when the run is created; later config edits do not change it. */
+	config: ResolvedConfig,
 	/** Set by `implement`; every fix step resumes this session. */
 	implementerSessionId: Schema.NullOr(SessionId),
 	/** Current review round; 0 before the first review. */

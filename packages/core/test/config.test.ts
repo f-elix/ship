@@ -5,9 +5,11 @@ import {
 	configParseOptions,
 	decodeProjectConfig,
 	GlobalConfig,
-	ProjectConfig
+	ProjectConfig,
+	resolveConfig,
+	ResolvedConfig
 } from '../src/index.ts';
-import { jsonRoundTrip } from './fixtures.ts';
+import { jsonRoundTrip, resolvedConfig } from './fixtures.ts';
 
 const decodeGlobal = Schema.decodeUnknownSync(GlobalConfig, configParseOptions);
 const decodeProject = Schema.decodeUnknownSync(ProjectConfig, configParseOptions);
@@ -160,5 +162,38 @@ describe('ProjectConfig', () => {
 	it('fails with a SchemaError in the Effect error channel', () => {
 		const error = Effect.runSync(Effect.flip(decodeProjectConfig({ checks: 'lint' })));
 		expect(Schema.isSchemaError(error)).toBe(true);
+	});
+});
+
+describe('ResolvedConfig', () => {
+	it('applies project overrides to the global config, with timeouts in milliseconds', () => {
+		const global = decodeGlobal({ models: { review: 'opus' }, caps: { reviewRounds: 5 } });
+		const project = decodeProject({
+			checks: [{ name: 'lint', run: 'oxlint {files}' }],
+			format: 'prettier --write {files}',
+			models: { implement: 'sonnet' },
+			caps: { checkFixAttempts: 1 },
+			timeouts: { checks: '1 hour' },
+			pr: { squash: false }
+		});
+		const resolved = resolveConfig(global, project);
+		expect(resolved.models).toMatchObject({ implement: 'sonnet', review: 'opus', fix: 'opus' });
+		expect(resolved.caps).toEqual({ checkFixAttempts: 1, reviewRounds: 5 });
+		expect(resolved.timeouts.checks).toBe(3_600_000);
+		expect(resolved.timeouts.implement).toBe(3_600_000);
+		expect(resolved.timeouts.route).toBe(300_000);
+		expect(resolved.checks).toEqual([{ name: 'lint', run: 'oxlint {files}', lock: 'cpu' }]);
+		expect(resolved.format).toBe('prettier --write {files}');
+		expect(resolved.pr).toEqual({ draft: true, squash: false });
+		expect(resolveConfig(global, decodeProject({})).format).toBeNull();
+	});
+
+	it('decodes from its plain JSON unchanged, as the store reads a snapshot', () => {
+		const plain: unknown = JSON.parse(JSON.stringify(resolvedConfig));
+		expect(Schema.decodeUnknownSync(ResolvedConfig)(plain)).toEqual(resolvedConfig);
+	});
+
+	it('rejects an empty format command', () => {
+		rejects(decodeProject, { format: '' }, /\["format"\]/);
 	});
 });

@@ -1,8 +1,12 @@
 import { DateTime, Schema } from 'effect';
 import {
+	configParseOptions,
 	FindingId,
 	GitSha,
+	GlobalConfig,
+	ProjectConfig,
 	ProjectKey,
+	resolveConfig,
 	RunId,
 	SessionId,
 	type Finding,
@@ -16,6 +20,21 @@ export const jsonRoundTrip = <S extends Schema.Codec<unknown, unknown>>(
 	value: S['Type']
 ): S['Type'] =>
 	Schema.decodeUnknownSync(schema)(JSON.parse(JSON.stringify(Schema.encodeSync(schema)(value))));
+
+/** The config a run gets from an empty global config and a project with two checks. */
+export const resolvedConfig = resolveConfig(
+	Schema.decodeUnknownSync(GlobalConfig, configParseOptions)({}),
+	Schema.decodeUnknownSync(
+		ProjectConfig,
+		configParseOptions
+	)({
+		checks: [
+			{ name: 'lint', run: 'oxlint {files}', fix: 'oxlint --fix {files}' },
+			{ name: 'test', run: 'vitest run', lock: 'db' }
+		],
+		format: 'prettier --write {files}'
+	})
+);
 
 export const runId = RunId.make('run-1');
 export const projectKey = ProjectKey.make('github.com/f-elix/ship');
