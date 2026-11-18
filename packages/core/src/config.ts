@@ -272,8 +272,9 @@ export const resolveConfig = (global: GlobalConfig, project: ProjectConfig): Res
 export const decodeGlobalConfig = (input: unknown) =>
 	Schema.decodeUnknownEffect(GlobalConfig, configParseOptions)(input);
 
+/** Reports every issue, not only the first, so one edit can fix them all. */
 export const decodeProjectConfig = (input: unknown) =>
-	Schema.decodeUnknownEffect(ProjectConfig, configParseOptions)(input);
+	Schema.decodeUnknownEffect(ProjectConfig, { ...configParseOptions, errors: 'all' })(input);
 
 /**
  * Checks whose lock resource has no permits in the global config. A config loader

@@ -1,6 +1,7 @@
 import { Data, Effect, Queue, Stream } from 'effect';
 import { Agent, type AgentRunInput } from './agent.ts';
-import { Checks, filesForChecks, type CheckEvent } from './checks.ts';
+import { baselinePass, Checks, filesForChecks } from './checks.ts';
+import type { CheckEvent } from './event.ts';
 import type { VerifiedFinding } from './finding.ts';
 import { Git, type CommitRange } from './git.ts';
 import { Pr } from './pr.ts';
@@ -165,15 +166,9 @@ export const baselineStep = (state: RunState) =>
 					reason: `HEAD moved from ${state.baseSha} to ${head} before the baseline checks`
 				});
 			}
-			return yield* checks.run({
-				cwd: state.cwd,
-				env: state.env,
-				checks: state.config.checks,
-				files: [],
-				pass: { baseline: true, round: 0, attempt: 0 },
-				timeoutMs: state.config.timeouts.baseline,
-				onEvent
-			});
+			return yield* checks.run(
+				baselinePass({ cwd: state.cwd, env: state.env, config: state.config, onEvent })
+			);
 		})
 	);
 

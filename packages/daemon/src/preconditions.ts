@@ -32,6 +32,33 @@ const failed = (reason: PreconditionReason, detail: string) =>
 	new PreconditionFailed({ reason, detail });
 
 /**
+ * Loads and resolves the project's config, failing when it is missing or invalid or when a
+ * check uses a lock resource the daemon has no permits for.
+ */
+export const loadProjectConfig = Effect.fn('loadProjectConfig')(function* (key: ProjectKey) {
+	const loader = yield* ConfigLoader;
+	const locks = yield* Locks;
+	const { resolved } = yield* loader
+		.load(key)
+		.pipe(Effect.mapError((error) => failed(error.reason, `${error.path}: ${error.detail}`)));
+	// Lock permits are read once when the daemon starts, so a lock added to the global
+	// config since then is unknown here.
+	for (const check of resolved.checks) {
+		yield* locks
+			.status(check.lock)
+			.pipe(
+				Effect.mapError(() =>
+					failed(
+						'invalid-config',
+						`check ${check.name} uses lock ${check.lock}, which the daemon does not have; if it was added to the global config since the daemon started, restart it with \`ship daemon restart\``
+					)
+				)
+			);
+	}
+	return resolved;
+});
+
+/**
  * Checks that a run can start in the caller's repo, with the caller's env: a git repo on a
  * branch other than the default one, a plan dir holding the plan files, a project config
  * whose lock resources the daemon has, and a clean working tree. The plan dir is added to
@@ -43,9 +70,7 @@ const failed = (reason: PreconditionReason, detail: string) =>
 export const checkPreconditions = Effect.fn('checkPreconditions')(
 	function* (request: RunRequest) {
 		const git = yield* Git;
-		const loader = yield* ConfigLoader;
 		const fs = yield* FileSystem.FileSystem;
-		const locks = yield* Locks;
 		const repo = { cwd: request.cwd, env: request.env };
 
 		yield* git
@@ -82,25 +107,7 @@ export const checkPreconditions = Effect.fn('checkPreconditions')(
 		}
 
 		const projectKey = yield* git.projectKey(repo);
-		const { resolved } = yield* loader
-			.load(projectKey)
-			.pipe(
-				Effect.mapError((error) => failed(error.reason, `${error.path}: ${error.detail}`))
-			);
-		// Lock permits are read once when the daemon starts, so a lock added to the global
-		// config since then is unknown here.
-		for (const check of resolved.checks) {
-			yield* locks
-				.status(check.lock)
-				.pipe(
-					Effect.mapError(() =>
-						failed(
-							'invalid-config',
-							`check ${check.name} uses lock ${check.lock}, which the daemon does not have; if it was added to the global config since the daemon started, restart it with \`ship daemon restart\``
-						)
-					)
-				);
-		}
+		const resolved = yield* loadProjectConfig(projectKey);
 
 		yield* git.excludePath(repo, request.planDir);
 		if (!(yield* git.isClean(repo))) {

@@ -41,6 +41,15 @@ export interface ConfigLoaderShape {
 	 * has no permits in the global config.
 	 */
 	readonly load: (key: ProjectKey) => Effect.Effect<LoadedConfig, ConfigError>;
+	/**
+	 * Validates the text of a project config as `load` does, against the global config, and
+	 * returns it decoded. `path` only labels the errors. Every schema issue is reported, not
+	 * only the first.
+	 */
+	readonly validateProject: (
+		text: string,
+		path: string
+	) => Effect.Effect<ProjectConfig, ConfigError>;
 }
 
 const make = (home: string) =>
@@ -51,9 +60,9 @@ const make = (home: string) =>
 		const invalid = (path: string, detail: string) =>
 			new ConfigError({ reason: 'invalid-config', path, detail });
 
-		/** The file's JSON, or `undefined` when it does not exist. */
-		const readJson = Effect.fnUntraced(function* (path: string) {
-			const text = yield* fs.readFileString(path).pipe(
+		/** The file's text, or `undefined` when it does not exist. */
+		const readText = (path: string) =>
+			fs.readFileString(path).pipe(
 				Effect.map((content): string | undefined => content),
 				Effect.catchTag('PlatformError', (error) =>
 					error.reason._tag === 'NotFound'
@@ -61,11 +70,17 @@ const make = (home: string) =>
 						: Effect.fail(invalid(path, error.message))
 				)
 			);
-			if (text === undefined) return undefined;
-			return yield* Effect.try({
+
+		const parseJson = (path: string, text: string) =>
+			Effect.try({
 				try: (): unknown => JSON.parse(text),
 				catch: (error) => invalid(path, `Invalid JSON: ${String(error)}`)
 			});
+
+		/** The file's JSON, or `undefined` when it does not exist. */
+		const readJson = Effect.fnUntraced(function* (path: string) {
+			const text = yield* readText(path);
+			return text === undefined ? undefined : yield* parseJson(path, text);
 		});
 
 		const globalPath = paths.globalConfig;
@@ -75,37 +90,54 @@ const make = (home: string) =>
 			);
 		}).pipe(Effect.withSpan('ConfigLoader.loadGlobal'));
 
+		const validate = Effect.fnUntraced(function* (
+			global: GlobalConfig,
+			text: string,
+			path: string
+		) {
+			const project = yield* decodeProjectConfig(yield* parseJson(path, text)).pipe(
+				Effect.mapError((error) => invalid(path, error.message))
+			);
+			const unknownLocks = checksWithUnknownLock(global, project);
+			if (unknownLocks.length > 0) {
+				const names = unknownLocks
+					.map((check) => `${check.name} (${check.lock})`)
+					.join(', ');
+				const example = JSON.stringify(
+					Object.fromEntries(unknownLocks.map((check) => [check.lock, 1]))
+				);
+				return yield* invalid(
+					path,
+					`Checks use lock resources with no permits in ${globalPath}: ${names}. Add them there, e.g. "locks": ${example}, then run \`ship daemon restart\`; or use another lock.`
+				);
+			}
+			return project;
+		});
+
 		const load = Effect.fn('ConfigLoader.load')(function* (key: ProjectKey) {
 			const global = yield* loadGlobal;
 
 			const projectPath = paths.projectConfig(key);
-			const projectJson = yield* readJson(projectPath);
-			if (projectJson === undefined) {
+			const text = yield* readText(projectPath);
+			if (text === undefined) {
 				return yield* new ConfigError({
 					reason: 'unknown-project-config',
 					path: projectPath,
 					detail: `No config for project ${key}`
 				});
 			}
-			const project = yield* decodeProjectConfig(projectJson).pipe(
-				Effect.mapError((error) => invalid(projectPath, error.message))
-			);
-
-			const unknownLocks = checksWithUnknownLock(global, project);
-			if (unknownLocks.length > 0) {
-				const names = unknownLocks
-					.map((check) => `${check.name} (${check.lock})`)
-					.join(', ');
-				return yield* invalid(
-					projectPath,
-					`Checks use lock resources with no permits in ${globalPath}: ${names}`
-				);
-			}
-
+			const project = yield* validate(global, text, projectPath);
 			return { global, project, resolved: resolveConfig(global, project) };
 		});
 
-		return ConfigLoader.of({ paths, loadGlobal, load });
+		const validateProject = Effect.fn('ConfigLoader.validateProject')(function* (
+			text: string,
+			path: string
+		) {
+			return yield* validate(yield* loadGlobal, text, path);
+		});
+
+		return ConfigLoader.of({ paths, loadGlobal, load, validateProject });
 	});
 
 /** Loads ship's config files from its home directory. */

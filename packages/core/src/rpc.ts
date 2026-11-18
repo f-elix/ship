@@ -1,6 +1,6 @@
 import { Schema } from 'effect';
 import { Rpc, RpcGroup } from 'effect/rpc';
-import { RunEventEnvelope } from './event.ts';
+import { CheckEvent, RunEventEnvelope } from './event.ts';
 import {
 	AbsolutePath,
 	Env,
@@ -53,6 +53,17 @@ export class SnapshotNotResumable extends Schema.TaggedError<SnapshotNotResumabl
 ) {
 	override get message(): string {
 		return `Run ${this.runId} cannot be resumed: ${this.reason}`;
+	}
+}
+
+/** A check command could not start, or ran past the baseline timeout; the pass stopped. */
+export class ChecksAborted extends Schema.TaggedError<ChecksAborted>()('ChecksAborted', {
+	/** The check that stopped the pass; `null` when it stopped before any check started. */
+	check: Schema.NullOr(Schema.String),
+	detail: Schema.String
+}) {
+	override get message(): string {
+		return this.detail;
 	}
 }
 
@@ -153,6 +164,20 @@ export class ShipRpcs extends RpcGroup.make(
 		},
 		success: RunEventEnvelope,
 		error: RunNotFound,
+		stream: true
+	}),
+	/**
+	 * Runs the project's checks once in `cwd` with `env`, as the baseline does: no fix
+	 * commands, checks using `{files}` skipped, the baseline timeout per command, and the
+	 * daemon's lock permits shared with every run. Streams the pass's events. Reads the
+	 * project config now, so `ship init --write` checks the config it just saved. Fails with
+	 * `PreconditionFailed` when `cwd` is not in a git repo or the project config is missing
+	 * or invalid, and `ChecksAborted` when a command cannot start or times out.
+	 */
+	Rpc.make('runChecks', {
+		payload: { cwd: AbsolutePath, env: Env },
+		success: CheckEvent,
+		error: Schema.Union([PreconditionFailed, ChecksAborted]),
 		stream: true
 	}),
 	/**

@@ -1,24 +1,33 @@
 import {
+	baselinePass,
 	cancelFromLog,
+	Checks,
+	ChecksAborted,
 	DaemonBusy,
+	Git,
 	initialRunState,
 	InvalidRunStatus,
 	isWaitingState,
+	PreconditionFailed,
 	resumeRun,
 	RunJournal,
 	ShipRpcs,
 	startRun,
 	TerminalRunStatus,
 	VersionMismatch,
+	type CheckEvent,
+	type CheckSpawnError,
+	type CheckTimeout,
 	type RunId,
 	type RunInfo,
 	type RunNotFound,
-	type RunStatus
+	type RunStatus,
+	type UnknownLockResource
 } from '@ship/core';
 import { RunStore, type StoredRunStatus } from '@ship/store';
-import { Context, Deferred, Effect, Schema, Stream } from 'effect';
+import { Context, Deferred, Effect, Queue, Schema, Stream } from 'effect';
 import type { Rpc, RpcGroup } from 'effect/rpc';
-import { checkPreconditions } from './preconditions.ts';
+import { checkPreconditions, loadProjectConfig } from './preconditions.ts';
 import { RunHost } from './run-host.ts';
 
 /** What the handlers need from the daemon itself. */
@@ -42,15 +51,28 @@ const withLiveStatus = (info: RunInfo): RunInfo =>
 const storedStatus = (status: RunStatus): StoredRunStatus =>
 	status === 'waiting' ? 'running' : status;
 
+const abortReason = (error: CheckSpawnError | CheckTimeout | UnknownLockResource): string => {
+	switch (error._tag) {
+		case 'CheckSpawnError':
+			return `cannot start \`${error.commandLine}\` in ${error.cwd}: ${error.detail}`;
+		case 'CheckTimeout':
+			return error.message;
+		case 'UnknownLockResource':
+			return `the daemon has no permits for lock ${error.resource}`;
+	}
+};
+
 /** The RPC handlers, over the run store, the run host and the config loader. */
 export const handlers = ShipRpcs.toLayer(
 	Effect.gen(function* () {
 		const control = yield* DaemonControl;
 		const store = yield* RunStore;
 		const host = yield* RunHost;
-		// The services the preconditions use, captured once for every `run` call.
+		// The services the preconditions use, captured once for every `run` and `runChecks` call.
 		const preconditions =
 			yield* Effect.context<Effect.Services<ReturnType<typeof checkPreconditions>>>();
+		const git = yield* Git;
+		const checks = yield* Checks;
 
 		const list = Effect.fn('Daemon.list')(function* (filter: ListFilter) {
 			const wanted = filter.status;
@@ -169,6 +191,47 @@ export const handlers = ShipRpcs.toLayer(
 				follow === false
 					? Stream.fromIterableEffect(store.events(runId, fromSeq))
 					: store.follow(runId, fromSeq),
+
+			runChecks: ({ cwd, env }) =>
+				Stream.unwrap(
+					Effect.gen(function* () {
+						const repo = { cwd, env };
+						const key = yield* git.projectKey(repo).pipe(
+							Effect.mapError(
+								(error) =>
+									new PreconditionFailed({
+										reason: 'not-a-git-repo',
+										detail: error.message
+									})
+							)
+						);
+						const config = yield* loadProjectConfig(key).pipe(
+							Effect.provide(preconditions)
+						);
+						return Stream.callback<CheckEvent, ChecksAborted>((queue) => {
+							// Checks run one at a time; this is the one an abort stops.
+							let running: string | null = null;
+							const onEvent = (event: CheckEvent) => {
+								if (event._tag === 'CheckStarted') running = event.check;
+								if (event._tag === 'CheckFinished') running = null;
+								return Queue.offer(queue, event);
+							};
+							return checks.run(baselinePass({ cwd, env, config, onEvent })).pipe(
+								Effect.mapError(
+									(error) =>
+										new ChecksAborted({
+											check:
+												error._tag === 'CheckTimeout'
+													? error.check
+													: running,
+											detail: abortReason(error)
+										})
+								),
+								Effect.andThen(Queue.end(queue))
+							);
+						});
+					}).pipe(Effect.withSpan('Daemon.runChecks'))
+				),
 
 			stop: Effect.fn('Daemon.stop')(function* ({ force }) {
 				const activeRuns = yield* host.activeCount;

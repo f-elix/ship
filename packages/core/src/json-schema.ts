@@ -19,3 +19,10 @@ const toFile = (schema: Schema.Top): string => {
 	};
 	return `${JSON.stringify(file, null, '\t')}\n`;
 };
+
+/** Where a config file's `$schema` points: the generated files on the main branch. */
+export const schemaUrl = (file: keyof ReturnType<typeof configJsonSchemaFiles>): string =>
+	`https://raw.githubusercontent.com/f-elix/ship/main/packages/cli/schemas/${file}`;
+
+/** The `$schema` that `ship init` writes into project configs. */
+export const PROJECT_SCHEMA_URL = schemaUrl('project.schema.json');

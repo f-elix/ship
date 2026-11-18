@@ -1,7 +1,7 @@
 import type { RunEvent, RunInfo, RunStatus, Summary, UnknownEvent } from '@ship/core/contract';
 import { DateTime } from 'effect';
 
-const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+export const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
 const usd = (cost: number) => `$${cost.toFixed(2)}`;
 const shortSha = (sha: string) => sha.slice(0, 7);
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;

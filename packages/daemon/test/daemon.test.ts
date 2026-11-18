@@ -332,4 +332,55 @@ describe('daemon', () => {
 			}).pipe(Effect.scoped),
 		TIMEOUT
 	);
+
+	it.live(
+		'runs the project checks once over RPC, holding locks, with typed errors',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				yield* daemon(fx.home, yield* fakes);
+				const rpc = yield* client(fx.home);
+				const repo = { cwd: fx.work, env: fx.env };
+
+				const events = yield* rpc.runChecks(repo).pipe(Stream.runCollect);
+				expect(Array.from(events, (event) => event._tag)).toEqual([
+					'LockAcquired',
+					'CheckStarted',
+					'CheckFinished',
+					'LockReleased'
+				]);
+				expect(Array.from(events).at(2)).toMatchObject({
+					check: 'caller-env',
+					baseline: true,
+					exitCode: 0
+				});
+
+				const notRepo = yield* Effect.flip(
+					rpc.runChecks({ cwd: fx.dir, env: fx.env }).pipe(Stream.runDrain)
+				);
+				expect(notRepo).toMatchObject({
+					_tag: 'PreconditionFailed',
+					reason: 'not-a-git-repo'
+				});
+
+				fx.configure({ locks: { cpu: 2 } }, { checks: 'none' });
+				const invalid = yield* Effect.flip(rpc.runChecks(repo).pipe(Stream.runDrain));
+				expect(invalid).toMatchObject({
+					_tag: 'PreconditionFailed',
+					reason: 'invalid-config'
+				});
+
+				fx.configure(
+					{ locks: { cpu: 2 } },
+					{
+						checks: [{ name: 'slow', run: 'sleep 10' }],
+						timeouts: { baseline: '1 second' }
+					}
+				);
+				const timedOut = yield* Effect.flip(rpc.runChecks(repo).pipe(Stream.runDrain));
+				expect(timedOut).toMatchObject({ _tag: 'ChecksAborted', check: 'slow' });
+				expect(timedOut.message).toContain('timed out');
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
 });
