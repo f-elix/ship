@@ -1,5 +1,6 @@
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import {
+	endsFollow,
 	InvalidRunStatus,
 	NonNegativeInt,
 	ProjectKey,
@@ -150,10 +151,6 @@ const decodeStoredEvent = (type: string, payload: string): RunEvent | UnknownEve
 
 const isTerminal = Schema.is(TerminalRunStatus);
 const isUnfinished = (status: RunStatus): boolean => !isTerminal(status);
-
-/** A follower stops after these: the run has nothing more to say until it is resumed. */
-const endsFollow = (event: RunEvent | UnknownEvent): boolean =>
-	event._tag === 'RunFinished' || event._tag === 'RunInterrupted';
 
 /** Run ids look like `20261117-153012-a1b2c3`: sortable, short enough to type. */
 const newRunId = Effect.gen(function* () {

@@ -1,0 +1,645 @@
+import { describe, expect, it } from '@effect/vitest';
+import { RunStatus, shipPaths } from '@ship/core';
+import { AgentFake, GhFake } from '@ship/core/testing';
+import {
+	addsFeature,
+	client,
+	daemon,
+	daemonProcess,
+	eventually,
+	fakes,
+	fixture,
+	hangingFakes,
+	reachState,
+	scriptHappyRun,
+	tempDir,
+	VERSION,
+	type Fixture
+} from '@ship/daemon/testing';
+import { ConfigProvider, Context, Duration, Effect, Exit, Fiber, Scope } from 'effect';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { Invocation } from '../src/invocation.ts';
+import { DETACHED_EXIT_CODE, exitCodeFor } from '../src/render.ts';
+import { cli, fakeDaemonLauncher, testTimeouts, type Captured } from './support.ts';
+
+const TIMEOUT = 60_000;
+
+/** `ship <args>` run from the fixture's repo, with its env. */
+const shipIn = (fx: Fixture, args: ReadonlyArray<string>, captured?: Captured) =>
+	cli(args, { home: fx.home, cwd: fx.work, env: fx.env, ...(captured ? { captured } : {}) });
+
+/** A daemon on fakes whose implementer never ends, so its runs stay active. */
+const hangingDaemon = (fx: Fixture) =>
+	Effect.gen(function* () {
+		yield* daemon(fx.home, yield* hangingFakes);
+		return yield* client(fx.home);
+	});
+
+const parseSummary = (stdout: string) => JSON.parse(stdout) as Record<string, unknown>;
+
+describe('exit codes', () => {
+	it('maps how a run ended to 0 done, 2 escalated, 1 otherwise', () => {
+		const codes = Object.fromEntries(
+			RunStatus.literals.map((status) => [status, exitCodeFor(status)])
+		);
+		expect(codes).toEqual({
+			running: 1,
+			waiting: 1,
+			done: 0,
+			escalated: 2,
+			failed: 1,
+			cancelled: 1,
+			interrupted: 1
+		});
+		expect(DETACHED_EXIT_CODE).toBe(130);
+	});
+});
+
+describe('invocation', () => {
+	it.effect(
+		'resolves a relative SHIP_HOME against the cwd, for the daemon spawned elsewhere',
+		() =>
+			Effect.gen(function* () {
+				const invocation = yield* Invocation;
+				expect(invocation.home).toBe(resolve('relative-home'));
+			}).pipe(
+				Effect.provide(Invocation.fromProcess('1.0.0')),
+				Effect.provide(
+					ConfigProvider.layer(
+						ConfigProvider.fromEnv({ env: { SHIP_HOME: 'relative-home' } })
+					)
+				)
+			)
+	);
+});
+
+describe('command parsing', () => {
+	it.live('prints the bare version and help without a daemon', () =>
+		Effect.gen(function* () {
+			const home = join(yield* tempDir, 'home');
+			const version = yield* cli(['--version'], { home });
+			expect(version).toEqual({ code: 0, stdout: VERSION, stderr: '' });
+
+			const help = yield* cli(['--help'], { home });
+			expect(help.code).toBe(0);
+			for (const command of ['run', 'resume', 'cancel', 'status', 'list', 'logs', 'daemon']) {
+				expect(help.stdout).toMatch(new RegExp(`^  ${command} `, 'mu'));
+			}
+			expect(help.stdout).not.toContain('serve');
+			expect(help.stdout).not.toContain('--wizard');
+
+			const daemonHelp = yield* cli(['daemon', '--help'], { home });
+			expect(daemonHelp.stdout).toMatch(/^ {2}status /mu);
+			expect(daemonHelp.stdout).toMatch(/^ {2}restart /mu);
+			// Nothing above needed a daemon.
+			expect(existsSync(home)).toBe(false);
+		}).pipe(Effect.scoped)
+	);
+
+	it.live('rejects bad invocations with exit code 1', () =>
+		Effect.gen(function* () {
+			const home = join(yield* tempDir, 'home');
+			for (const args of [
+				['bogus'],
+				['run'],
+				['resume'],
+				['list', '--limit', '0'],
+				['list', '--limit', 'many'],
+				['logs', 'some-id', '--bogus'],
+				['daemon', 'serve']
+			]) {
+				const result = yield* cli(args, { home });
+				expect(result.code, args.join(' ')).toBe(1);
+				expect(result.stderr, args.join(' ')).toContain('ERROR');
+			}
+		}).pipe(Effect.scoped)
+	);
+});
+
+describe('ship run', () => {
+	it.live(
+		'streams events to stderr, prints only the summary on stdout and exits 0 when done',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				yield* scriptHappyRun(Context.get(services, AgentFake));
+				yield* daemon(fx.home, services);
+
+				// A relative plan dir resolves against the caller's cwd.
+				const result = yield* shipIn(fx, ['run', '.plans/feature']);
+
+				expect(result.code).toBe(0);
+				const summary = parseSummary(result.stdout);
+				expect(summary).toMatchObject({
+					status: 'done',
+					prUrl: 'https://github.com/f-elix/example/pull/1',
+					rounds: 1,
+					costUsd: 0.65,
+					unresolvedMustFix: [],
+					escalationReason: null,
+					error: null
+				});
+				expect(Object.keys(summary).sort()).toEqual(
+					[
+						'runId',
+						'status',
+						'prUrl',
+						'rounds',
+						'checks',
+						'costUsd',
+						'unresolvedMustFix',
+						'tradeoffs',
+						'nits',
+						'escalationReason',
+						'error'
+					].sort()
+				);
+				const lines = result.stderr.split('\n');
+				expect(lines[0]).toBe(`ship: run ${String(summary['runId'])} started`);
+				for (const expected of [
+					/ baseline check caller-env passed /u,
+					/ state implement -> checks\.running$/u,
+					/ check caller-env passed /u,
+					/ review round 1 of \w{7}\.\.\w{7}: standards$/u,
+					/ implement cost \$0\.50 \(total \$0\.50\)$/u,
+					/ PR opened: https:\/\/github\.com\/f-elix\/example\/pull\/1$/u,
+					/ run done: https:\/\/github\.com\/f-elix\/example\/pull\/1$/u
+				]) {
+					expect(
+						lines.some((line) => expected.test(line)),
+						String(expected)
+					).toBe(true);
+				}
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'exits 2 when the run escalates with a draft PR',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				fx.configure(
+					{ locks: { cpu: 2 } },
+					{
+						checks: [{ name: 'no-feature', run: 'test ! -f src/feature.ts' }],
+						caps: { checkFixAttempts: 0 }
+					}
+				);
+				const services = yield* fakes;
+				const agent = Context.get(services, AgentFake);
+				yield* agent.script({ step: 'implement' }, addsFeature);
+				yield* agent.script(
+					{ step: 'escalate' },
+					{
+						output: { title: 'Add the feature', body: '## Summary\n\nStuck.' },
+						costUsd: 0.05
+					}
+				);
+				yield* daemon(fx.home, services);
+
+				const result = yield* shipIn(fx, ['run', fx.planDir]);
+
+				expect(result.code).toBe(2);
+				expect(parseSummary(result.stdout)).toMatchObject({
+					status: 'escalated',
+					escalationReason: 'check-fix-cap'
+				});
+				expect(result.stderr).toContain('escalated: check-fix-cap');
+				expect(result.stderr).toMatch(/draft PR opened: /u);
+				expect((yield* Context.get(services, GhFake).prs).map((pr) => pr.draft)).toEqual([
+					true
+				]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'exits 1 when the run fails',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				fx.configure(
+					{ locks: { cpu: 2 } },
+					{ checks: [{ name: 'broken', run: 'exit 3' }] }
+				);
+				yield* daemon(fx.home, yield* fakes);
+
+				const result = yield* shipIn(fx, ['run', fx.planDir]);
+
+				expect(result.code).toBe(1);
+				expect(parseSummary(result.stdout)).toMatchObject({ status: 'failed' });
+				expect(result.stderr).toMatch(/ baseline check broken failed with exit code 3 /u);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'reports failed preconditions and starts nothing',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				yield* daemon(fx.home, yield* fakes);
+
+				const missing = yield* shipIn(fx, ['run', 'no-such-plan']);
+				expect(missing).toEqual({
+					code: 1,
+					stdout: '',
+					stderr: `ship: cannot start the run (missing-plan-files): ${join(fx.work, 'no-such-plan')} has no spec.md or implementation-plan.md`
+				});
+
+				fx.git('switch', '--quiet', 'main');
+				const onMain = yield* shipIn(fx, ['run', fx.planDir]);
+				expect(onMain).toEqual({
+					code: 1,
+					stdout: '',
+					stderr: 'ship: cannot start the run (on-default-branch): main is the default branch; switch to a feature branch first'
+				});
+
+				fx.git('switch', '--quiet', 'feature');
+				fx.write('README.md', 'changed\n');
+				const dirty = yield* shipIn(fx, ['run', fx.planDir]);
+				expect(dirty.code).toBe(1);
+				expect(dirty.stderr).toBe(
+					`ship: cannot start the run (dirty-tree): ${fx.work} has uncommitted changes; commit or stash them first`
+				);
+
+				const runs = yield* shipIn(fx, ['list', '--json']);
+				expect(JSON.parse(runs.stdout)).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'detaches when interrupted, leaving the run going',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const rpc = yield* hangingDaemon(fx);
+				const captured: Captured = { stdout: [], stderr: [] };
+
+				const fiber = yield* Effect.forkChild(shipIn(fx, ['run', fx.planDir], captured));
+				yield* eventually(
+					Effect.sync(() => captured.stderr.some((line) => line.includes('started')))
+				);
+				const [run] = yield* rpc.list({});
+				if (run === undefined) return expect.fail('no run');
+				yield* reachState(rpc, run.runId, 'implement');
+				const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)));
+
+				expect(Exit.hasInterrupts(exit)).toBe(true);
+				expect(captured.stdout).toEqual([]);
+				expect(captured.stderr.at(-1)).toBe(
+					[
+						`ship: detached from run ${run.runId}; it keeps running.`,
+						`  follow it: ship logs ${run.runId} --follow`,
+						`  result:    ship status ${run.runId}`,
+						`  cancel it: ship cancel ${run.runId}`
+					].join('\n')
+				);
+				expect((yield* rpc.status({ runId: run.runId })).status).toBe('running');
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'tells how to continue the run when the daemon stops under it',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				// A separate process, so stopping it does not stop this test's own daemon code.
+				const daemonChild = yield* daemonProcess(fx.home);
+				const rpc = yield* client(fx.home);
+				const captured: Captured = { stdout: [], stderr: [] };
+
+				const fiber = yield* Effect.forkChild(shipIn(fx, ['run', fx.planDir], captured));
+				yield* eventually(
+					Effect.sync(() => captured.stderr.some((line) => line.includes('started')))
+				);
+				const [run] = yield* rpc.list({});
+				if (run === undefined) return expect.fail('no run');
+				yield* reachState(rpc, run.runId, 'implement');
+				yield* rpc.stop({ force: true });
+				yield* daemonChild.exited;
+				const result = yield* Fiber.join(fiber);
+
+				expect(result.code).toBe(1);
+				expect(result.stdout).toBe('');
+				expect(captured.stderr.at(-1)).toBe(
+					`ship: run ${run.runId} was interrupted: the daemon stopped, or the run crashed (see ${shipPaths(fx.home).daemonLog}). Continue it with \`ship resume ${run.runId}\`, or \`ship cancel ${run.runId}\``
+				);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
+describe('ship resume', () => {
+	it.live(
+		"streams only the resumed run's events and exits like ship run",
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const first = yield* Scope.make();
+				// Implemented (cost $0.50), then stuck in review until the daemon stops.
+				const stuck = yield* fakes;
+				const agent = Context.get(stuck, AgentFake);
+				yield* agent.script({ step: 'implement' }, addsFeature);
+				yield* agent.script({ step: 'review', label: 'standards' }, () => Effect.never);
+				yield* daemon(fx.home, stuck).pipe(Scope.provide(first));
+				const before = yield* client(fx.home).pipe(Scope.provide(first));
+				const { runId } = yield* before.run(fx.request);
+				yield* eventually(
+					Effect.map(before.status({ runId }), (info) => info.state.startsWith('review'))
+				);
+				yield* Scope.close(first, Exit.void);
+
+				const services = yield* fakes;
+				yield* scriptHappyRun(Context.get(services, AgentFake));
+				yield* daemon(fx.home, services);
+
+				const result = yield* shipIn(fx, ['resume', runId]);
+
+				expect(result.code).toBe(0);
+				expect(parseSummary(result.stdout)).toMatchObject({ runId, status: 'done' });
+				const lines = result.stderr.split('\n');
+				expect(lines[0]).toBe(`ship: run ${runId} resumed`);
+				expect(lines[1]).toMatch(/ run resumed$/u);
+				expect(result.stderr).not.toContain('run created');
+				expect(result.stderr).not.toContain('run interrupted');
+				// The running total includes the cost from before the resume.
+				expect(result.stderr).toContain('review cost $0.10 (total $0.60)');
+
+				const again = yield* shipIn(fx, ['resume', runId]);
+				expect(again).toMatchObject({
+					code: 1,
+					stdout: '',
+					stderr: `ship: cannot resume run ${runId}: it is done`
+				});
+				const unknown = yield* shipIn(fx, ['resume', 'no-such-run']);
+				expect(unknown).toMatchObject({ code: 1, stderr: 'ship: no run no-such-run' });
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
+describe('ship cancel, status, list and logs', () => {
+	it.live(
+		'cancel stops an active run; status shows it',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const rpc = yield* hangingDaemon(fx);
+				const { runId } = yield* rpc.run(fx.request);
+				yield* reachState(rpc, runId, 'implement');
+
+				const active = yield* shipIn(fx, ['status']);
+				expect(active.code).toBe(0);
+				expect(active.stdout.split('\n')[0]).toMatch(
+					/^RUN\s+STATUS\s+STATE\s+BRANCH\s+UPDATED\s+PR$/u
+				);
+				expect(active.stdout).toMatch(
+					new RegExp(`^${runId}\\s+running\\s+implement\\s+feature\\s`, 'mu')
+				);
+
+				expect(yield* shipIn(fx, ['cancel', runId])).toEqual({
+					code: 0,
+					stdout: '',
+					stderr: `ship: run ${runId} cancelled`
+				});
+				expect(yield* shipIn(fx, ['cancel', runId])).toEqual({
+					code: 1,
+					stdout: '',
+					stderr: `ship: cannot cancel run ${runId}: it is cancelled`
+				});
+
+				expect((yield* shipIn(fx, ['status'])).stdout).toBe('No active runs.');
+				const details = yield* shipIn(fx, ['status', runId]);
+				expect(details.stdout).toContain(`run: ${runId}\nstatus: cancelled\n`);
+				const asJson = JSON.parse((yield* shipIn(fx, ['status', runId, '--json'])).stdout);
+				expect(asJson).toMatchObject({
+					runId,
+					status: 'cancelled',
+					branch: 'feature',
+					summary: { status: 'cancelled' }
+				});
+				expect(yield* shipIn(fx, ['status', 'no-such-run'])).toMatchObject({
+					code: 1,
+					stderr: 'ship: no run no-such-run'
+				});
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'list and logs show finished runs',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				const agent = Context.get(services, AgentFake);
+				yield* scriptHappyRun(agent);
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+				const first = (yield* rpc.run(fx.request)).runId;
+				yield* eventually(
+					Effect.map(rpc.status({ runId: first }), (info) => info.status === 'done')
+				);
+				yield* scriptHappyRun(agent);
+				const second = (yield* rpc.run(fx.request)).runId;
+				yield* eventually(
+					Effect.map(rpc.status({ runId: second }), (info) => info.status === 'done')
+				);
+
+				const table = (yield* shipIn(fx, ['list'])).stdout.split('\n');
+				expect(table).toHaveLength(3);
+				expect(table[1]).toMatch(
+					new RegExp(`^${second}\\s+done\\s+done\\s+feature\\s.*/pull/1$`, 'u')
+				);
+				expect(table[2]).toMatch(new RegExp(`^${first}\\s+done\\s`, 'u'));
+				const limited = JSON.parse(
+					(yield* shipIn(fx, ['list', '--limit', '1', '--json'])).stdout
+				);
+				expect(limited.map((run: { runId: string }) => run.runId)).toEqual([second]);
+
+				const logs = yield* shipIn(fx, ['logs', first]);
+				expect(logs.code).toBe(0);
+				expect(logs.stderr).toBe('');
+				const lines = logs.stdout.split('\n');
+				expect(lines[0]).toMatch(/^\d\d:\d\d:\d\d run created on feature at \w{7}$/u);
+				expect(lines.at(-1)).toMatch(/ run done: .*\/pull\/1$/u);
+
+				const raw = (yield* shipIn(fx, ['logs', first, '--json', '--follow'])).stdout
+					.split('\n')
+					.map((line) => JSON.parse(line));
+				expect(raw[0]).toMatchObject({
+					runId: first,
+					seq: 1,
+					event: { _tag: 'RunCreated' }
+				});
+				expect(raw.at(-1)).toMatchObject({ event: { _tag: 'RunFinished' } });
+				expect(raw.map((envelope: { seq: number }) => envelope.seq)).toEqual(
+					raw.map((_: unknown, index: number) => index + 1)
+				);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'logs without --follow ends after the events so far',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const rpc = yield* hangingDaemon(fx);
+				const { runId } = yield* rpc.run(fx.request);
+				yield* reachState(rpc, runId, 'implement');
+
+				const logs = yield* shipIn(fx, ['logs', runId]);
+				expect(logs.code).toBe(0);
+				expect(logs.stdout.split('\n').at(-1)).toMatch(
+					/ state baseline\.running -> implement$/u
+				);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
+describe('version handshake', () => {
+	it.live(
+		'tells the user to restart a daemon of another version',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const rpc = yield* hangingDaemon(fx);
+				const other = { home: fx.home, cwd: fx.work, env: fx.env, version: '9.9.9' };
+
+				const idle = yield* cli(['list'], other);
+				expect(idle).toEqual({
+					code: 1,
+					stdout: '',
+					stderr: `ship: this ship is 9.9.9 but the running daemon is ${VERSION}. Run \`ship daemon restart\` to switch the daemon to 9.9.9. No runs are active.`
+				});
+
+				const { runId } = yield* rpc.run(fx.request);
+				yield* reachState(rpc, runId, 'implement');
+				const busy = yield* cli(['run', fx.planDir], other);
+				expect(busy.code).toBe(1);
+				expect(busy.stderr).toContain(
+					'1 run is active: the restart is refused until they finish, unless you pass --force'
+				);
+
+				// `daemon status` still reports the daemon.
+				const status = yield* cli(['daemon', 'status'], other);
+				expect(status.code).toBe(0);
+				expect(status.stdout).toContain(`ship daemon ${VERSION}`);
+				expect(status.stdout).toContain('active runs: 1');
+				expect(status.stderr).toContain('Run `ship daemon restart`');
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
+describe('daemon auto-start and control', () => {
+	it.live(
+		'starts a daemon when none runs, then reuses it',
+		() =>
+			Effect.gen(function* () {
+				const home = join(yield* tempDir, 'home');
+				const { launcher, launched } = yield* fakeDaemonLauncher();
+				const paths = shipPaths(home);
+
+				const first = yield* cli(['daemon', 'status'], { home, launcher });
+				expect(first.code).toBe(0);
+				expect(first.stdout).toMatch(
+					new RegExp(`^ship daemon ${VERSION} \\(pid \\d+\\)$`, 'mu')
+				);
+				expect(first.stdout).toContain(`socket: ${paths.socket}`);
+				expect(first.stdout).toContain(`log: ${paths.daemonLog}`);
+				expect(launched()).toBe(1);
+
+				expect(yield* cli(['list'], { home, launcher })).toMatchObject({
+					code: 0,
+					stdout: 'No runs yet.'
+				});
+				expect(launched()).toBe(1);
+
+				expect(yield* cli(['daemon', 'stop'], { home, launcher })).toEqual({
+					code: 0,
+					stdout: '',
+					stderr: 'ship: daemon stopped'
+				});
+				expect(existsSync(paths.pidFile)).toBe(false);
+				expect(existsSync(paths.socket)).toBe(false);
+				expect(yield* cli(['daemon', 'stop'], { home, launcher })).toMatchObject({
+					code: 0,
+					stderr: 'ship: no daemon is running'
+				});
+				expect(launched()).toBe(1);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'points at the log when a spawned daemon never answers',
+		() =>
+			Effect.gen(function* () {
+				const home = join(yield* tempDir, 'home');
+				const launcher = { launch: () => Effect.void };
+				const timeouts = { ...testTimeouts, start: Duration.seconds(1) };
+				const result = yield* cli(['list'], { home, launcher, timeouts });
+				expect(result).toEqual({
+					code: 1,
+					stdout: '',
+					stderr: `ship: the ship daemon did not answer within 1s; see ${shipPaths(home).daemonLog}`
+				});
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'stop and restart are refused while runs are active, unless forced',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const paths = shipPaths(fx.home);
+				const { launcher, launched } = yield* fakeDaemonLauncher();
+				const running = yield* daemonProcess(fx.home);
+				const rpc = yield* client(fx.home);
+				const { runId } = yield* rpc.run(fx.request);
+				yield* reachState(rpc, runId, 'implement');
+				const ship = (args: ReadonlyArray<string>) =>
+					cli(args, { home: fx.home, cwd: fx.work, env: fx.env, launcher });
+
+				const refused =
+					'ship: 1 run is active: the daemon is not stopped until they finish, unless you pass --force, which interrupts them (`ship resume <id>` continues them).';
+				expect(yield* ship(['daemon', 'stop'])).toEqual({
+					code: 1,
+					stdout: '',
+					stderr: refused
+				});
+				expect(yield* ship(['daemon', 'restart'])).toEqual({
+					code: 1,
+					stdout: '',
+					stderr: refused
+				});
+				expect(launched()).toBe(0);
+
+				expect(yield* ship(['daemon', 'restart', '--force'])).toEqual({
+					code: 0,
+					stdout: '',
+					stderr: `ship: daemon ${VERSION} started`
+				});
+				expect((yield* running.exited).signal).toBe(null);
+				expect(launched()).toBe(1);
+				const after = yield* ship(['status', runId, '--json']);
+				expect(JSON.parse(after.stdout)).toMatchObject({ status: 'interrupted' });
+
+				// The interrupted run no longer counts as active, so a plain stop is allowed.
+				expect((yield* ship(['daemon', 'status'])).stdout).toContain('active runs: 0');
+				expect(yield* ship(['daemon', 'stop'])).toMatchObject({ code: 0 });
+				expect(existsSync(paths.pidFile)).toBe(false);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});

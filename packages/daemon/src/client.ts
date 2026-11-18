@@ -1,5 +1,5 @@
 import { NodeHttpClient } from '@effect/platform-node';
-import { ShipRpcs } from '@ship/core';
+import { ShipRpcs } from '@ship/core/contract';
 import { Context, Layer } from 'effect';
 import { RpcClient, RpcSerialization, type RpcClientError } from 'effect/rpc';
 import { RPC_PATH } from './protocol.ts';

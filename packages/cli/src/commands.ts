@@ -1,0 +1,356 @@
+import {
+	endsFollow,
+	RunEventEnvelope,
+	RunId,
+	RunInfo,
+	Summary,
+	type InvalidRunStatus,
+	type PreconditionFailed,
+	type RunEvent,
+	type RunNotFound,
+	type UnknownEvent
+} from '@ship/core/contract';
+import { readDaemonPid } from '@ship/daemon/client';
+import { Console, Context, Effect, Option, Ref, Schema, Stream } from 'effect';
+import { Argument, Command, Flag } from 'effect/cli';
+import { resolve } from 'node:path';
+import {
+	cliError,
+	connectDaemon,
+	findDaemon,
+	launchDaemon,
+	mismatchMessage,
+	stopDaemon,
+	type Connection,
+	type Rpc
+} from './connection.ts';
+import { Invocation } from './invocation.ts';
+import { exitCodeFor, makeEventFormatter, runDetails, runTable } from './render.ts';
+
+/** The process exit code a command sets when it ends normally; 0 unless set. */
+export class ExitCode extends Context.Service<ExitCode, Ref.Ref<number>>()(
+	'@f-elix/ship/ExitCode'
+) {}
+
+const setExitCode = (code: number) =>
+	Effect.gen(function* () {
+		yield* Ref.set(yield* ExitCode, code);
+	});
+
+const json = (value: unknown) => JSON.stringify(value, null, 2);
+const encodeSummary = Schema.encodeSync(Summary);
+const encodeRunInfo = Schema.encodeSync(RunInfo);
+const encodeRunInfos = Schema.encodeSync(Schema.Array(RunInfo));
+const encodeEnvelope = Schema.encodeSync(RunEventEnvelope);
+
+const runNotFound = (error: RunNotFound) => cliError(`no run ${error.runId}`);
+
+const invalidStatus = (action: string) => (error: InvalidRunStatus) =>
+	cliError(`cannot ${action} run ${error.runId}: it is ${error.status}`);
+
+/** A precondition `ship run` checks failed: nothing was started. */
+export const preconditionMessage = (error: PreconditionFailed) =>
+	`cannot start the run (${error.reason}): ${error.detail}`;
+
+const runIdArgument = Argument.String('id').pipe(
+	Argument.withDescription('Run id, as `ship run` and `ship list` print it'),
+	Argument.withSchema(RunId)
+);
+
+const jsonFlag = Flag.Boolean('json').pipe(
+	Flag.withDescription('Print JSON instead of text'),
+	Flag.withDefault(false)
+);
+
+const forceFlag = (what: string) =>
+	Flag.Boolean('force').pipe(
+		Flag.withDescription(
+			`${what} even while runs are active; they become interrupted, and \`ship resume <id>\` continues them`
+		),
+		Flag.withDefault(false)
+	);
+
+type EventFormatter = ReturnType<typeof makeEventFormatter>;
+
+/**
+ * Feeds the run's events so far to `format` without printing them, so its running totals
+ * include them, and returns the last event's seq (0 when there is none).
+ */
+const catchUp = (rpc: Rpc, runId: RunId, format: EventFormatter) =>
+	rpc.events({ runId, follow: false }).pipe(
+		Stream.runFold(
+			() => 0,
+			(_, envelope) => {
+				format(envelope.event);
+				return envelope.seq;
+			}
+		)
+	);
+
+const detachedMessage = (runId: RunId) =>
+	`ship: detached from run ${runId}; it keeps running.\n  follow it: ship logs ${runId} --follow\n  result:    ship status ${runId}\n  cancel it: ship cancel ${runId}`;
+
+/**
+ * Streams the run's events from `fromSeq` to stderr until the run ends or is interrupted,
+ * then prints its summary on stdout and sets the exit code from its status. Interrupting
+ * this (Ctrl-C) detaches: the run keeps going, and how to get back to it goes to stderr.
+ */
+const follow = (
+	connection: Connection,
+	runId: RunId,
+	fromSeq: number,
+	format: EventFormatter = makeEventFormatter()
+) =>
+	Effect.gen(function* () {
+		const { rpc } = connection;
+		let last: RunEvent | UnknownEvent | undefined;
+		yield* rpc.events({ runId, fromSeq }).pipe(
+			Stream.runForEach((envelope) => {
+				last = envelope.event;
+				const line = format(envelope.event);
+				return line === null ? Effect.void : Console.error(line);
+			})
+		);
+		// The outcome comes from the event that ended the stream, without asking the daemon:
+		// after `RunInterrupted` it may be stopping, and after `RunFinished` the run no longer
+		// counts as active, so another terminal may stop the daemon at once.
+		if (last !== undefined && endsFollow(last)) {
+			switch (last._tag) {
+				case 'RunInterrupted':
+					yield* Console.error(
+						`ship: run ${runId} was interrupted: the daemon stopped, or the run crashed (see ${connection.paths.daemonLog}). Continue it with \`ship resume ${runId}\`, or \`ship cancel ${runId}\``
+					);
+					return yield* setExitCode(exitCodeFor('interrupted'));
+				case 'RunFinished':
+					yield* Console.log(json(encodeSummary(last.summary)));
+					return yield* setExitCode(exitCodeFor(last.summary.status));
+			}
+		}
+		// The replay of a run that was not running ended without such an event.
+		const info = yield* rpc.status({ runId });
+		if (info.summary === null) {
+			yield* Console.error(`ship: run ${runId} is ${info.status}`);
+		} else {
+			yield* Console.log(json(encodeSummary(info.summary)));
+		}
+		yield* setExitCode(exitCodeFor(info.status));
+	}).pipe(
+		Effect.catchTag('RunNotFound', (error) => Effect.fail(runNotFound(error))),
+		Effect.onInterrupt(() => Console.error(detachedMessage(runId)))
+	);
+
+const run = Command.make(
+	'run',
+	{
+		planDir: Argument.String('plan-dir').pipe(
+			Argument.withDescription('Directory holding spec.md and implementation-plan.md')
+		)
+	},
+	Effect.fn('ship.run')(function* ({ planDir }) {
+		const invocation = yield* Invocation;
+		const connection = yield* connectDaemon();
+		const { runId } = yield* connection.rpc
+			.run({
+				planDir: resolve(invocation.cwd, planDir),
+				cwd: invocation.cwd,
+				env: invocation.env
+			})
+			.pipe(
+				Effect.catchTag('PreconditionFailed', (error) =>
+					Effect.fail(cliError(preconditionMessage(error)))
+				),
+				Effect.onInterrupt(() =>
+					Console.error(
+						'ship: interrupted before the daemon answered; `ship status` shows the run if it started'
+					)
+				)
+			);
+		yield* Console.error(`ship: run ${runId} started`);
+		yield* follow(connection, runId, 1);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		'Start a run on the current branch: implement the plan, run checks, review, fix and open a PR. Events stream to stderr; the summary JSON goes to stdout. Exit code 0 done, 2 escalated, 1 failed, cancelled or interrupted, 130 interrupted by Ctrl-C (a started run keeps going).'
+	)
+);
+
+const resume = Command.make(
+	'resume',
+	{ id: runIdArgument },
+	Effect.fn('ship.resume')(function* ({ id }) {
+		const invocation = yield* Invocation;
+		const connection = yield* connectDaemon();
+		const { rpc } = connection;
+		// Only this resume's events are shown; the cost total still counts the earlier ones.
+		const format = makeEventFormatter();
+		const from = yield* catchUp(rpc, id, format).pipe(
+			Effect.catchTag('RunNotFound', (error) => Effect.fail(runNotFound(error)))
+		);
+		yield* rpc.resume({ runId: id, env: invocation.env }).pipe(
+			Effect.catchTags({
+				RunNotFound: (error) => Effect.fail(runNotFound(error)),
+				InvalidRunStatus: (error) => Effect.fail(invalidStatus('resume')(error)),
+				SnapshotNotResumable: (error) =>
+					Effect.fail(cliError(`${error.message}; \`ship cancel ${id}\` finishes it`))
+			}),
+			Effect.onInterrupt(() =>
+				Console.error(
+					`ship: interrupted before the daemon answered; \`ship status ${id}\` shows whether the run resumed`
+				)
+			)
+		);
+		yield* Console.error(`ship: run ${id} resumed`);
+		yield* follow(connection, id, from + 1, format);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		'Continue an interrupted run with the current env, streaming and exiting like `ship run`.'
+	)
+);
+
+const cancel = Command.make(
+	'cancel',
+	{ id: runIdArgument },
+	Effect.fn('ship.cancel')(function* ({ id }) {
+		const { rpc } = yield* connectDaemon();
+		yield* rpc.cancel({ runId: id }).pipe(
+			Effect.catchTags({
+				RunNotFound: (error) => Effect.fail(runNotFound(error)),
+				InvalidRunStatus: (error) => Effect.fail(invalidStatus('cancel')(error))
+			})
+		);
+		yield* Console.error(`ship: run ${id} cancelled`);
+	}, Effect.scoped)
+).pipe(Command.withDescription('Stop a run; it ends as cancelled.'));
+
+const status = Command.make(
+	'status',
+	{
+		id: Argument.optional(runIdArgument),
+		json: jsonFlag
+	},
+	Effect.fn('ship.status')(function* ({ id, json: asJson }) {
+		const { rpc } = yield* connectDaemon();
+		if (Option.isSome(id)) {
+			const info = yield* rpc
+				.status({ runId: id.value })
+				.pipe(Effect.catchTag('RunNotFound', (error) => Effect.fail(runNotFound(error))));
+			yield* Console.log(asJson ? json(encodeRunInfo(info)) : runDetails(info));
+			return;
+		}
+		const active = yield* rpc.list({ status: ['running', 'waiting'] });
+		if (asJson) yield* Console.log(json(encodeRunInfos(active)));
+		else yield* Console.log(active.length === 0 ? 'No active runs.' : runTable(active));
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		"Show a run's details and summary, or the active runs when no id is given."
+	)
+);
+
+const list = Command.make(
+	'list',
+	{
+		limit: Flag.Int('limit').pipe(
+			Flag.withDescription('How many runs to show'),
+			Flag.withSchema(Schema.Int.check(Schema.isGreaterThan(0))),
+			Flag.withDefault(20)
+		),
+		json: jsonFlag
+	},
+	Effect.fn('ship.list')(function* ({ limit, json: asJson }) {
+		const { rpc } = yield* connectDaemon();
+		const runs = yield* rpc.list({ limit });
+		if (asJson) yield* Console.log(json(encodeRunInfos(runs)));
+		else yield* Console.log(runs.length === 0 ? 'No runs yet.' : runTable(runs));
+	}, Effect.scoped)
+).pipe(Command.withDescription('List recent runs, most recently updated first.'));
+
+const logs = Command.make(
+	'logs',
+	{
+		id: runIdArgument,
+		follow: Flag.Boolean('follow').pipe(
+			Flag.withAlias('f'),
+			Flag.withDescription('Keep printing new events until the run ends'),
+			Flag.withDefault(false)
+		),
+		json: Flag.Boolean('json').pipe(
+			Flag.withDescription('Print each event as one line of JSON'),
+			Flag.withDefault(false)
+		)
+	},
+	Effect.fn('ship.logs')(function* ({ id, follow: following, json: asJson }) {
+		const { rpc } = yield* connectDaemon();
+		const format = makeEventFormatter();
+		yield* rpc.events({ runId: id, follow: following }).pipe(
+			Stream.runForEach((envelope) => {
+				if (asJson) return Console.log(JSON.stringify(encodeEnvelope(envelope)));
+				const line = format(envelope.event);
+				return line === null ? Effect.void : Console.log(line);
+			}),
+			Effect.catchTag('RunNotFound', (error) => Effect.fail(runNotFound(error)))
+		);
+	}, Effect.scoped)
+).pipe(Command.withDescription("Print a run's event log."));
+
+const daemonStatus = Command.make(
+	'status',
+	{},
+	Effect.fn('ship.daemon.status')(function* () {
+		const connection = yield* connectDaemon({ allowMismatch: true });
+		const pid = yield* readDaemonPid(connection.paths);
+		const lines = [
+			`ship daemon ${connection.daemonVersion}${pid === null ? '' : ` (pid ${pid})`}`,
+			`socket: ${connection.paths.socket}`,
+			`log: ${connection.paths.daemonLog}`,
+			`active runs: ${connection.activeRuns}`
+		];
+		yield* Console.log(lines.join('\n'));
+		if (connection.mismatch !== null) {
+			yield* Console.error(`ship: ${mismatchMessage(connection.mismatch)}`);
+		}
+	}, Effect.scoped)
+).pipe(Command.withDescription('Show the daemon, starting it if it is not running.'));
+
+const daemonStop = Command.make(
+	'stop',
+	{ force: forceFlag('Stop') },
+	Effect.fn('ship.daemon.stop')(function* ({ force }) {
+		const connection = yield* findDaemon({ allowMismatch: true });
+		if (connection === null) {
+			yield* Console.error('ship: no daemon is running');
+			return;
+		}
+		yield* stopDaemon(connection, force);
+		yield* Console.error('ship: daemon stopped');
+	}, Effect.scoped)
+).pipe(Command.withDescription('Stop the daemon; refused while runs are active, unless --force.'));
+
+const daemonRestart = Command.make(
+	'restart',
+	{ force: forceFlag('Restart') },
+	Effect.fn('ship.daemon.restart')(function* ({ force }) {
+		const running = yield* findDaemon({ allowMismatch: true });
+		if (running !== null) yield* stopDaemon(running, force);
+		const connection = yield* launchDaemon();
+		yield* Console.error(`ship: daemon ${connection.daemonVersion} started`);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		'Restart the daemon, e.g. after upgrading ship or editing lock permits; refused while runs are active, unless --force.'
+	)
+);
+
+const daemon = Command.make('daemon').pipe(
+	Command.withDescription('Manage the background daemon that hosts the runs.'),
+	Command.withSubcommands([daemonStatus, daemonStop, daemonRestart])
+);
+
+/** The `ship` command tree. `ship daemon serve` is not part of it: the entry handles it. */
+export const ship = Command.make('ship').pipe(
+	Command.withDescription(
+		'Run the scripted part of a coding-agent workflow: implement, checks, review, fix, PR.'
+	),
+	Command.withSubcommands([run, resume, cancel, status, list, logs, daemon])
+);

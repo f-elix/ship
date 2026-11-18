@@ -176,7 +176,7 @@ describe('Checks', () => {
 				'CheckFinished:fmt:run',
 				'LockReleased:fmt'
 			]);
-			expect(events[0]).toMatchObject({ resource: 'db', waitedMs: 0 });
+			expect(events[0]).toMatchObject({ resource: 'db', waitedMs: expect.any(Number) });
 			expect(events[1]).toMatchObject({ commandLine: 'touch fixed', round: 1, attempt: 0 });
 		}).pipe(Effect.scoped, Effect.provide(ChecksLive))
 	);

@@ -4,7 +4,9 @@
 	"private": true,
 	"type": "module",
 	"exports": {
-		".": "./src/index.ts"
+		".": "./src/index.ts",
+		"./client": "./src/client-entry.ts",
+		"./testing": "./src/testing.ts"
 	},
 	"dependencies": {
 		"@effect/platform-node": "4.1.4",
