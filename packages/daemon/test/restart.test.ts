@@ -1,62 +1,21 @@
 import { describe, expect, it } from '@effect/vitest';
-import { InvalidRunStatus, shipPaths, type RunId } from '@ship/core';
+import { InvalidRunStatus, shipPaths } from '@ship/core';
 import { AgentFake, GhFake } from '@ship/core/testing';
 import { Context, Effect } from 'effect';
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import {
 	allEvents,
 	client,
 	daemon,
-	eventually,
+	daemonProcess,
 	fakes,
 	fixture,
-	scriptHappyRun,
-	VERSION
-} from './harness.ts';
+	reachState,
+	scriptHappyRun
+} from '../src/testing.ts';
 
 const TIMEOUT = 60_000;
-const DAEMON_PROCESS = fileURLToPath(new URL('fixtures/daemon-process.ts', import.meta.url));
-
-/**
- * A daemon in a child process (see `fixtures/daemon-process.ts`), listening once this
- * returns. Killed when the scope closes, if it still runs.
- */
-const daemonProcess = (home: string) =>
-	Effect.gen(function* () {
-		const child = yield* Effect.acquireRelease(
-			Effect.sync(() =>
-				spawn(process.execPath, [DAEMON_PROCESS, VERSION], {
-					env: { ...process.env, SHIP_HOME: home },
-					stdio: ['ignore', 'ignore', 'inherit']
-				})
-			),
-			(child) => Effect.sync(() => child.kill('SIGKILL'))
-		);
-		const exited = Effect.callback<{ code: number | null; signal: NodeJS.Signals | null }>(
-			(resume) => {
-				if (child.exitCode !== null || child.signalCode !== null) {
-					resume(Effect.succeed({ code: child.exitCode, signal: child.signalCode }));
-				}
-				child.once('exit', (code, signal) => resume(Effect.succeed({ code, signal })));
-			}
-		);
-		// Listening once it answers a handshake.
-		yield* eventually(
-			Effect.scoped(
-				Effect.flatMap(client(home), (rpc) => rpc.handshake({ version: VERSION }))
-			).pipe(
-				Effect.as(true),
-				Effect.orElseSucceed(() => false)
-			)
-		);
-		return { child, exited };
-	});
-
-/** Waits until the run's machine is in `state`. */
-const reachState = (rpc: Effect.Success<ReturnType<typeof client>>, runId: RunId, state: string) =>
-	eventually(Effect.map(rpc.status({ runId }), (info) => info.state === state));
 
 const stopIn = (child: ChildProcess, signal: NodeJS.Signals) =>
 	Effect.sync(() => child.kill(signal));

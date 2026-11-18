@@ -137,6 +137,15 @@ export const UnknownEvent = Schema.TaggedStruct('UnknownEvent', {
 });
 export interface UnknownEvent extends Schema.Schema.Type<typeof UnknownEvent> {}
 
+/**
+ * Whether a followed event stream ends after this event: the run has nothing more to say
+ * until it is resumed. The stream's last event is the one that ended it.
+ */
+export const endsFollow = (
+	event: RunEvent | UnknownEvent
+): event is Extract<RunEvent, { _tag: 'RunFinished' | 'RunInterrupted' }> =>
+	event._tag === 'RunFinished' || event._tag === 'RunInterrupted';
+
 /** A stored event: its run and its 1-based position in that run's log. */
 export const RunEventEnvelope = Schema.Struct({
 	runId: RunId,

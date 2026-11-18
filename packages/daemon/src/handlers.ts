@@ -16,7 +16,7 @@ import {
 	type RunStatus
 } from '@ship/core';
 import { RunStore, type StoredRunStatus } from '@ship/store';
-import { Context, Deferred, Effect, Schema } from 'effect';
+import { Context, Deferred, Effect, Schema, Stream } from 'effect';
 import type { Rpc, RpcGroup } from 'effect/rpc';
 import { checkPreconditions } from './preconditions.ts';
 import { RunHost } from './run-host.ts';
@@ -165,7 +165,10 @@ export const handlers = ShipRpcs.toLayer(
 
 			list,
 
-			events: ({ runId, fromSeq }) => store.follow(runId, fromSeq),
+			events: ({ runId, fromSeq, follow }) =>
+				follow === false
+					? Stream.fromIterableEffect(store.events(runId, fromSeq))
+					: store.follow(runId, fromSeq),
 
 			stop: Effect.fn('Daemon.stop')(function* ({ force }) {
 				const activeRuns = yield* host.activeCount;

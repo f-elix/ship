@@ -1,3 +1,7 @@
+/**
+ * Test helpers for the daemon and its clients: temp homes and repos, fake services, an
+ * in-process daemon, a daemon in a child process, and an RPC client.
+ */
 import { NodeServices } from '@effect/platform-node';
 import {
 	BUILTIN_BRIEFS_DIR,
@@ -8,11 +12,12 @@ import {
 } from '@ship/core';
 import { AgentFake, GhFake, type AgentReply, type AgentScript } from '@ship/core/testing';
 import { Context, Effect, Layer, References, Schedule, Stream } from 'effect';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { DaemonClient, startDaemon } from '../src/index.ts';
+import { fileURLToPath } from 'node:url';
+import { DaemonClient, startDaemon } from './index.ts';
 
 export const VERSION = '1.2.3-test';
 
@@ -125,6 +130,14 @@ export const fixture = Effect.gen(function* () {
 export const fakes = Layer.build(Layer.mergeAll(AgentFake.layer, GhFake.layer));
 export type Fakes = Effect.Success<typeof fakes>;
 
+/** Fakes whose implementer never finishes, so runs on them stay active until stopped. */
+export const hangingFakes = Effect.gen(function* () {
+	const services = yield* fakes;
+	const hangs = () => Effect.never;
+	yield* Context.get(services, AgentFake).script({ step: 'implement' }, hangs, hangs, hangs);
+	return services;
+});
+
 /** Starts a daemon in the current scope, in `home`, on the given fakes. */
 export const daemon = (home: string, services: Fakes, version = VERSION) =>
 	startDaemon({ home, version, services: Layer.succeedContext(services) }).pipe(
@@ -180,3 +193,49 @@ export const eventually = <E, R>(check: Effect.Effect<boolean, E, R>) =>
 		),
 		Effect.retry({ schedule: Schedule.spaced('25 millis'), times: 400 })
 	);
+
+/** Waits until the run's machine is in `state`. */
+export const reachState = (
+	rpc: Effect.Success<ReturnType<typeof client>>,
+	runId: RunId,
+	state: string
+) => eventually(Effect.map(rpc.status({ runId }), (info) => info.state === state));
+
+/** The script {@link daemonProcess} runs: a daemon on fakes whose implementer never ends. */
+export const DAEMON_PROCESS_SCRIPT = fileURLToPath(
+	new URL('./testing-daemon-process.ts', import.meta.url)
+);
+
+/**
+ * A daemon in a child process (see `testing-daemon-process.ts`), listening once this
+ * returns. Its implementer never finishes, so its runs stay active until it stops. Killed
+ * when the scope closes, if it still runs.
+ */
+export const daemonProcess = (home: string, version = VERSION) =>
+	Effect.gen(function* () {
+		const child = yield* Effect.acquireRelease(
+			Effect.sync(() =>
+				spawn(process.execPath, [DAEMON_PROCESS_SCRIPT, version], {
+					env: { ...process.env, SHIP_HOME: home },
+					stdio: ['ignore', 'ignore', 'inherit']
+				})
+			),
+			(child) => Effect.sync(() => child.kill('SIGKILL'))
+		);
+		const exited = Effect.callback<{ code: number | null; signal: NodeJS.Signals | null }>(
+			(resume) => {
+				if (child.exitCode !== null || child.signalCode !== null) {
+					resume(Effect.succeed({ code: child.exitCode, signal: child.signalCode }));
+				}
+				child.once('exit', (code, signal) => resume(Effect.succeed({ code, signal })));
+			}
+		);
+		// Listening once it answers a handshake.
+		yield* eventually(
+			Effect.scoped(Effect.flatMap(client(home), (rpc) => rpc.handshake({ version }))).pipe(
+				Effect.as(true),
+				Effect.orElseSucceed(() => false)
+			)
+		);
+		return { child, exited };
+	});

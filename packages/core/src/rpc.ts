@@ -140,11 +140,17 @@ export class ShipRpcs extends RpcGroup.make(
 	}),
 	/**
 	 * Replays the run's events from `fromSeq` (inclusive, default 1), then follows new
-	 * events until the run reaches a terminal status or is interrupted. Interrupting the stream detaches;
-	 * the run continues.
+	 * events until the run reaches a terminal status or is interrupted: the last event is
+	 * then the `RunFinished` or `RunInterrupted` that ended it (see `endsFollow`). With
+	 * `follow: false` it ends after the replay. Interrupting the stream detaches; the run
+	 * continues.
 	 */
 	Rpc.make('events', {
-		payload: { runId: RunId, fromSeq: Schema.optionalKey(PositiveInt) },
+		payload: {
+			runId: RunId,
+			fromSeq: Schema.optionalKey(PositiveInt),
+			follow: Schema.optionalKey(Schema.Boolean)
+		},
 		success: RunEventEnvelope,
 		error: RunNotFound,
 		stream: true

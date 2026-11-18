@@ -25,7 +25,7 @@ import {
 	scriptHappyRun,
 	VERSION,
 	type Fixture
-} from './harness.ts';
+} from '../src/testing.ts';
 
 const TIMEOUT = 30_000;
 

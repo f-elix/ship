@@ -1,6 +1,6 @@
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
 import { Agent, Gh, shipPaths } from '@ship/core';
-import { Cause, Effect, FileSystem, Layer, Logger } from 'effect';
+import { Effect, FileSystem, Layer, Logger } from 'effect';
 import { serveDaemon } from './daemon.ts';
 import { shipHomeDir } from './home.ts';
 
@@ -24,13 +24,11 @@ export const runDaemon = (version: string): void =>
 			const logger = Logger.layer([
 				Logger.toFile(Logger.formatLogFmt, shipPaths(home).daemonLog)
 			]);
+			// Another failure is reported by `runMain` on stdout, which the CLI, like stderr,
+			// points at the same log file.
 			yield* serveDaemon({ home, version, services: productionServices }).pipe(
-				// A daemon that fails to start says why in its log too: it has no terminal.
-				Effect.tapCause((cause) =>
-					Cause.hasInterruptsOnly(cause)
-						? Effect.void
-						: Effect.logError('ship daemon failed', cause)
-				),
+				// Two commands auto-started a daemon at once and the other one won: not an error.
+				Effect.catchTag('DaemonAlreadyRunning', (error) => Effect.logInfo(error.message)),
 				Effect.provide(logger)
 			);
 		}).pipe(Effect.provide(NodeServices.layer))

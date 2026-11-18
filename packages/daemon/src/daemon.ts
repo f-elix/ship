@@ -19,8 +19,8 @@ import type { PlatformError } from 'effect/PlatformError';
 import { HttpRouter } from 'effect/http';
 import { RpcSerialization, RpcServer } from 'effect/rpc';
 import { createServer } from 'node:http';
-import { connect } from 'node:net';
 import { DaemonControl, handlers } from './handlers.ts';
+import { isAlive, isListening, pidIn } from './liveness.ts';
 import { RPC_PATH } from './protocol.ts';
 import { RunHost } from './run-host.ts';
 
@@ -52,18 +52,6 @@ export interface DaemonHandle {
 	readonly stopRequested: Effect.Effect<void>;
 }
 
-/** Whether something accepts connections on the unix socket at `path`. */
-const isListening = (path: string) =>
-	Effect.callback<boolean>((resume) => {
-		const socket = connect(path);
-		socket.once('connect', () => {
-			socket.destroy();
-			resume(Effect.succeed(true));
-		});
-		socket.once('error', () => resume(Effect.succeed(false)));
-		return Effect.sync(() => socket.destroy());
-	});
-
 /** Whether something listens on the socket within a few seconds. */
 const listensSoon = (path: string) =>
 	isListening(path).pipe(
@@ -74,22 +62,6 @@ const listensSoon = (path: string) =>
 		Effect.retry({ schedule: Schedule.spaced('50 millis'), times: 100 }),
 		Effect.orElseSucceed(() => false)
 	);
-
-/** Whether a process with this id exists (`EPERM`: it does, under another user). */
-const isAlive = (pid: number): boolean => {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return error instanceof Error && 'code' in error && error.code === 'EPERM';
-	}
-};
-
-/** The pid in a pid file, or `null` when it holds none. */
-const pidIn = (text: string): number | null => {
-	const pid = Number(text.trim());
-	return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
-};
 
 /**
  * Makes this process the owner of ship's home, before it touches the run store or the
