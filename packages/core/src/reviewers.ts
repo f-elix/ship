@@ -216,7 +216,7 @@ export const VerifierOutput = Schema.Struct({
 			duplicateOf: Schema.optionalKey(NonNegativeInt),
 			/** For `confirmed`: the id of the previous finding it is the same problem as. */
 			repeats: Schema.optionalKey(Schema.String),
-			/** For `confirmed`: a corrected severity, when the reviewer's was wrong. */
+			/** For `confirmed`: a lower severity, when the evidence does not support the reported one. */
 			severity: Schema.optionalKey(Severity)
 		})
 	),
@@ -261,6 +261,24 @@ const subjectSection = (subject: ReviewSubject) => {
 	].join('\n');
 };
 
+/**
+ * The rules every reviewer follows, after its own brief and the change. Condensed from
+ * Matt Pocock's code-review skill (MIT); see `briefs/ATTRIBUTION.md`.
+ */
+const REVIEWER_RULES = `## Rules
+
+- Stay inside your brief. Other reviewers own what it lists as out of scope.
+- Report problems this change introduces or makes worse. Older problems count only when the change newly exposes them. After a fix round the diff may hold only the fix commits; read the files for context.
+- Try to disprove each finding before reporting it: read the surrounding code, callers and tests, confirm what you call missing is missing, and confirm any helper or API you suggest exists.
+- Severity:
+  - \`must-fix\`: a real defect shown by concrete evidence, such as a traced failing path, a quoted requirement or a quoted written project rule. Suspicion, preference or a missing best practice is never must-fix.
+  - \`tradeoff\`: a judgement call worth a human's attention; state its cost.
+  - \`nit\`: style or wording with no effect on behaviour.
+
+## Output
+
+For each finding give the repo-relative \`file\`, the \`line\` in the new version when there is one, the \`severity\`, a one-sentence \`claim\`, and \`evidence\`: the quoted code (and rule or spec text where it applies), the reasoning that links them, and what you inferred but did not verify. Return an empty \`findings\` list when nothing survives; never pad it.`;
+
 /** The prompt for one reviewer: its brief, then the change. */
 export const reviewerPrompt = (reviewer: ReviewerDef, subject: ReviewSubject): string =>
 	[
@@ -272,9 +290,7 @@ export const reviewerPrompt = (reviewer: ReviewerDef, subject: ReviewSubject): s
 		'',
 		subjectSection(subject),
 		'',
-		'## Output',
-		'',
-		"Report only problems your brief covers, in lines this change adds or affects. For each finding give the repo-relative `file`, the `line` in the new version when there is one, a `severity` (`must-fix`: wrong, broken or unsafe, and must change before merge; `tradeoff`: a judgement call worth a reviewer's attention; `nit`: minor), a one-sentence `claim`, and `evidence`: the code or spec text that shows it. Return an empty `findings` list when there is nothing to report."
+		REVIEWER_RULES
 	].join('\n');
 
 const firstParagraph = (brief: string): string => {
@@ -292,7 +308,10 @@ export const routerPrompt = (
 		'',
 		'## Reviewers you can pick',
 		'',
-		...candidates.map((reviewer) => `- ${reviewer.name}: ${firstParagraph(reviewer.brief)}`),
+		...candidates.map(
+			(reviewer) =>
+				`- ${reviewer.name}: ${reviewer.description ?? firstParagraph(reviewer.brief)}`
+		),
 		'',
 		'## Changed files',
 		'',
@@ -337,8 +356,21 @@ export const verifierPrompt = (
 		'',
 		'## Output',
 		'',
-		'Give one verdict per finding, by index: `confirmed`, `disproved` or `duplicate` (with `duplicateOf`, the index of the finding it repeats), and a reason. For a confirmed finding that is the same problem as a previous finding, set `repeats` to that id; set `severity` only to correct a wrong one. Then give each previous finding, by id, a status, `fixed` or `unfixed`, with evidence.'
+		'Give one verdict per finding, by index: `confirmed`, `disproved` or `duplicate` (with `duplicateOf`, the index of the finding it repeats), and a reason. For a confirmed finding that is the same problem as a previous finding, set `repeats` to that id; set `severity` only to lower one the evidence does not support. A kept finding takes the highest severity among the duplicates merged into it; its `severity` lowers that merged result. Then give each previous finding, by id, a status, `fixed` or `unfixed`, with evidence.'
 	].join('\n');
+
+// --- Severity ---
+
+const SEVERITY_RANK: Record<Severity, number> = { nit: 0, tradeoff: 1, 'must-fix': 2 };
+
+const mostSevere = (a: Severity, b: Severity): Severity =>
+	SEVERITY_RANK[a] >= SEVERITY_RANK[b] ? a : b;
+
+const leastSevere = (a: Severity, b: Severity): Severity => (mostSevere(a, b) === a ? b : a);
+
+/** A non-blocking reviewer's must-fix becomes a tradeoff, so it never starts a fix round. */
+const capSeverity = (reviewer: ReviewerDef, severity: Severity): Severity =>
+	!reviewer.blocking && severity === 'must-fix' ? 'tradeoff' : severity;
 
 // --- Verification ---
 
@@ -347,7 +379,9 @@ const invalidVerdicts = (output: VerifierOutput, detail: string) =>
 
 /**
  * Builds the round's verified findings from the verifier's verdicts. Ship assigns ids
- * (`r<round>-<n>`) and merges duplicates into the finding they repeat.
+ * (`r<round>-<n>`) and merges duplicates into the finding they repeat, which takes the
+ * highest severity among them. The verifier may lower a severity but never raise it, so
+ * only a blocking reviewer's must-fix, reported or merged in, can start a fix round.
  *
  * A finding with no verdict is kept, as is a duplicate of a finding that was not kept:
  * a finding is dropped only when the verifier disproves or merges it. Likewise a previous
@@ -392,7 +426,7 @@ export const assembleVerified = (
 			number,
 			{ finding: Finding; repeats?: FindingId; severity?: Severity }
 		>();
-		const merged = new Map<number, Array<string>>();
+		const merged = new Map<number, Array<Finding>>();
 		const disproved: Array<DisprovedFinding> = [];
 		input.findings.forEach((finding, index) => {
 			const verdict = verdicts.get(index);
@@ -403,7 +437,7 @@ export const assembleVerified = (
 			if (verdict?.verdict === 'duplicate') {
 				const target = mergeTarget(index);
 				if (target !== null) {
-					merged.set(target, [...(merged.get(target) ?? []), finding.reviewer]);
+					merged.set(target, [...(merged.get(target) ?? []), finding]);
 					return;
 				}
 			}
@@ -425,14 +459,21 @@ export const assembleVerified = (
 		};
 		const verified: Array<VerifiedFinding> = [];
 		for (const [index, entry] of kept) {
+			const duplicates = merged.get(index) ?? [];
+			const reported = duplicates.reduce(
+				(severity, duplicate) => mostSevere(severity, duplicate.severity),
+				entry.finding.severity
+			);
+			const severity =
+				entry.severity === undefined ? reported : leastSevere(entry.severity, reported);
 			verified.push({
 				...entry.finding,
-				...(entry.severity === undefined ? {} : { severity: entry.severity }),
+				severity,
 				id: nextId(),
 				round: input.round,
-				alsoReportedBy: [...new Set(merged.get(index) ?? [])].filter(
-					(reviewer) => reviewer !== entry.finding.reviewer
-				),
+				alsoReportedBy: [
+					...new Set(duplicates.map((duplicate) => duplicate.reviewer))
+				].filter((reviewer) => reviewer !== entry.finding.reviewer),
 				...(entry.repeats === undefined ? {} : { repeats: entry.repeats })
 			});
 		}
@@ -582,7 +623,8 @@ const make = (briefsDir: string) =>
 							reviewer: reviewer.name,
 							findings: result.output.findings.map((finding) => ({
 								reviewer: reviewer.name,
-								...finding
+								...finding,
+								severity: capSeverity(reviewer, finding.severity)
 							})),
 							cost: result.cost
 						};

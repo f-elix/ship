@@ -250,6 +250,28 @@ describe('Reviewers.route', () => {
 		)
 	);
 
+	it.effect(
+		"describes candidates by their frontmatter description, else the brief's first paragraph",
+		() =>
+			withReviewers(() =>
+				Effect.gen(function* () {
+					const fake = yield* AgentFake;
+					yield* fake.script({ step: 'route' }, { output: { reviewers: [] } });
+					yield* (yield* Reviewers).route({
+						reviewers: [
+							{ ...def('design', {}), description: 'Module boundaries.' },
+							def('security', {})
+						],
+						changes: sourceChange,
+						llm
+					});
+					const [call] = yield* fake.calls;
+					expect(call?.prompt).toContain('- design: Module boundaries.');
+					expect(call?.prompt).toContain('- security: The security brief.');
+				})
+			)
+	);
+
 	it.effect('keeps the deterministic picks when the LLM router fails', () =>
 		withReviewers(() =>
 			Effect.gen(function* () {
@@ -430,6 +452,42 @@ describe('Reviewers.review', () => {
 	);
 });
 
+describe('Reviewers.review blocking', () => {
+	it.effect("files a non-blocking reviewer's must-fix findings as tradeoffs", () =>
+		withReviewers(() =>
+			Effect.gen(function* () {
+				const fake = yield* AgentFake;
+				const mustFix = {
+					file: 'src/a.ts',
+					severity: 'must-fix',
+					claim: 'Split this module.',
+					evidence: 'const a'
+				};
+				for (const label of ['design', 'security']) {
+					yield* fake.script(
+						{ step: 'review', label },
+						{ output: { findings: [mustFix] } }
+					);
+				}
+				const reports = yield* (yield* Reviewers).review({
+					...subject,
+					reviewers: [{ ...def('design', {}), blocking: false }, def('security', {})],
+					model: 'sonnet',
+					timeoutMs: 60_000,
+					context,
+					onReport: () => Effect.void
+				});
+				expect(
+					reports.map((report) => [report.reviewer, report.findings[0]?.severity])
+				).toEqual([
+					['design', 'tradeoff'],
+					['security', 'must-fix']
+				]);
+			})
+		)
+	);
+});
+
 describe('Reviewers.verify', () => {
 	const found = (
 		reviewer: string,
@@ -540,6 +598,56 @@ describe('Reviewers.verify', () => {
 				expect(call?.prompt).toContain('0. security | must-fix | src/a.ts:3 | Injection.');
 				expect(call?.prompt).toContain(
 					'r1-2. security | must-fix | src/a.ts:3 | Unguarded.'
+				);
+			})
+		)
+	);
+
+	it.effect('never raises a severity, and a merged finding takes its highest severity', () =>
+		withReviewers(() =>
+			Effect.gen(function* () {
+				yield* (yield* AgentFake).script(
+					{ step: 'verify' },
+					{
+						output: {
+							verdicts: [
+								{
+									index: 0,
+									verdict: 'confirmed',
+									reason: 'Real.',
+									severity: 'must-fix'
+								},
+								{ index: 1, verdict: 'confirmed', reason: 'Real.' },
+								{ index: 2, verdict: 'duplicate', duplicateOf: 1, reason: 'Same.' },
+								{
+									index: 3,
+									verdict: 'confirmed',
+									reason: 'Real.',
+									severity: 'nit'
+								},
+								{ index: 4, verdict: 'duplicate', duplicateOf: 3, reason: 'Same.' }
+							],
+							previous: []
+						}
+					}
+				);
+				const result = yield* (yield* Reviewers).verify({
+					...verifyInput,
+					findings: [
+						found('design', 'Raised.', 'tradeoff'),
+						found('comments', 'Kept.', 'tradeoff'),
+						found('security', 'Kept, again.', 'must-fix'),
+						found('standards', 'Lowered.', 'tradeoff'),
+						found('security', 'Lowered, again.', 'must-fix')
+					],
+					previous: []
+				});
+				expect(result.verified.map((f) => [f.claim, f.severity, f.alsoReportedBy])).toEqual(
+					[
+						['Raised.', 'tradeoff', []],
+						['Kept.', 'must-fix', ['security']],
+						['Lowered.', 'nit', ['security']]
+					]
 				);
 			})
 		)

@@ -170,7 +170,8 @@ const touchedPaths = (files: ReadonlyArray<ChangedFile>): ReadonlyArray<string> 
 /**
  * Why `triggers` match `changes`, one reason per matching trigger; empty when none match.
  * Globs use `path.matchesGlob`, where `*` and `**` skip dot-directories such as
- * `.github/`, so those need an explicit pattern (`.github/**`).
+ * `.github/`, so those need an explicit pattern (`.github/**`). Added lines of `docs`
+ * files are not matched: prose would trip code patterns such as `catch` or `secret`.
  */
 export const matchTriggers = (
 	triggers: ReviewerTriggers,
@@ -182,7 +183,9 @@ export const matchTriggers = (
 	for (const glob of triggers.paths) {
 		if (paths.some((path) => matchesGlob(path, glob))) reasons.push(`path ${glob}`);
 	}
-	const lines = Object.values(changes.addedLines).flat();
+	const lines = Object.entries(changes.addedLines).flatMap(([path, added]) =>
+		classifyFile(path).includes('docs') ? [] : added
+	);
 	for (const pattern of triggers.addedLines) {
 		const regexp = new RegExp(pattern, 'u');
 		if (lines.some((line) => regexp.test(line))) reasons.push(`added line /${pattern}/`);
