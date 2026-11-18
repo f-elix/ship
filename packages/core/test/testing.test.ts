@@ -1,7 +1,8 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Layer } from 'effect';
-import { Checks, Git, Locks, type GitRepo } from '../src/index.ts';
-import { ChecksFake, exitCodesByCheck, fakeSha, GitFake } from '../src/testing.ts';
+import { Effect, Fiber, Layer, Schema } from 'effect';
+import { TestClock } from 'effect/testing';
+import { Agent, Checks, Git, Locks, type AgentRunInput, type GitRepo } from '../src/index.ts';
+import { AgentFake, ChecksFake, exitCodesByCheck, fakeSha, GitFake } from '../src/testing.ts';
 
 const repo: GitRepo = { cwd: '/repo', env: {} };
 
@@ -81,5 +82,78 @@ describe('ChecksFake', () => {
 				(yield* fake.calls).map((call) => `${call.kind}:${call.commandLine}`).slice(0, 3)
 			).toEqual(["fix:lint --fix 'a.ts'", "run:lint 'a.ts'", 'run:test']);
 		}).pipe(Effect.provide(ChecksFake.layer.pipe(Layer.provide(Locks.layer({ cpu: 1 })))))
+	);
+});
+
+describe('AgentFake', () => {
+	const call: AgentRunInput = {
+		step: 'review',
+		label: 'security',
+		prompt: 'Review',
+		model: 'sonnet',
+		access: 'read-only',
+		cwd: '/repo',
+		env: {},
+		timeoutMs: 1000
+	};
+	const Output = Schema.Struct({ ok: Schema.Boolean });
+
+	it.effect('answers from label scripts before step scripts, in order', () =>
+		Effect.gen(function* () {
+			const agent = yield* Agent;
+			const fake = yield* AgentFake;
+			yield* fake.script({ step: 'review' }, { text: 'step' });
+			yield* fake.script(
+				{ step: 'review', label: 'security' },
+				{ text: 'label 1' },
+				{ text: 'label 2' }
+			);
+			const texts = [];
+			for (let i = 0; i < 3; i += 1) texts.push((yield* agent.run(call)).text);
+			expect(texts).toEqual(['label 1', 'label 2', 'step']);
+			expect(yield* Effect.flip(agent.run(call))).toMatchObject({ reason: 'unscripted' });
+			expect(yield* fake.calls).toHaveLength(4);
+		}).pipe(Effect.provide(AgentFake.layer))
+	);
+
+	it.effect('decodes structured output and keeps a resumed session’s running total', () =>
+		Effect.gen(function* () {
+			const agent = yield* Agent;
+			const fake = yield* AgentFake;
+			yield* fake.script({ step: 'implement' }, { costUsd: 1 });
+			yield* fake.script(
+				{ step: 'fix' },
+				{ output: { ok: true }, costUsd: 0.5 },
+				{ output: { ok: 'yes' } }
+			);
+			const first = yield* agent.run({ ...call, step: 'implement' });
+			const fixed = yield* agent.runStructured(
+				{ ...call, step: 'fix', resume: first.session },
+				Output
+			);
+			expect(fixed.output).toEqual({ ok: true });
+			expect(fixed.session).toEqual({
+				sessionId: first.session.sessionId,
+				cumulativeCostUsd: 1.5
+			});
+			expect(fixed.cost.costUsd).toBe(0.5);
+			expect(
+				yield* Effect.flip(agent.runStructured({ ...call, step: 'fix' }, Output))
+			).toMatchObject({
+				_tag: 'AgentOutputMismatch'
+			});
+		}).pipe(Effect.provide(AgentFake.layer))
+	);
+
+	it.effect('times out a script that never finishes', () =>
+		Effect.gen(function* () {
+			yield* (yield* AgentFake).script({ step: 'review' }, () => Effect.never);
+			const fiber = yield* (yield* Agent).run(call).pipe(Effect.flip, Effect.forkChild);
+			yield* TestClock.adjust(1000);
+			expect(yield* Fiber.join(fiber)).toMatchObject({
+				_tag: 'AgentTimeout',
+				timeoutMs: 1000
+			});
+		}).pipe(Effect.provide(AgentFake.layer))
 	);
 });

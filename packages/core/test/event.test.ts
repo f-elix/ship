@@ -152,7 +152,7 @@ describe('run domain', () => {
 			branch: 'feature',
 			baseSha,
 			config: resolvedConfig,
-			implementerSessionId: sessionId,
+			implementerSession: { sessionId, cumulativeCostUsd: 0.5 },
 			round: 2,
 			checkFixAttempts: 1,
 			lastReviewedSha: headSha,

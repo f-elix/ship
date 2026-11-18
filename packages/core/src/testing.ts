@@ -1,8 +1,21 @@
 /**
- * Fake `Git` and `Checks` layers for machine and daemon tests. `Locks` is in memory, so
- * tests use the real one.
+ * Fake `Git`, `Checks`, `Agent` and `Gh` layers for machine and daemon tests. `Locks` is
+ * in memory, so tests use the real one.
  */
-import { Context, Effect, Layer, Ref } from 'effect';
+import { Context, Effect, Layer, Ref, Struct } from 'effect';
+import {
+	Agent,
+	AgentOutputMismatch,
+	AgentSdkError,
+	AgentTimeout,
+	billedTo,
+	decodeOutput,
+	type AgentError,
+	type AgentResult,
+	type AgentRunInput,
+	type AgentShape,
+	type OutputSchema
+} from './agent.ts';
 import {
 	Checks,
 	makeChecks,
@@ -10,6 +23,7 @@ import {
 	type ShellCommand,
 	type ShellExecutor
 } from './checks.ts';
+import { Gh, GhError, type CreatePrInput, type GhShape } from './gh.ts';
 import {
 	Git,
 	GitError,
@@ -19,7 +33,7 @@ import {
 	type GitShape
 } from './git.ts';
 import type { Locks } from './locks.ts';
-import { GitSha, ProjectKey } from './primitives.ts';
+import { GitSha, ProjectKey, SessionId, type Step } from './primitives.ts';
 import { projectKeyOf } from './project-key.ts';
 
 // --- Git ---
@@ -271,3 +285,238 @@ export const exitCodesByCheck = (
 				return { exitCode, outputTail: exitCode === 0 ? '' : `${command.check} failed` };
 			});
 	});
+
+// --- Agent ---
+
+/** What a scripted agent call answers. */
+export interface AgentReply {
+	/** The structured output in its encoded (JSON) form, decoded with the call's schema. */
+	readonly output?: unknown;
+	readonly text?: string;
+	readonly costUsd?: number;
+	readonly turns?: number;
+}
+
+/**
+ * One scripted answer: a reply, an error to fail with, or a function of the call, e.g. to
+ * edit the fake repo the way an implementer would, or to never finish.
+ */
+export type AgentScript =
+	AgentReply | AgentError | ((input: AgentRunInput) => Effect.Effect<AgentReply, AgentError>);
+
+/** Which calls a script answers: every call of `step`, or only those with `label`. */
+export interface AgentScriptKey {
+	readonly step: Step;
+	readonly label?: string;
+}
+
+export interface AgentFakeShape {
+	/**
+	 * Queues answers for the calls matching `key`, used in order. A script for the call's
+	 * label wins over one for its whole step. A call with nothing left to answer fails
+	 * with an `AgentSdkError` whose reason is `unscripted`.
+	 */
+	readonly script: (
+		key: AgentScriptKey,
+		...answers: ReadonlyArray<AgentScript>
+	) => Effect.Effect<void>;
+	/** Every call made, in order. */
+	readonly calls: Effect.Effect<ReadonlyArray<AgentRunInput>>;
+}
+
+type Scripts = ReadonlyMap<string, ReadonlyArray<AgentScript>>;
+
+export class AgentFake extends Context.Service<AgentFake, AgentFakeShape>()(
+	'@ship/core/AgentFake'
+) {
+	/**
+	 * A fake `Agent` answering from scripts, plus `AgentFake` to script it. Timeouts apply
+	 * as in the real one, so a script that never finishes fails with `AgentTimeout` under
+	 * `TestClock`. New sessions are `fake-session-<n>`; a resumed call keeps its session
+	 * and adds its cost to the session's total.
+	 */
+	static readonly layer: Layer.Layer<Agent | AgentFake> = Layer.effectContext(
+		Effect.gen(function* () {
+			const scripts = yield* Ref.make<Scripts>(new Map());
+			const calls = yield* Ref.make<ReadonlyArray<AgentRunInput>>([]);
+			const sessions = yield* Ref.make(0);
+
+			const keyOf = (key: AgentScriptKey) =>
+				key.label === undefined ? key.step : `${key.step}/${key.label}`;
+
+			const nextScript = (input: AgentRunInput) =>
+				Ref.modify(scripts, (current): [AgentScript | null, Scripts] => {
+					const keys = [
+						...(input.label === undefined ? [] : [keyOf(input)]),
+						keyOf({ step: input.step })
+					];
+					for (const key of keys) {
+						const [first, ...rest] = current.get(key) ?? [];
+						if (first !== undefined) return [first, new Map(current).set(key, rest)];
+					}
+					return [null, current];
+				});
+
+			const answer = (input: AgentRunInput, script: AgentScript | null) => {
+				if (script === null) {
+					return Effect.fail(
+						new AgentSdkError({
+							step: input.step,
+							reason: 'unscripted',
+							detail: `No scripted answer for ${keyOf(input)}`
+						})
+					);
+				}
+				if (typeof script === 'function') return script(input);
+				if (
+					script instanceof AgentSdkError ||
+					script instanceof AgentTimeout ||
+					script instanceof AgentOutputMismatch
+				) {
+					return Effect.fail(script);
+				}
+				return Effect.succeed(script);
+			};
+
+			const call = (input: AgentRunInput) =>
+				Effect.gen(function* () {
+					yield* Ref.update(calls, (all) => [...all, input]);
+					const reply = yield* answer(input, yield* nextScript(input));
+					const costUsd = reply.costUsd ?? 0;
+					const sessionId =
+						input.resume?.sessionId ??
+						SessionId.make(
+							`fake-session-${yield* Ref.updateAndGet(sessions, (n) => n + 1)}`
+						);
+					const result: AgentResult<null> = {
+						session: {
+							sessionId,
+							cumulativeCostUsd: (input.resume?.cumulativeCostUsd ?? 0) + costUsd
+						},
+						output: null,
+						text: reply.text ?? '',
+						cost: { step: input.step, model: input.model, sessionId, costUsd },
+						turns: reply.turns ?? 1,
+						transcriptPath: null
+					};
+					return { result, output: reply.output };
+				}).pipe(
+					Effect.timeoutOrElse({
+						duration: input.timeoutMs,
+						orElse: () =>
+							Effect.fail(
+								new AgentTimeout({ step: input.step, timeoutMs: input.timeoutMs })
+							)
+					})
+				);
+
+			const agent: AgentShape = {
+				run: (input) => Effect.map(call(input), ({ result }) => result),
+				runStructured: <A>(input: AgentRunInput, schema: OutputSchema<A>) =>
+					Effect.gen(function* () {
+						const { result, output } = yield* call(input);
+						const decoded = yield* decodeOutput(input.step, schema, output).pipe(
+							Effect.mapError(billedTo(result))
+						);
+						return { ...result, output: decoded };
+					})
+			};
+			const fake: AgentFakeShape = {
+				script: (key, ...answers) =>
+					Ref.update(scripts, (current) =>
+						new Map(current).set(keyOf(key), [
+							...(current.get(keyOf(key)) ?? []),
+							...answers
+						])
+					),
+				calls: Ref.get(calls)
+			};
+			return Context.empty().pipe(
+				Context.add(Agent, Agent.of(agent)),
+				Context.add(AgentFake, fake)
+			);
+		})
+	);
+}
+
+// --- Gh ---
+
+/** A PR in the fake GitHub. */
+export interface FakePr extends CreatePrInput {
+	readonly url: string;
+	readonly number: number;
+}
+
+export interface GhFakeShape {
+	/** Every PR ever opened, open or not, oldest first. */
+	readonly prs: Effect.Effect<ReadonlyArray<FakePr>>;
+	/** Adds an open PR, as if a previous attempt had opened it. */
+	readonly addPr: (pr: Omit<FakePr, 'url' | 'number'>) => Effect.Effect<FakePr>;
+	/** Makes `method` fail with a `GhError` carrying `stderr`, until cleared with `succeed`. */
+	readonly fail: (method: keyof GhShape, stderr: string) => Effect.Effect<void>;
+	readonly succeed: (method: keyof GhShape) => Effect.Effect<void>;
+}
+
+export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/GhFake') {
+	/** A fake `Gh` over an in-memory list of PRs, plus `GhFake` to inspect and drive it. */
+	static readonly layer: Layer.Layer<Gh | GhFake> = Layer.effectContext(
+		Effect.gen(function* () {
+			const prs = yield* Ref.make<ReadonlyArray<FakePr>>([]);
+			const failures = yield* Ref.make<Partial<Record<keyof GhShape, GhError>>>({});
+
+			const guard = (method: keyof GhShape) =>
+				Effect.flatMap(Ref.get(failures), (current) => {
+					const failure = current[method];
+					return failure === undefined ? Effect.void : Effect.fail(failure);
+				});
+
+			const add = (pr: CreatePrInput) =>
+				Ref.modify(prs, (current): [FakePr, ReadonlyArray<FakePr>] => {
+					const number = current.length + 1;
+					const created = {
+						...pr,
+						number,
+						url: `https://github.com/f-elix/example/pull/${number}`
+					};
+					return [created, [...current, created]];
+				});
+
+			const update = (url: string, f: (pr: FakePr) => FakePr) =>
+				Ref.update(prs, (current) => current.map((pr) => (pr.url === url ? f(pr) : pr)));
+
+			const gh: GhShape = {
+				findPr: (_repo, branch) =>
+					Effect.andThen(guard('findPr'), () =>
+						Effect.map(Ref.get(prs), (current) => {
+							const pr = current.find((candidate) => candidate.head === branch);
+							return pr === undefined
+								? null
+								: { url: pr.url, number: pr.number, isDraft: pr.draft };
+						})
+					),
+				createPr: (_repo, input) =>
+					Effect.andThen(guard('createPr'), () => Effect.map(add(input), (pr) => pr.url)),
+				editPr: (_repo, { url, title, body }) =>
+					Effect.andThen(guard('editPr'), () =>
+						update(url, (pr) => ({ ...pr, title, body }))
+					),
+				markDraft: (_repo, url) =>
+					Effect.andThen(guard('markDraft'), () =>
+						update(url, (pr) => ({ ...pr, draft: true }))
+					)
+			};
+			const fake: GhFakeShape = {
+				prs: Ref.get(prs),
+				addPr: (pr) => add(pr),
+				fail: (method, stderr) =>
+					Ref.update(failures, (current) => ({
+						...current,
+						[method]: new GhError({ args: [method], cwd: '/repo', exitCode: 1, stderr })
+					})),
+				succeed: (method) =>
+					Ref.update(failures, (current) => Struct.omit(current, [method]))
+			};
+			return Context.empty().pipe(Context.add(Gh, Gh.of(gh)), Context.add(GhFake, fake));
+		})
+	);
+}
