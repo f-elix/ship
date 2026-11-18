@@ -6,16 +6,21 @@ import {
 	RunEvent,
 	RunId,
 	RunInfo,
+	RunJournal,
 	RunNotFound,
 	RunState,
 	RunStatus,
 	SNAPSHOT_VERSION,
+	SnapshotLoad,
 	statePath,
 	Summary,
 	TerminalRunStatus,
 	UnknownEvent,
+	type AppendableEvent,
 	type Env,
-	type RunEventEnvelope
+	type PersistedRunSnapshot,
+	type RunEventEnvelope,
+	type RunJournalShape
 } from '@ship/core';
 import {
 	Context,
@@ -32,25 +37,12 @@ import {
 } from 'effect';
 import { SqlClient, SqlError } from 'effect/sql';
 import { latestMigrationId, migrations } from './migrations.ts';
-import { restoreEnv, stripEnv, type EnvPath, type PersistedRunSnapshot } from './snapshot.ts';
+import { restoreEnv, stripEnv, type EnvPath } from './snapshot.ts';
 
 // --- Public types ---
 
 /** What a new run starts from: its `RunCreated` event without the timestamp. */
 export type NewRun = Omit<typeof RunEvent.cases.RunCreated.Type, '_tag' | 'at'>;
-
-/**
- * Events a caller appends directly. The others go through the method that also changes the
- * run's status, so the log and the run record agree: `create`, `finish` (which appends
- * `RunCancelled` for a cancelled run), `markInterrupted` and `markResumed`.
- */
-export type AppendableEvent = Exclude<
-	RunEvent,
-	{
-		readonly _tag:
-			'RunCreated' | 'RunFinished' | 'RunCancelled' | 'RunInterrupted' | 'RunResumed';
-	}
->;
 
 /** Statuses the store records; `waiting` is derived by the daemon from the live machine. */
 export type StoredRunStatus = Exclude<RunStatus, 'waiting'>;
@@ -65,19 +57,8 @@ export interface RunFilter {
 	readonly limit?: number;
 }
 
-/** What `loadSnapshot` found. Only `Found` can be resumed. */
-export type SnapshotLoad = Data.TaggedEnum<{
-	Found: { readonly snapshot: PersistedRunSnapshot };
-	/** The run has not saved a snapshot yet. */
-	Missing: {};
-	/** Saved under another `SNAPSHOT_VERSION`; restoring it is unsafe. */
-	IncompatibleVersion: { readonly storedVersion: number; readonly currentVersion: number };
-	/** The stored snapshot does not parse or its context is not a valid `RunState`. */
-	Corrupt: { readonly error: string };
-}>;
-export const SnapshotLoad = Data.taggedEnum<SnapshotLoad>();
-
-export interface RunStoreShape {
+/** The run store; the members a run driver needs are documented on `RunJournalShape`. */
+export interface RunStoreShape extends RunJournalShape {
 	/** Creates a run with status `running` and appends its `RunCreated` event (seq 1). */
 	readonly create: (run: NewRun) => Effect.Effect<RunInfo>;
 	/** Appends an event with the run's next seq. Fails with `InvalidRunStatus` once the run finished. */
@@ -85,11 +66,6 @@ export interface RunStoreShape {
 		runId: RunId,
 		event: AppendableEvent
 	) => Effect.Effect<RunEventEnvelope, RunNotFound | InvalidRunStatus>;
-	/** The run's events from `fromSeq` (inclusive, default 1), in seq order. */
-	readonly events: (
-		runId: RunId,
-		fromSeq?: number
-	) => Effect.Effect<ReadonlyArray<RunEventEnvelope>, RunNotFound>;
 	/**
 	 * Replays the run's events from `fromSeq`, then follows new ones until the run finishes
 	 * or is interrupted. Ends after the replay when the run is not active.
@@ -98,45 +74,14 @@ export interface RunStoreShape {
 		runId: RunId,
 		fromSeq?: number
 	) => Stream.Stream<RunEventEnvelope, RunNotFound>;
-	/**
-	 * Replaces the run's snapshot (the run is `snapshot.context.runId`) and updates the
-	 * run's state, round and PR URL from it, the only source of those in `RunInfo`; save
-	 * one on every state change. Every `env` property is removed before storing.
-	 *
-	 * `events` (e.g. the transition's `StateChanged`) are appended in the same transaction,
-	 * so the log and the snapshot never disagree after a crash. Fails with
-	 * `InvalidRunStatus` when there are events and the run finished.
-	 */
-	readonly saveSnapshot: (
-		snapshot: PersistedRunSnapshot,
-		events?: ReadonlyArray<AppendableEvent>
-	) => Effect.Effect<ReadonlyArray<RunEventEnvelope>, RunNotFound | InvalidRunStatus>;
-	/** Loads the run's snapshot, putting `env` back wherever `saveSnapshot` removed it. */
-	readonly loadSnapshot: (runId: RunId, env: Env) => Effect.Effect<SnapshotLoad, RunNotFound>;
 	readonly get: (runId: RunId) => Effect.Effect<RunInfo, RunNotFound>;
 	/** Most recently updated first. */
 	readonly list: (filter?: RunFilter) => Effect.Effect<ReadonlyArray<RunInfo>>;
-	/**
-	 * Stores the summary, sets the run's status to `summary.status` and appends `RunFinished`,
-	 * preceded by `RunCancelled` for a cancelled run. Returns the `RunFinished` envelope.
-	 * Fails with `InvalidRunStatus` when the run already finished.
-	 */
-	readonly finish: (
-		summary: Summary
-	) => Effect.Effect<RunEventEnvelope, RunNotFound | InvalidRunStatus>;
 	/**
 	 * Sets every `running` run to `interrupted` and appends `RunInterrupted` to each.
 	 * Returns the interrupted runs' ids.
 	 */
 	readonly markInterrupted: Effect.Effect<ReadonlyArray<RunId>>;
-	/**
-	 * Sets an `interrupted` run back to `running` and appends `RunResumed`. Fails with
-	 * `InvalidRunStatus` for any other status. Call it only once `loadSnapshot` returned
-	 * `Found`, so a run that cannot be restored stays `interrupted`.
-	 */
-	readonly markResumed: (
-		runId: RunId
-	) => Effect.Effect<RunEventEnvelope, RunNotFound | InvalidRunStatus>;
 }
 
 // --- Rows ---
@@ -558,4 +503,12 @@ export class RunStore extends Context.Service<RunStore, RunStoreShape>()('@ship/
 	/** The store on a SQLite file, created if absent. */
 	static readonly layerFile = (filename: string) =>
 		this.layer.pipe(Layer.provide(SqliteClient.layer({ filename })));
+
+	/** The store as the `RunJournal` a run driver writes to. */
+	static readonly journal: Layer.Layer<RunJournal, never, RunStore> = Layer.effect(
+		RunJournal,
+		Effect.gen(function* () {
+			return RunJournal.of(yield* RunStore);
+		})
+	);
 }

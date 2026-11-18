@@ -77,7 +77,6 @@ describe('shipPaths', () => {
 		expect(paths.transcripts(runId)).toBe(
 			'/home/me/.ship/runs/20261117-153012-a1b2c3/transcripts'
 		);
-		expect(paths.baseline(runId)).toBe('/home/me/.ship/runs/20261117-153012-a1b2c3/baseline');
 		expect(paths.globalConfig).toBe('/home/me/.ship/config.json');
 	});
 });

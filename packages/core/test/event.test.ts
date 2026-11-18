@@ -156,6 +156,13 @@ describe('run domain', () => {
 			round: 2,
 			checkFixAttempts: 1,
 			lastReviewedSha: headSha,
+			review: {
+				round: 2,
+				fromSha: headSha,
+				toSha: headSha,
+				reviewers: ['comments'],
+				findings: [finding]
+			},
 			reviewRounds: [
 				{
 					round: 1,
@@ -169,7 +176,8 @@ describe('run domain', () => {
 			checks: escalatedSummary.checks,
 			costUsd: 0.84,
 			prUrl: null,
-			escalationReason: null
+			escalationReason: null,
+			error: null
 		};
 		expect(jsonRoundTrip(RunState, state)).toEqual(state);
 	});

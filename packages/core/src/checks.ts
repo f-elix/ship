@@ -1,4 +1,4 @@
-import { Clock, Context, DateTime, Effect, Layer, Schema } from 'effect';
+import { Clock, Context, DateTime, Duration, Effect, Layer, Schema } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import type { Check } from './config.ts';
 import type { RunEvent } from './event.ts';
@@ -35,6 +35,12 @@ export interface RunChecksInput {
 	readonly files: ReadonlyArray<string>;
 	/** Each check's `fix` command runs just before it, except on the baseline pass. */
 	readonly pass: CheckPass;
+	/**
+	 * Limit for each command, counted from when it starts, so time spent waiting for a lock
+	 * never counts. A command over the limit is killed and the pass fails with
+	 * `CheckTimeout`.
+	 */
+	readonly timeoutMs?: number;
 	readonly onEvent?: (event: CheckEvent) => Effect.Effect<void>;
 }
 
@@ -60,6 +66,17 @@ export class CheckSpawnError extends Schema.TaggedError<CheckSpawnError>()('Chec
 	detail: Schema.String
 }) {}
 
+/** A check command ran past `RunChecksInput.timeoutMs` and was killed. */
+export class CheckTimeout extends Schema.TaggedError<CheckTimeout>()('CheckTimeout', {
+	check: Schema.String,
+	commandLine: Schema.String,
+	timeoutMs: Schema.Number
+}) {
+	override get message(): string {
+		return `The ${this.check} check timed out after ${this.timeoutMs} ms`;
+	}
+}
+
 export interface ChecksShape {
 	/**
 	 * Runs the checks one after another, in config order, each holding a permit of its lock
@@ -69,7 +86,7 @@ export interface ChecksShape {
 	 */
 	readonly run: (
 		input: RunChecksInput
-	) => Effect.Effect<CheckRound, CheckSpawnError | UnknownLockResource>;
+	) => Effect.Effect<CheckRound, CheckSpawnError | CheckTimeout | UnknownLockResource>;
 	/**
 	 * Runs the project's `format` command, without a lock. Returns `null` when the command
 	 * uses `{files}` and no files changed.
@@ -157,14 +174,28 @@ export const makeChecks = (execute: ShellExecutor) =>
 					command: kind,
 					commandLine: line
 				});
+				const command = execute({
+					commandLine: line,
+					cwd: input.cwd,
+					env: input.env,
+					check: check.name,
+					kind
+				});
+				const timeoutMs = input.timeoutMs;
 				const { value, durationMs } = yield* timed(
-					execute({
-						commandLine: line,
-						cwd: input.cwd,
-						env: input.env,
-						check: check.name,
-						kind
-					})
+					timeoutMs === undefined
+						? command
+						: Effect.timeoutOrElse(command, {
+								duration: Duration.millis(timeoutMs),
+								orElse: () =>
+									Effect.fail(
+										new CheckTimeout({
+											check: check.name,
+											commandLine: line,
+											timeoutMs
+										})
+									)
+							})
 				);
 				yield* emit({
 					_tag: 'CheckFinished',

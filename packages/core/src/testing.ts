@@ -62,8 +62,6 @@ export interface FakeGitState {
 	readonly addedLines: Readonly<Record<string, ReadonlyArray<string>>>;
 	readonly pushes: ReadonlyArray<string>;
 	readonly excluded: ReadonlyArray<string>;
-	/** Worktrees currently open. */
-	readonly worktrees: ReadonlyArray<string>;
 	/** Methods that fail, with their error, until removed. */
 	readonly failures: Partial<Record<keyof GitShape, GitError>>;
 }
@@ -104,7 +102,6 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 			addedLines: {},
 			pushes: [],
 			excluded: [],
-			worktrees: [],
 			failures: {},
 			...initial
 		});
@@ -178,21 +175,7 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 					if (current.excluded.includes(path)) return false;
 					yield* Ref.set(state, { ...current, excluded: [...current.excluded, path] });
 					return true;
-				}),
-			worktree: (_repo, { path }) =>
-				Effect.acquireRelease(
-					Effect.flatMap(read('worktree'), (current) =>
-						Effect.as(
-							Ref.set(state, { ...current, worktrees: [...current.worktrees, path] }),
-							path
-						)
-					),
-					() =>
-						Ref.update(state, (current) => ({
-							...current,
-							worktrees: current.worktrees.filter((open) => open !== path)
-						}))
-				)
+				})
 		};
 
 		const fake: GitFakeShape = {

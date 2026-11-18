@@ -10,6 +10,7 @@ import {
 	RunEvent,
 	RunId,
 	SNAPSHOT_VERSION,
+	type PersistedRunSnapshot,
 	type RunState,
 	type Summary
 } from '@ship/core';
@@ -19,7 +20,7 @@ import { TestClock } from 'effect/testing';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RunStore, type PersistedRunSnapshot } from '../src/index.ts';
+import { RunStore } from '../src/index.ts';
 
 /** A database file path in a temp dir that is deleted when the scope closes. */
 const tempDbFile = Effect.map(
@@ -57,12 +58,14 @@ const runState = (runId: RunId): RunState => ({
 	round: 1,
 	checkFixAttempts: 0,
 	lastReviewedSha: null,
+	review: null,
 	reviewRounds: [],
 	unresolved: { mustFix: [], tradeoffs: [], nits: [] },
 	checks: [],
 	costUsd: 0.5,
 	prUrl: null,
-	escalationReason: null
+	escalationReason: null,
+	error: null
 });
 
 /** Shaped like XState's persisted snapshot, with an invoked actor that got the env as input. */

@@ -166,7 +166,8 @@ export interface Timeouts extends Schema.Schema.Type<typeof Timeouts> {}
 
 const MODELS_DESCRIPTION = 'Agent model per step';
 const CAPS_DESCRIPTION = 'Loop caps before escalating';
-const TIMEOUTS_DESCRIPTION = 'Timeout per step; time spent waiting for a lock does not count';
+const TIMEOUTS_DESCRIPTION =
+	'Timeout per step. baseline and checks apply to each check command, route to the router call and review to each reviewer call; time spent waiting for a lock does not count';
 
 // --- Global config: ~/.ship/config.json ---
 

@@ -122,7 +122,8 @@ Merge Danger: a two-way door is cheap to roll back; destructive or hard-to-rever
 const ESCALATION_TEXT: Record<EscalationReason, string> = {
 	'check-fix-cap': 'checks still fail after the last check-fix attempt',
 	'review-cap': 'must-fix findings remain after the last review round',
-	stall: 'a fix round left a must-fix finding unresolved'
+	stall: 'a fix round left a must-fix finding unresolved',
+	timeout: 'a step timed out'
 };
 
 const checksEvidence = (checks: ReadonlyArray<CheckRound>): string => {

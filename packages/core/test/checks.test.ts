@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
 	Checks,
 	CheckSpawnError,
+	CheckTimeout,
 	expandFiles,
 	filesForChecks,
 	Locks,
@@ -55,6 +56,42 @@ const describeEvent = (event: CheckEvent): string =>
 		: `${event._tag}:${event.check}`;
 
 describe('Checks', () => {
+	it.live('times each command once it holds its lock, not while it waits', () =>
+		Effect.gen(function* () {
+			const dir = yield* tempDir;
+			const locks = yield* Locks;
+			const held = yield* Deferred.make<void>();
+			const holder = yield* locks
+				.withPermit(
+					'cpu',
+					Effect.andThen(Deferred.succeed(held, undefined), Effect.sleep('400 millis'))
+				)
+				.pipe(Effect.forkChild);
+			yield* Deferred.await(held);
+
+			// Waits about 400ms for the lock, longer than its 300ms limit, then runs at once.
+			const { round } = yield* runChecks({
+				cwd: dir,
+				files: [],
+				checks: [check('quick', 'true')],
+				timeoutMs: 300
+			});
+			expect(round.results.map((result) => result.exitCode)).toEqual([0]);
+			yield* Fiber.join(holder);
+
+			const error = yield* Effect.flip(
+				runChecks({
+					cwd: dir,
+					files: [],
+					checks: [check('slow', 'sleep 5')],
+					timeoutMs: 100
+				})
+			);
+			expect(error).toBeInstanceOf(CheckTimeout);
+			expect(error).toMatchObject({ check: 'slow', commandLine: 'sleep 5', timeoutMs: 100 });
+		}).pipe(Effect.scoped, Effect.provide(ChecksLive))
+	);
+
 	it.live('runs with the caller env and cwd, never the daemon env', () =>
 		Effect.gen(function* () {
 			const dir = yield* tempDir;

@@ -36,20 +36,12 @@ describe('GitFake', () => {
 		}).pipe(Effect.provide(GitFake.layer()))
 	);
 
-	it.effect('fails a method on demand and tracks open worktrees', () =>
+	it.effect('fails a method on demand', () =>
 		Effect.gen(function* () {
 			const git = yield* Git;
 			const fake = yield* GitFake;
 			yield* fake.fail('push', 'rejected');
 			expect((yield* Effect.flip(git.push(repo, 'feature'))).stderr).toBe('rejected');
-
-			yield* Effect.scoped(
-				Effect.gen(function* () {
-					yield* git.worktree(repo, { path: '/tmp/baseline', sha: fakeSha(9) });
-					expect((yield* fake.state).worktrees).toEqual(['/tmp/baseline']);
-				})
-			);
-			expect((yield* fake.state).worktrees).toEqual([]);
 		}).pipe(Effect.provide(GitFake.layer({ branch: 'topic' })))
 	);
 });
