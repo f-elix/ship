@@ -91,7 +91,10 @@ describe('bundled conventions', () => {
 		).toEqual([
 			`${DIR}/comments.details.md`,
 			`${DIR}/effect.details.md`,
-			`${DIR}/error-handling.details.md`
+			`${DIR}/error-handling.details.md`,
+			`${DIR}/styling.details.md`,
+			`${DIR}/svelte-components.details.md`,
+			`${DIR}/typescript.details.md`
 		]);
 	});
 
