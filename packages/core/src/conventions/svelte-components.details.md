@@ -223,6 +223,33 @@ Pass `class` an object or an array (Svelte 5.16+) instead of the `class:` direct
 <div class={['card', { active: isActive, disabled }]}></div>
 ```
 
+### Empty snippets
+
+Don't write a snippet with nothing in it, such as `{#snippet pending()}{/snippet}`. It renders nothing, and the reader has to guess why. Use the primitive that says what you mean:
+
+- To hide a remote query's value while it loads or when it fails, read `query.current` and `query.error` instead of awaiting the query inside a `<svelte:boundary>` with empty `pending` and `failed` snippets.
+- To keep a component's default behaviour, leave the snippet out.
+
+`house-svelte/no-empty-snippets` flags snippets that hold only whitespace or comments.
+
+```svelte
+<!-- ❌ Bad: empty snippets hide the badge while the count loads or fails -->
+<svelte:boundary>
+	<Badge count={await getCount()} />
+	{#snippet pending()}{/snippet}
+	{#snippet failed()}{/snippet}
+</svelte:boundary>
+
+<!-- ✅ Good: render the badge once the query has a value -->
+<script lang="ts">
+	const count = getCount();
+</script>
+
+{#if count.current !== undefined}
+	<Badge count={count.current} />
+{/if}
+```
+
 ## Component Organization Within Files
 
 When you have a large component directory, organize by feature:
