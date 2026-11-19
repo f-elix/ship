@@ -190,7 +190,10 @@ export const pipelineMachine = setupEffect({
 				src: 'implement',
 				input: stepInput,
 				onDone: ({ context, event }) =>
-					settle(context, event.output, (next) => ({ target: 'checks', context: next })),
+					settle(context, event.output, (next, commitSubject) => ({
+						target: 'checks',
+						context: commitSubject === null ? next : { ...next, commitSubject }
+					})),
 				onError: onDefect
 			}
 		},

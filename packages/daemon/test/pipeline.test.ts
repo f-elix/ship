@@ -209,6 +209,14 @@ const edits =
 	() =>
 		Effect.as(git.edit([{ path: `src/${file}`, status: 'added' }]), { costUsd });
 
+/** An `implement` call that edits `src/<file>` and answers with `output`. */
+const implementsWith =
+	(git: GitFakeShape, file: string, output: unknown, costUsd = 0.5): AgentScript =>
+	() =>
+		Effect.as(git.edit([{ path: `src/${file}`, status: 'added' }]), { costUsd, output });
+
+const SUBJECT = 'Add the feature module';
+
 const findingAt = (claim: string) => ({
 	file: 'src/feature.ts',
 	line: 3,
@@ -297,7 +305,10 @@ describe('pipeline', () => {
 				const git = yield* GitFake;
 				const gh = yield* GhFake;
 				const spy = yield* JournalSpy;
-				yield* agent.script({ step: 'implement' }, edits(git, 'feature.ts'));
+				yield* agent.script(
+					{ step: 'implement' },
+					implementsWith(git, 'feature.ts', { commitSubject: SUBJECT })
+				);
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
 				yield* agent.script({ step: 'pr' }, prText);
 				const state = yield* newRun();
@@ -336,7 +347,9 @@ describe('pipeline', () => {
 				const repo = yield* git.state;
 				expect(repo.pushes).toEqual(['feature']);
 				expect(repo.excluded).toEqual([PLAN_DIR]);
-				expect(repo.commits.map((commit) => commit.message)).toEqual(['Implement feature']);
+				// The round-0 commit takes the implementer's subject.
+				expect(repo.commits.map((commit) => commit.message)).toEqual([SUBJECT]);
+				expect((yield* agent.calls)[0]?.prompt).toContain('commitSubject');
 
 				const saves = yield* spy.saves;
 				expectSavedOnEveryStateChange(saves);
@@ -346,6 +359,7 @@ describe('pipeline', () => {
 				expect(final?.checks).toEqual(summary.checks);
 				expect(final?.prUrl).toBe(summary.prUrl);
 				expect(final?.implementerSession?.sessionId).toBe('fake-session-1');
+				expect(final?.commitSubject).toBe(SUBJECT);
 				const info = yield* (yield* RunStore).get(state.runId);
 				expect(info).toMatchObject({ status: 'done', state: 'done', summary });
 				// The caller's env never reaches the database.
@@ -490,7 +504,10 @@ describe('pipeline', () => {
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
 				const git = yield* GitFake;
-				yield* agent.script({ step: 'implement' }, edits(git, 'feature.ts'));
+				yield* agent.script(
+					{ step: 'implement' },
+					implementsWith(git, 'feature.ts', { commitSubject: SUBJECT })
+				);
 				yield* agent.script(
 					{ step: 'review', label: 'standards' },
 					reviewerSays(findingAt('Off by one')),
@@ -548,8 +565,66 @@ describe('pipeline', () => {
 					'escalate',
 					'escalated'
 				]);
+				// The fix round kept its own message; the squash left the implementer's subject.
+				const events = yield* eventsOf(state.runId);
+				expect(
+					events.flatMap((event) =>
+						event._tag === 'CommitCreated' ? [event.message] : []
+					)
+				).toEqual([SUBJECT, 'Address review round 1 findings']);
 				const commits = (yield* git.state).commits.map((commit) => commit.message);
-				expect(commits).toEqual(['Implement feature']);
+				expect(commits).toEqual([SUBJECT]);
+			})
+		)
+	);
+
+	it.effect('falls back to the default commit message when the subject is invalid', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
+				const git = yield* GitFake;
+				const spy = yield* JournalSpy;
+				yield* agent.script(
+					{ step: 'implement' },
+					implementsWith(git, 'feature.ts', { commitSubject: 'Add the feature.' })
+				);
+				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
+				yield* agent.script({ step: 'pr' }, prText);
+				const state = yield* newRun();
+
+				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
+
+				// The call is still billed and its session kept; only the subject is dropped.
+				expect(summary).toMatchObject({ status: 'done', costUsd: 0.65 });
+				expect((yield* git.state).commits.map((commit) => commit.message)).toEqual([
+					'Implement feature'
+				]);
+				const final = (yield* spy.saves).at(-1)?.snapshot.context;
+				expect(final?.implementerSession?.sessionId).toBe('fake-session-1');
+				expect(final).not.toHaveProperty('commitSubject');
+			})
+		)
+	);
+
+	it.effect('falls back to the default commit message when the subject is too long', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
+				const git = yield* GitFake;
+				yield* agent.script(
+					{ step: 'implement' },
+					implementsWith(git, 'feature.ts', { commitSubject: 'A'.repeat(73) })
+				);
+				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
+				yield* agent.script({ step: 'pr' }, prText);
+				const state = yield* newRun();
+
+				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
+
+				expect(summary.status).toBe('done');
+				expect((yield* git.state).commits.map((commit) => commit.message)).toEqual([
+					'Implement feature'
+				]);
 			})
 		)
 	);

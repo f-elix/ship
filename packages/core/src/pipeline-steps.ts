@@ -1,5 +1,11 @@
-import { Data, Effect, Queue, Stream } from 'effect';
-import { Agent, type AgentRunInput } from './agent.ts';
+import { Data, Effect, Queue, Schema, Stream } from 'effect';
+import {
+	Agent,
+	type AgentCallCost,
+	type AgentError,
+	type AgentRunInput,
+	type AgentShape
+} from './agent.ts';
 import { baselinePass, Checks, filesForChecks } from './checks.ts';
 import type { CheckEvent } from './event.ts';
 import type { VerifiedFinding } from './finding.ts';
@@ -15,12 +21,14 @@ import {
 	type StepKit,
 	type StepOutcome
 } from './run-step.ts';
-import type {
-	CheckRound,
-	EscalationReason,
-	ReviewInProgress,
-	RunState,
-	UnresolvedFindings
+import {
+	CommitSubject,
+	type AgentSession,
+	type CheckRound,
+	type EscalationReason,
+	type ReviewInProgress,
+	type RunState,
+	type UnresolvedFindings
 } from './run.ts';
 import { PLAN_FILES, ShipHome } from './ship-paths.ts';
 
@@ -30,10 +38,13 @@ const specPath = (state: RunState) => `${state.planDir}/${PLAN_FILES.spec}`;
 const planPath = (state: RunState) => `${state.planDir}/${PLAN_FILES.plan}`;
 const planName = (state: RunState) => state.planDir.slice(state.planDir.lastIndexOf('/') + 1);
 
-/** The message of the round's commit, and of the single commit a squash leaves. */
+/**
+ * The message of the round's commit, and of the single commit a squash leaves. Round 0
+ * uses the implementer's subject, or `Implement <plan name>` when it gave none.
+ */
 export const commitMessage = (state: RunState): string =>
 	state.round === 0
-		? `Implement ${planName(state)}`
+		? (state.commitSubject ?? `Implement ${planName(state)}`)
 		: `Address review round ${state.round} findings`;
 
 /** Every check passed. */
@@ -66,14 +77,62 @@ const formatChanges = Effect.fnUntraced(function* (state: RunState) {
 	}
 });
 
+/** What an implementer call produced: its session and cost, and the step's output. */
+interface ImplementerReply<A> {
+	readonly session: AgentSession;
+	readonly cost: AgentCallCost;
+	readonly value: A;
+}
+
+type ImplementerAsk<A> = (
+	agent: AgentShape,
+	input: AgentRunInput
+) => Effect.Effect<ImplementerReply<A>, AgentError>;
+
+/** An implementer call whose answer is only its work on the tree. */
+const askPlain: ImplementerAsk<void> = (agent, input) =>
+	Effect.map(agent.run(input), (result) => ({
+		session: result.session,
+		cost: result.cost,
+		value: undefined
+	}));
+
+/** What `implement` answers alongside its work. */
+const ImplementOutput = Schema.Struct({ commitSubject: CommitSubject });
+
+/**
+ * Asks the implementer for its work and a commit subject. A missing or invalid subject
+ * does not fail the step: the call is still billed and its session kept, and the
+ * subject is `null` so the commit falls back to the default message.
+ */
+const askWithSubject: ImplementerAsk<CommitSubject | null> = (agent, input) =>
+	agent.runStructured(input, ImplementOutput).pipe(
+		Effect.map((result): ImplementerReply<CommitSubject | null> => ({
+			session: result.session,
+			cost: result.cost,
+			value: result.output.commitSubject
+		})),
+		Effect.catchTag('AgentOutputMismatch', (error) =>
+			error.spend === undefined
+				? Effect.fail(error)
+				: Effect.as(
+						Effect.logWarning(
+							`The implementer gave no valid commit subject: ${error.detail}`
+						),
+						{ session: error.spend.session, cost: error.spend.cost, value: null }
+					)
+		)
+	);
+
 /**
  * One implementer call (`implement`, `fixChecks` or `fix`): resumes the implementer
  * session when there is one, keeps the new session, then formats the changes.
  */
-const implementerCall = (
+const implementerCall = <A>(
 	step: 'implement' | 'fixChecks' | 'fix',
 	state: RunState,
-	prompt: string
+	prompt: string,
+	ask: ImplementerAsk<A>
 ) =>
 	runStep(step, state, { timeoutMs: state.config.timeouts[step] }, (kit) =>
 		Effect.gen(function* () {
@@ -92,10 +151,11 @@ const implementerCall = (
 				timeoutMs: state.config.timeouts[step],
 				transcript: context.transcript
 			};
-			const result = yield* agent.run(input);
-			yield* kit.recordCost(result.cost);
-			yield* kit.recordSession(result.session);
+			const reply = yield* ask(agent, input);
+			yield* kit.recordCost(reply.cost);
+			yield* kit.recordSession(reply.session);
 			yield* formatChanges(state);
+			return reply.value;
 		})
 	);
 
@@ -210,8 +270,11 @@ export const implementStep = (state: RunState) =>
 			'',
 			'Read both, then implement the whole plan, with tests where the plan or the project calls for them.',
 			'',
-			IMPLEMENTER_RULES
-		].join('\n')
+			IMPLEMENTER_RULES,
+			'',
+			'When you are done, answer with `commitSubject`: the subject line of the commit for this change. Write it in the imperative mood, at most 72 characters, with no trailing period, saying what the change does (e.g. "Add retry to webhook delivery").'
+		].join('\n'),
+		askWithSubject
 	);
 
 /** Resumes the implementer with the failing checks of the latest pass. */
@@ -232,7 +295,8 @@ export const fixChecksStep = (state: RunState) => {
 				''
 			]),
 			IMPLEMENTER_RULES
-		].join('\n')
+		].join('\n'),
+		askPlain
 	);
 };
 
@@ -256,7 +320,8 @@ export const fixStep = (state: RunState) =>
 			...state.unresolved.mustFix.map(describeFinding),
 			'',
 			IMPLEMENTER_RULES
-		].join('\n')
+		].join('\n'),
+		askPlain
 	);
 
 // --- Review ---
