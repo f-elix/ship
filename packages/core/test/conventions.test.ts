@@ -75,6 +75,7 @@ describe('bundled conventions', () => {
 			'file-organization': ['typescript'],
 			styling: ['tailwindcss'],
 			'svelte-components': ['svelte'],
+			sveltekit: ['@sveltejs/kit'],
 			'test-cases': ['typescript'],
 			testing: ['typescript'],
 			typescript: ['typescript']
@@ -94,6 +95,7 @@ describe('bundled conventions', () => {
 			`${DIR}/error-handling.details.md`,
 			`${DIR}/styling.details.md`,
 			`${DIR}/svelte-components.details.md`,
+			`${DIR}/sveltekit.details.md`,
 			`${DIR}/typescript.details.md`
 		]);
 	});
