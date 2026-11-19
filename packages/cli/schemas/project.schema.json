@@ -66,6 +66,22 @@
 			"additionalProperties": false,
 			"default": {}
 		},
+		"conventions": {
+			"type": "object",
+			"properties": {
+				"disable": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+					},
+					"description": "Convention topics to skip, by name, e.g. `styling`",
+					"default": []
+				}
+			},
+			"additionalProperties": false,
+			"default": {}
+		},
 		"pr": {
 			"type": "object",
 			"properties": {

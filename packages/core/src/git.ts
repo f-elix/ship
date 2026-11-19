@@ -79,6 +79,11 @@ export interface GitShape {
 		repo: GitRepo,
 		range: { readonly from: GitSha; readonly to?: GitSha }
 	) => Effect.Effect<ReadonlyArray<ChangedFile>, GitError>;
+	/** Repo-relative paths of the tracked files named one of `names`, at any depth. */
+	readonly trackedFiles: (
+		repo: GitRepo,
+		names: ReadonlyArray<string>
+	) => Effect.Effect<ReadonlyArray<string>, GitError>;
 	/** Lines added in `from..to`, by repo-relative path. Files with no added line are absent. */
 	readonly addedLines: (
 		repo: GitRepo,
@@ -398,6 +403,17 @@ const make = Effect.gen(function* () {
 		return [...tracked, ...untracked];
 	});
 
+	const trackedFiles = Effect.fn('Git.trackedFiles')(function* (
+		repo: GitRepo,
+		names: ReadonlyArray<string>
+	) {
+		if (names.length === 0) return [];
+		const pathspecs = names.map((name) => `:(top,glob)**/${name}`);
+		return (yield* run(repo, ['ls-files', '-z', '--full-name', '--', ...pathspecs]))
+			.split('\0')
+			.filter((path) => path !== '');
+	});
+
 	const addedLines = Effect.fn('Git.addedLines')(function* (repo: GitRepo, range: CommitRange) {
 		return parseAddedLines(
 			yield* run(repo, [
@@ -495,6 +511,7 @@ const make = Effect.gen(function* () {
 		diff,
 		commits,
 		changedFiles,
+		trackedFiles,
 		addedLines,
 		commit,
 		squash,

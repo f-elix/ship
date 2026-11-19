@@ -58,6 +58,8 @@ export interface FakeGitState {
 	readonly changedFiles: ReadonlyArray<ChangedFile>;
 	/** What `diff` returns, for any range. */
 	readonly diff: string;
+	/** Every tracked file, repo-relative; `trackedFiles` filters it by name. */
+	readonly trackedFiles: ReadonlyArray<string>;
 	/** What `addedLines` returns, for any range. */
 	readonly addedLines: Readonly<Record<string, ReadonlyArray<string>>>;
 	readonly pushes: ReadonlyArray<string>;
@@ -99,6 +101,7 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 			dirty: false,
 			changedFiles: [],
 			diff: '',
+			trackedFiles: [],
 			addedLines: {},
 			pushes: [],
 			excluded: [],
@@ -133,6 +136,12 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 			diff: () => Effect.map(read('diff'), (s) => s.diff),
 			commits: () => Effect.map(read('commits'), (s) => s.commits),
 			changedFiles: () => Effect.map(read('changedFiles'), (s) => s.changedFiles),
+			trackedFiles: (_repo, names) =>
+				Effect.map(read('trackedFiles'), (s) =>
+					s.trackedFiles.filter((path) =>
+						names.includes(path.slice(path.lastIndexOf('/') + 1))
+					)
+				),
 			addedLines: () => Effect.map(read('addedLines'), (s) => s.addedLines),
 			commit: (_repo: GitRepo, message: string) =>
 				Effect.gen(function* () {

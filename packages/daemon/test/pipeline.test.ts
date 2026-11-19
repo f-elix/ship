@@ -2,13 +2,16 @@ import { NodeServices } from '@effect/platform-node';
 import { describe, expect, it } from '@effect/vitest';
 import {
 	AgentSdkError,
+	BUILTIN_CONVENTIONS_DIR,
 	configParseOptions,
+	Conventions,
 	decodeProjectConfig,
 	GlobalConfig,
 	isWaitingState,
 	Locks,
 	Pr,
 	ProjectKey,
+	REPO_RULES_WIN,
 	resolveConfig,
 	resumeRun,
 	Reviewers,
@@ -104,6 +107,7 @@ class JournalSpy extends Context.Service<
 
 const REVIEWER = `---
 name: standards
+conventions: '*'
 triggers:
     fileKinds: [source]
 ---
@@ -126,6 +130,7 @@ const harness = (dir: string, permits: Readonly<Record<string, number>>) => {
 	const services = Layer.mergeAll(
 		ChecksFake.layer,
 		Reviewers.layerWithBriefs(join(dir, 'briefs')),
+		Conventions.layer,
 		Pr.layer,
 		ShipHome.layer(join(dir, 'home'))
 	).pipe(Layer.provideMerge(fakes), Layer.provide(NodeServices.layer));
@@ -364,6 +369,43 @@ describe('pipeline', () => {
 				expect(info).toMatchObject({ status: 'done', state: 'done', summary });
 				// The caller's env never reaches the database.
 				expect(dumpDatabase(join(dir, 'ship.db'))).not.toContain(SECRET);
+			})
+		)
+	);
+
+	it.effect('gives the implementer and the reviewers the conventions that apply', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
+				const git = yield* GitFake;
+				yield* git.update((repo) => ({ ...repo, trackedFiles: ['tsconfig.json'] }));
+				yield* agent.script(
+					{ step: 'implement' },
+					implementsWith(git, 'feature.ts', { commitSubject: SUBJECT })
+				);
+				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
+				yield* agent.script({ step: 'pr' }, prText);
+				const state = yield* newRun({ conventions: { disable: ['comments'] } });
+
+				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
+				expect(summary.status).toBe('done');
+
+				const calls = yield* agent.calls;
+				const implement = calls.find((call) => call.step === 'implement');
+				const review = calls.find((call) => call.step === 'review');
+				for (const call of [implement, review]) {
+					expect(call?.additionalDirectories).toContain(BUILTIN_CONVENTIONS_DIR);
+					expect(call?.prompt).toContain(`- ${BUILTIN_CONVENTIONS_DIR}/typescript.md`);
+					expect(call?.prompt).toContain(REPO_RULES_WIN);
+					// Disabled, and not in the repo's stack.
+					expect(call?.prompt).not.toContain(`${BUILTIN_CONVENTIONS_DIR}/comments.md`);
+					expect(call?.prompt).not.toContain(`${BUILTIN_CONVENTIONS_DIR}/effect.md`);
+				}
+				expect(implement?.prompt).toContain(
+					`- ${BUILTIN_CONVENTIONS_DIR}/references/codebase-design/SKILL.md`
+				);
+				expect(implement?.prompt).not.toContain('.details.md');
+				expect(review?.prompt).not.toContain('references/');
 			})
 		)
 	);

@@ -7,12 +7,13 @@ import {
 	type AgentShape
 } from './agent.ts';
 import { baselinePass, Checks, filesForChecks } from './checks.ts';
+import { Conventions, implementerConventionsSection } from './conventions.ts';
 import type { CheckEvent } from './event.ts';
 import type { VerifiedFinding } from './finding.ts';
 import { Git, type CommitRange } from './git.ts';
 import { Pr } from './pr.ts';
 import type { Step } from './primitives.ts';
-import { reviewChanges, Reviewers, type AgentContext } from './reviewers.ts';
+import { reviewChanges, Reviewers, type AgentContext, type ReviewSubject } from './reviewers.ts';
 import {
 	runStep,
 	StepNotReady,
@@ -126,28 +127,33 @@ const askWithSubject: ImplementerAsk<CommitSubject | null> = (agent, input) =>
 
 /**
  * One implementer call (`implement`, `fixChecks` or `fix`): resumes the implementer
- * session when there is one, keeps the new session, then formats the changes.
+ * session when there is one, keeps the new session, then formats the changes. `prompt`
+ * places the conventions section, picked by the repo's stack.
  */
 const implementerCall = <A>(
 	step: 'implement' | 'fixChecks' | 'fix',
 	state: RunState,
-	prompt: string,
+	prompt: (conventions: string) => string,
 	ask: ImplementerAsk<A>
 ) =>
 	runStep(step, state, { timeoutMs: state.config.timeouts[step] }, (kit) =>
 		Effect.gen(function* () {
 			const agent = yield* Agent;
+			const conventions = yield* (yield* Conventions).scope({
+				repo: state,
+				disable: state.config.conventions.disable
+			});
 			const context = yield* agentContext(state);
 			const input: AgentRunInput = {
 				step,
-				prompt,
+				prompt: prompt(implementerConventionsSection(conventions)),
 				model:
 					step === 'implement' ? state.config.models.implement : state.config.models.fix,
 				access: 'edit',
 				...(state.implementerSession === null ? {} : { resume: state.implementerSession }),
 				cwd: context.cwd,
 				env: context.env,
-				additionalDirectories: [state.planDir],
+				additionalDirectories: [state.planDir, conventions.dir],
 				timeoutMs: state.config.timeouts[step],
 				transcript: context.transcript
 			};
@@ -262,18 +268,21 @@ export const implementStep = (state: RunState) =>
 	implementerCall(
 		'implement',
 		state,
-		[
-			'Implement the planned change described by these files:',
-			'',
-			`- Spec: ${specPath(state)}`,
-			`- Implementation plan: ${planPath(state)}`,
-			'',
-			'Read both, then implement the whole plan, with tests where the plan or the project calls for them.',
-			'',
-			IMPLEMENTER_RULES,
-			'',
-			'When you are done, answer with `commitSubject`: the subject line of the commit for this change. Write it in the imperative mood, at most 72 characters, with no trailing period, saying what the change does (e.g. "Add retry to webhook delivery").'
-		].join('\n'),
+		(conventions) =>
+			[
+				'Implement the planned change described by these files:',
+				'',
+				`- Spec: ${specPath(state)}`,
+				`- Implementation plan: ${planPath(state)}`,
+				'',
+				'Read both, then implement the whole plan, with tests where the plan or the project calls for them.',
+				'',
+				IMPLEMENTER_RULES,
+				'',
+				conventions,
+				'',
+				'When you are done, answer with `commitSubject`: the subject line of the commit for this change. Write it in the imperative mood, at most 72 characters, with no trailing period, saying what the change does (e.g. "Add retry to webhook delivery").'
+			].join('\n'),
 		askWithSubject
 	);
 
@@ -283,19 +292,22 @@ export const fixChecksStep = (state: RunState) => {
 	return implementerCall(
 		'fixChecks',
 		state,
-		[
-			'These checks fail after your changes. Fix the causes in the code; never weaken or skip a check.',
-			'',
-			...failing.flatMap((result) => [
-				`## ${result.name} (exit code ${result.exitCode})`,
+		(conventions) =>
+			[
+				'These checks fail after your changes. Fix the causes in the code; never weaken or skip a check.',
 				'',
-				'```',
-				result.outputTail ?? '',
-				'```',
-				''
-			]),
-			IMPLEMENTER_RULES
-		].join('\n'),
+				...failing.flatMap((result) => [
+					`## ${result.name} (exit code ${result.exitCode})`,
+					'',
+					'```',
+					result.outputTail ?? '',
+					'```',
+					''
+				]),
+				IMPLEMENTER_RULES,
+				'',
+				conventions
+			].join('\n'),
 		askPlain
 	);
 };
@@ -314,13 +326,16 @@ export const fixStep = (state: RunState) =>
 	implementerCall(
 		'fix',
 		state,
-		[
-			'Reviewers found these problems in your changes, and each was verified against the code. Fix every one.',
-			'',
-			...state.unresolved.mustFix.map(describeFinding),
-			'',
-			IMPLEMENTER_RULES
-		].join('\n'),
+		(conventions) =>
+			[
+				'Reviewers found these problems in your changes, and each was verified against the code. Fix every one.',
+				'',
+				...state.unresolved.mustFix.map(describeFinding),
+				'',
+				IMPLEMENTER_RULES,
+				'',
+				conventions
+			].join('\n'),
 		askPlain
 	);
 
@@ -328,13 +343,22 @@ export const fixStep = (state: RunState) =>
 
 const missingReview = new StepNotReady({ reason: 'No review round is in progress' });
 
-const reviewSubject = (state: RunState, range: CommitRange) =>
-	Effect.map(reviewChanges(state, range), (changes) => ({
+/** What reviewers and the verifier see of `range`, with the conventions that apply to it. */
+const reviewSubject = Effect.fnUntraced(function* (state: RunState, range: CommitRange) {
+	const changes = yield* reviewChanges(state, range);
+	const conventions = yield* (yield* Conventions).scope({
+		repo: state,
+		disable: state.config.conventions.disable,
+		changes
+	});
+	return {
 		diff: changes.diff,
 		commits: changes.commits,
 		specPath: specPath(state),
-		planPath: planPath(state)
-	}));
+		planPath: planPath(state),
+		conventions
+	} satisfies ReviewSubject;
+});
 
 const loadReviewers = Effect.fnUntraced(function* (state: RunState) {
 	const reviewers = yield* Reviewers;
