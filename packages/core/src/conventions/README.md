@@ -10,7 +10,7 @@ Each topic has a base file and, for some, a details file:
 - `<topic>.details.md`: what a reviewer can check on the diff. Only reviewers read it, after the base file.
 - A topic without a details file is one file, read by both.
 
-`references/` holds the design and testing references: [`software-design-philosophy`](references/software-design-philosophy/SKILL.md), [`codebase-design`](references/codebase-design/SKILL.md) and [`testing`](references/testing/SKILL.md). The implementer gets all three; a reviewer gets those its brief lists. `LICENSE` and `UPSTREAM.md` record where a vendored reference comes from.
+`references/` holds the design and testing references: [`software-design-philosophy`](references/software-design-philosophy/SKILL.md), [`codebase-design`](references/codebase-design/SKILL.md) and [`testing`](references/testing/SKILL.md). The implementer gets `codebase-design` and `testing`, plus the instruction to follow the philosophy; a reviewer gets those its brief lists (design reads `software-design-philosophy`). `LICENSE` and `UPSTREAM.md` record where a vendored reference comes from.
 
 ## Frontmatter
 

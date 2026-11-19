@@ -404,6 +404,7 @@ describe('pipeline', () => {
 					`- ${BUILTIN_CONVENTIONS_DIR}/references/codebase-design/SKILL.md`
 				);
 				expect(implement?.prompt).not.toContain('.details.md');
+				expect(implement?.prompt).not.toContain('software-design-philosophy');
 				expect(review?.prompt).not.toContain('references/');
 			})
 		)

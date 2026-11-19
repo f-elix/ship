@@ -7,8 +7,8 @@ import { parse as parseYaml } from 'yaml';
 import {
 	BUILTIN_BRIEFS_DIR,
 	BUILTIN_CONVENTIONS_DIR,
-	CONVENTION_REFERENCES,
 	Conventions,
+	IMPLEMENTER_REFERENCES,
 	implementerConventionFiles,
 	implementerConventionsSection,
 	packageDependencies,
@@ -95,8 +95,8 @@ describe('bundled conventions', () => {
 		]);
 	});
 
-	it('ships every reference', () => {
-		for (const name of CONVENTION_REFERENCES) {
+	it('ships every implementer reference', () => {
+		for (const name of IMPLEMENTER_REFERENCES) {
 			expect(existsSync(`${DIR}/references/${name}/SKILL.md`), name).toBe(true);
 		}
 	});
@@ -271,7 +271,6 @@ describe('implementerConventionFiles', () => {
 			'/c/comments.md',
 			'/c/svelte-components.md',
 			'/c/typescript.md',
-			'/c/references/software-design-philosophy/SKILL.md',
 			'/c/references/codebase-design/SKILL.md',
 			'/c/references/testing/SKILL.md'
 		]);

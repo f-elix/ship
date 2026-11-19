@@ -16,12 +16,12 @@ import { matchTriggers, type ReviewChanges } from './router.ts';
  */
 export const BUILTIN_CONVENTIONS_DIR = fileURLToPath(new URL('./conventions', import.meta.url));
 
-/** The references every implementer gets; reviewers get those their brief lists. */
-export const CONVENTION_REFERENCES = [
-	'software-design-philosophy',
-	'codebase-design',
-	'testing'
-] as const;
+/**
+ * The references every implementer gets; reviewers get those their brief lists. The
+ * implementer gets no `software-design-philosophy`, only the instruction to follow it, to
+ * keep its prompt small; the design reviewer reads it in full.
+ */
+export const IMPLEMENTER_REFERENCES = ['codebase-design', 'testing'] as const;
 
 // --- Topics ---
 
@@ -150,7 +150,7 @@ const referencePath = (dir: string, name: string) => `${dir}/references/${name}/
 /** What an implementer reads: every applying topic's base file, then every reference. */
 export const implementerConventionFiles = (scope: ConventionScope): ReadonlyArray<string> => [
 	...scope.topics.map((topic) => topic.base),
-	...CONVENTION_REFERENCES.map((name) => referencePath(scope.dir, name))
+	...IMPLEMENTER_REFERENCES.map((name) => referencePath(scope.dir, name))
 ];
 
 /**
@@ -303,7 +303,7 @@ export const implementerConventionsSection = (scope: ConventionScope): string =>
 		'',
 		"Research before building: before writing a workaround, a custom plugin or a helper, check the upstream project: the latest version's changelog, its issue tracker, and the library's own primitives. Report what you found, even when it's nothing.",
 		'',
-		"Follow John Ousterhout's _A Philosophy of Software Design_ in every change: architecture, interface design, refactors and bug fixes. The `software-design-philosophy` reference is the rubric, and `codebase-design` gives the vocabulary for one module (module, interface, seam, adapter, depth). Where the two disagree on how depth is measured, `codebase-design`'s depth-as-leverage applies.",
+		"Follow John Ousterhout's _A Philosophy of Software Design_ in every change: architecture, interface design, refactors and bug fixes. The `codebase-design` reference gives the vocabulary for one module (module, interface, seam, adapter, depth); measure depth as leverage, as it defines it.",
 		'',
 		'- **Consistency over personal preference**: follow these patterns even if you would do it differently.',
 		'- **Readability over cleverness**: code is read more than written.',

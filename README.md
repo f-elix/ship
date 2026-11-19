@@ -81,7 +81,7 @@ The implementing agent runs unattended with every permission (`bypassPermissions
 
 ship carries a programming philosophy and its conventions, and applies them to every run, whether or not the repo has its own. They live in `packages/core/src/conventions/` and are bundled with the CLI: one Markdown file per topic (comments, Effect, error handling, testing, TypeScript, Svelte, styling and more), plus the `software-design-philosophy`, `codebase-design` and `testing` references.
 
-A topic applies when the repo uses its stack: a dependency in a git-tracked `package.json` (or a tracked `tsconfig.json` for TypeScript). The implementer gets every applying topic, the references and the philosophy; each reviewer gets the topics its brief lists, when they apply to the change. A rule quoted from a convention counts as a written project rule, so breaking it can be must-fix. The repo's own written rules (AGENTS.md, CLAUDE.md, its docs) win where they conflict.
+A topic applies when the repo uses its stack: a dependency in a git-tracked `package.json` (or a tracked `tsconfig.json` for TypeScript). The implementer gets the base file of every applying topic, the `codebase-design` and `testing` references and the philosophy; each reviewer gets the topics its brief lists, when they apply to the change. A rule quoted from a convention counts as a written project rule, so breaking it can be must-fix. The repo's own written rules (AGENTS.md, CLAUDE.md, its docs) win where they conflict.
 
 See `packages/core/src/conventions/README.md` for the file layout and frontmatter.
 
