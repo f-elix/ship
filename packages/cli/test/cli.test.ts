@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest';
-import { RunStatus, shipPaths } from '@ship/core';
+import { DaemonBusy, RunStatus, shipPaths } from '@ship/core';
 import { AgentFake, GhFake } from '@ship/core/testing';
 import {
 	addsFeature,
@@ -19,6 +19,7 @@ import {
 import { ConfigProvider, Context, Duration, Effect, Exit, Fiber, Scope } from 'effect';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { busyMessage } from '../src/connection.ts';
 import { Invocation } from '../src/invocation.ts';
 import { DETACHED_EXIT_CODE, exitCodeFor } from '../src/render.ts';
 import { cli, fakeDaemonLauncher, testTimeouts, type Captured } from './support.ts';
@@ -53,6 +54,26 @@ describe('exit codes', () => {
 			interrupted: 1
 		});
 		expect(DETACHED_EXIT_CODE).toBe(130);
+	});
+});
+
+describe('stop refusal', () => {
+	const busy = (activeRuns: number, activeCheckPasses: number) =>
+		busyMessage(new DaemonBusy({ activeRuns, activeCheckPasses }));
+
+	it('names the active runs and check passes, and what --force does', () => {
+		expect(busy(2, 0)).toBe(
+			'2 runs are active: the daemon is not stopped until they finish, unless you pass --force, which interrupts them (`ship resume <id>` continues them).'
+		);
+		expect(busy(0, 1)).toBe(
+			'1 check pass in progress: the daemon is not stopped until it finishes, unless you pass --force, which interrupts it.'
+		);
+		expect(busy(0, 2)).toBe(
+			'2 check passes in progress: the daemon is not stopped until they finish, unless you pass --force, which interrupts them.'
+		);
+		expect(busy(1, 1)).toBe(
+			'1 run is active and 1 check pass in progress: the daemon is not stopped until they finish, unless you pass --force, which interrupts them (`ship resume <id>` continues the runs).'
+		);
 	});
 });
 

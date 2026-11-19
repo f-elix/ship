@@ -25,7 +25,7 @@ import {
 	type UnknownLockResource
 } from '@ship/core';
 import { RunStore, type StoredRunStatus } from '@ship/store';
-import { Context, Deferred, Effect, Queue, Schema, Stream } from 'effect';
+import { Context, Deferred, Effect, Queue, Ref, Schema, Stream } from 'effect';
 import type { Rpc, RpcGroup } from 'effect/rpc';
 import { checkPreconditions, loadProjectConfig } from './preconditions.ts';
 import { RunHost } from './run-host.ts';
@@ -73,6 +73,8 @@ export const handlers = ShipRpcs.toLayer(
 			yield* Effect.context<Effect.Services<ReturnType<typeof checkPreconditions>>>();
 		const git = yield* Git;
 		const checks = yield* Checks;
+		// `runChecks` passes in progress: a non-forced `stop` is refused while any runs.
+		const checkPasses = yield* Ref.make(0);
 
 		const list = Effect.fn('Daemon.list')(function* (filter: ListFilter) {
 			const wanted = filter.status;
@@ -216,7 +218,16 @@ export const handlers = ShipRpcs.toLayer(
 								if (event._tag === 'CheckFinished') running = null;
 								return Queue.offer(queue, event);
 							};
-							return checks.run(baselinePass({ cwd, env, config, onEvent })).pipe(
+							// Counted until the stream's scope closes: it ends, fails, or is
+							// interrupted (a client disconnect included).
+							const counted = Effect.acquireRelease(
+								Ref.update(checkPasses, (n) => n + 1),
+								() => Ref.update(checkPasses, (n) => n - 1)
+							);
+							return counted.pipe(
+								Effect.andThen(
+									checks.run(baselinePass({ cwd, env, config, onEvent }))
+								),
 								Effect.mapError(
 									(error) =>
 										new ChecksAborted({
@@ -235,7 +246,10 @@ export const handlers = ShipRpcs.toLayer(
 
 			stop: Effect.fn('Daemon.stop')(function* ({ force }) {
 				const activeRuns = yield* host.activeCount;
-				if (activeRuns > 0 && force !== true) return yield* new DaemonBusy({ activeRuns });
+				const activeCheckPasses = yield* Ref.get(checkPasses);
+				if ((activeRuns > 0 || activeCheckPasses > 0) && force !== true) {
+					return yield* new DaemonBusy({ activeRuns, activeCheckPasses });
+				}
 				yield* Deferred.succeed(control.shutdown, undefined);
 			})
 		});

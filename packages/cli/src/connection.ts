@@ -1,4 +1,9 @@
-import { shipPaths, type ShipPaths, type VersionMismatch } from '@ship/core/contract';
+import {
+	shipPaths,
+	type DaemonBusy,
+	type ShipPaths,
+	type VersionMismatch
+} from '@ship/core/contract';
 import { DaemonClient, daemonRunning, isListening } from '@ship/daemon/client';
 import { Context, Duration, Effect, Layer, Schedule, Schema } from 'effect';
 import { DaemonLauncher, Invocation } from './invocation.ts';
@@ -43,6 +48,23 @@ const poll = Schedule.spaced('100 millis');
 /** How many runs are active, and that `--force` would interrupt them. */
 const activeRunsRefusal = (count: number, refused: string) =>
 	`${count} ${count === 1 ? 'run is' : 'runs are'} active: ${refused} until they finish, unless you pass --force, which interrupts them (\`ship resume <id>\` continues them).`;
+
+const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+
+/** Why `stop` was refused: the active runs and check passes, and what `--force` does to them. */
+export const busyMessage = (error: DaemonBusy): string => {
+	if (error.activeCheckPasses === 0) {
+		return activeRunsRefusal(error.activeRuns, 'the daemon is not stopped');
+	}
+	const passes = plural(error.activeCheckPasses, 'check pass', 'check passes');
+	if (error.activeRuns === 0) {
+		const it = error.activeCheckPasses === 1 ? 'it finishes' : 'they finish';
+		const them = error.activeCheckPasses === 1 ? 'it' : 'them';
+		return `${passes} in progress: the daemon is not stopped until ${it}, unless you pass --force, which interrupts ${them}.`;
+	}
+	const runs = plural(error.activeRuns, 'run is', 'runs are');
+	return `${runs} active and ${passes} in progress: the daemon is not stopped until they finish, unless you pass --force, which interrupts them (\`ship resume <id>\` continues the runs).`;
+};
 
 export const mismatchMessage = (error: VersionMismatch): string => {
 	const runs =
@@ -165,15 +187,13 @@ export const launchDaemon = Effect.fnUntraced(function* () {
 
 /**
  * Asks the daemon to stop and waits until it has exited: its pid file is gone and nothing
- * listens on its socket. Refused while runs are active, unless `force`.
+ * listens on its socket. Refused while runs or check passes are active, unless `force`.
  */
 export const stopDaemon = Effect.fnUntraced(function* (connection: Connection, force: boolean) {
 	const { paths } = connection;
 	const timeouts = yield* DaemonTimeouts;
 	yield* connection.rpc.stop(force ? { force } : {}).pipe(
-		Effect.catchTag('DaemonBusy', (error) =>
-			Effect.fail(cliError(activeRunsRefusal(error.activeRuns, 'the daemon is not stopped')))
-		),
+		Effect.catchTag('DaemonBusy', (error) => Effect.fail(cliError(busyMessage(error)))),
 		// The daemon may close the connection while it shuts down; waiting tells if it stopped.
 		Effect.catchTag('RpcClientError', () => Effect.void)
 	);
