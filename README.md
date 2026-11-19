@@ -17,11 +17,19 @@ cd packages/cli && pnpm pack && npm i -g ./f-elix-ship-*.tgz
 
 `npm rm -g @f-elix/ship` uninstalls it.
 
+### Agent skills
+
+`skills/` holds two skills: `ship` hands a plan to `ship run` and reports the result, and `ship-init` sets up a project. Link them into your agent's skills folder so they follow the checkout:
+
+```sh
+ln -s "$PWD/skills/ship" "$PWD/skills/ship-init" ~/.agents/skills/
+```
+
 ## Set up a project
 
 Each project needs a config at `~/.ship/projects/<host>/<owner>/<repo>.json`: its checks, format command, reviewers and PR options (see `packages/cli/schemas/project.schema.json`). The key is the normalized `origin` URL, or the repo path when there is no `origin`. Machine-wide settings, such as lock permits, go in `~/.ship/config.json` (`packages/cli/schemas/config.schema.json`).
 
-`ship init` writes the project config in two steps, so an agent can review the draft with you in between. The `ship-init` skill in `skills/ship-init/` drives it; copy it into your agent's skills folder.
+`ship init` writes the project config in two steps, so an agent can review the draft with you in between. The `ship-init` skill in `skills/ship-init/` drives it.
 
 ```sh
 ship init --detect > /tmp/ship-draft.json   # draft on stdout; project key and notes on stderr
