@@ -37,7 +37,7 @@ describe('GlobalConfig', () => {
 			fix: 'opus',
 			route: 'haiku',
 			review: 'sonnet',
-			verify: 'opus',
+			verify: 'sonnet',
 			pr: 'haiku'
 		});
 		expect(config.caps).toEqual({ checkFixAttempts: 3, reviewRounds: 3 });
