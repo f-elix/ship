@@ -123,7 +123,7 @@ export const packageDependencies = (text: string): ReadonlyArray<string> => {
 export interface ConventionScope {
 	/** The conventions dir, which agents given conventions may read. */
 	readonly dir: string;
-	/** The topics whose stack matches the repo, minus `conventions.disable`. */
+	/** The topics whose stack matches the repo. */
 	readonly topics: ReadonlyArray<Convention>;
 }
 
@@ -133,15 +133,12 @@ export interface SelectInput {
 	readonly stack: ReadonlySet<string>;
 	/** The change under review; when set, a topic with triggers applies only if they match. */
 	readonly changes?: ReviewChanges;
-	/** Topic names to skip, from the project's `conventions.disable`. */
-	readonly disable: ReadonlyArray<string>;
 }
 
 /** The topics that apply to the repo and, when given, the change. */
 export const selectConventions = (input: SelectInput): ReadonlyArray<Convention> =>
 	input.topics.filter(
 		(topic) =>
-			!input.disable.includes(topic.name) &&
 			topic.stack.some((name) => input.stack.has(name)) &&
 			(input.changes === undefined ||
 				topic.triggers === undefined ||
@@ -194,12 +191,11 @@ export interface ConventionsShape {
 	 */
 	readonly stack: (repo: GitRepo) => Effect.Effect<ReadonlySet<string>, GitError>;
 	/**
-	 * The topics that apply to the repo, minus `disable`; with `changes`, a topic with
+	 * The topics that apply to the repo; with `changes`, a topic with
 	 * triggers applies only when they match.
 	 */
 	readonly scope: (input: {
 		readonly repo: GitRepo;
-		readonly disable: ReadonlyArray<string>;
 		readonly changes?: ReviewChanges;
 	}) => Effect.Effect<ConventionScope, GitError>;
 }
@@ -267,7 +263,6 @@ const make = (dir: string) =>
 
 		const scope = Effect.fn('Conventions.scope')(function* (input: {
 			readonly repo: GitRepo;
-			readonly disable: ReadonlyArray<string>;
 			readonly changes?: ReviewChanges;
 		}) {
 			const repoStack = yield* stack(input.repo);
@@ -276,7 +271,6 @@ const make = (dir: string) =>
 				topics: selectConventions({
 					topics,
 					stack: repoStack,
-					disable: input.disable,
 					...(input.changes === undefined ? {} : { changes: input.changes })
 				})
 			} satisfies ConventionScope;

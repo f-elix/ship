@@ -385,7 +385,7 @@ describe('pipeline', () => {
 				);
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
 				yield* agent.script({ step: 'pr' }, prText);
-				const state = yield* newRun({ conventions: { disable: ['comments'] } });
+				const state = yield* newRun();
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
 				expect(summary.status).toBe('done');
@@ -397,8 +397,7 @@ describe('pipeline', () => {
 					expect(call?.additionalDirectories).toContain(BUILTIN_CONVENTIONS_DIR);
 					expect(call?.prompt).toContain(`- ${BUILTIN_CONVENTIONS_DIR}/typescript.md`);
 					expect(call?.prompt).toContain(REPO_RULES_WIN);
-					// Disabled, and not in the repo's stack.
-					expect(call?.prompt).not.toContain(`${BUILTIN_CONVENTIONS_DIR}/comments.md`);
+					// Not in the repo's stack.
 					expect(call?.prompt).not.toContain(`${BUILTIN_CONVENTIONS_DIR}/effect.md`);
 				}
 				expect(implement?.prompt).toContain(

@@ -242,23 +242,10 @@ describe('selectConventions', () => {
 			names(
 				selectConventions({
 					topics: sample,
-					stack: new Set(['typescript', 'svelte']),
-					disable: []
+					stack: new Set(['typescript', 'svelte'])
 				})
 			)
 		).toEqual(['comments', 'svelte-components', 'typescript']);
-	});
-
-	it('drops conventions.disable', () => {
-		expect(
-			names(
-				selectConventions({
-					topics: sample,
-					stack: new Set(['typescript', 'effect']),
-					disable: ['comments', 'effect']
-				})
-			)
-		).toEqual(['typescript']);
 	});
 
 	it('keeps a topic with triggers for a change only when they match', () => {
@@ -267,8 +254,7 @@ describe('selectConventions', () => {
 				selectConventions({
 					topics: sample,
 					stack: new Set(['typescript', 'svelte']),
-					changes: changes(...paths),
-					disable: []
+					changes: changes(...paths)
 				})
 			);
 		expect(select('README.md')).toEqual(['typescript']);

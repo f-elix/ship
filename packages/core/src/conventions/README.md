@@ -1,6 +1,6 @@
 # Conventions
 
-The programming conventions ship applies to every run, in any repo. ship picks the topics that fit the repo and lists their files, by absolute path, in the prompts of the implementer (implement, fixChecks, fix) and of the reviewers. Where a convention conflicts with the repo's own written rules (AGENTS.md, CLAUDE.md, its docs), the repo's rules win. A project skips topics with `conventions.disable` in its config.
+The programming conventions ship applies to every run, in any repo. ship picks the topics that fit the repo and lists their files, by absolute path, in the prompts of the implementer (implement, fixChecks, fix) and of the reviewers. Where a convention conflicts with the repo's own written rules (AGENTS.md, CLAUDE.md, its docs), the repo's rules win.
 
 ## Files
 

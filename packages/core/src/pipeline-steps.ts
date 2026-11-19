@@ -140,8 +140,7 @@ const implementerCall = <A>(
 		Effect.gen(function* () {
 			const agent = yield* Agent;
 			const conventions = yield* (yield* Conventions).scope({
-				repo: state,
-				disable: state.config.conventions.disable
+				repo: state
 			});
 			const context = yield* agentContext(state);
 			const input: AgentRunInput = {
@@ -348,7 +347,6 @@ const reviewSubject = Effect.fnUntraced(function* (state: RunState, range: Commi
 	const changes = yield* reviewChanges(state, range);
 	const conventions = yield* (yield* Conventions).scope({
 		repo: state,
-		disable: state.config.conventions.disable,
 		changes
 	});
 	return {

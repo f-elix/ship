@@ -192,13 +192,6 @@ export const ReviewersConfig = Schema.Struct({
 });
 export interface ReviewersConfig extends Schema.Schema.Type<typeof ReviewersConfig> {}
 
-export const ConventionsConfig = Schema.Struct({
-	disable: Schema.Array(ReviewerName).pipe(
-		withDefault([], 'Convention topics to skip, by name, e.g. `styling`')
-	)
-});
-export interface ConventionsConfig extends Schema.Schema.Type<typeof ConventionsConfig> {}
-
 export const PrConfig = Schema.Struct({
 	draft: Schema.Boolean.pipe(
 		withDefault(true, 'Open the PR as a draft; always a draft when escalated')
@@ -223,7 +216,6 @@ export const ProjectConfig = Schema.Struct({
 		})
 	),
 	reviewers: ReviewersConfig.pipe(withDefault({})),
-	conventions: ConventionsConfig.pipe(withDefault({})),
 	pr: PrConfig.pipe(withDefault({})),
 	models: Schema.optionalKey(
 		Schema.Struct(Struct.map(modelFields, Schema.optionalKey)).annotate({
@@ -259,8 +251,6 @@ export const ResolvedConfig = Schema.Struct({
 	checks: Schema.Array(Check),
 	format: Schema.NullOr(Schema.NonEmptyString),
 	reviewers: ReviewersConfig,
-	// Defaulted so a run stored before conventions existed still decodes.
-	conventions: ConventionsConfig.pipe(withDefault({})),
 	pr: PrConfig
 });
 export interface ResolvedConfig extends Schema.Schema.Type<typeof ResolvedConfig> {}
@@ -275,7 +265,6 @@ export const resolveConfig = (global: GlobalConfig, project: ProjectConfig): Res
 		checks: project.checks,
 		format: project.format ?? null,
 		reviewers: project.reviewers,
-		conventions: project.conventions,
 		pr: project.pr
 	};
 };

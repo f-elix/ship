@@ -96,7 +96,6 @@ describe('ProjectConfig', () => {
 		expect(decodeProject({})).toEqual({
 			checks: [],
 			reviewers: { disable: [], llmRouter: true },
-			conventions: { disable: [] },
 			pr: { draft: true, squash: true }
 		});
 	});
@@ -187,18 +186,6 @@ describe('ResolvedConfig', () => {
 		expect(resolved.format).toBe('prettier --write {files}');
 		expect(resolved.pr).toEqual({ draft: true, squash: false });
 		expect(resolveConfig(global, decodeProject({})).format).toBeNull();
-		expect(
-			resolveConfig(global, decodeProject({ conventions: { disable: ['styling'] } }))
-				.conventions
-		).toEqual({ disable: ['styling'] });
-	});
-
-	it('defaults conventions when decoding a snapshot stored before they existed', () => {
-		const plain = JSON.parse(JSON.stringify(resolvedConfig)) as Record<string, unknown>;
-		delete plain['conventions'];
-		expect(Schema.decodeUnknownSync(ResolvedConfig)(plain).conventions).toEqual({
-			disable: []
-		});
 	});
 
 	it('decodes from its plain JSON unchanged, as the store reads a snapshot', () => {
