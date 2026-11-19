@@ -67,9 +67,11 @@ export class ChecksAborted extends Schema.TaggedError<ChecksAborted>()('ChecksAb
 	}
 }
 
-/** `stop` without `force` while runs are active. */
+/** `stop` without `force` while runs or check passes are active; at least one count is positive. */
 export class DaemonBusy extends Schema.TaggedError<DaemonBusy>()('DaemonBusy', {
-	activeRuns: PositiveInt
+	activeRuns: NonNegativeInt,
+	/** `runChecks` passes in progress, e.g. from `ship init --write`. */
+	activeCheckPasses: NonNegativeInt
 }) {}
 
 /** CLI and daemon versions differ; the CLI tells the user to `ship daemon restart`. */
@@ -182,8 +184,9 @@ export class ShipRpcs extends RpcGroup.make(
 	}),
 	/**
 	 * Shuts the daemon down after replying: active runs are interrupted (they become
-	 * `interrupted`, ready for `resume`), the server closes and the socket is removed.
-	 * Fails with `DaemonBusy` while runs are active, unless `force` is set.
+	 * `interrupted`, ready for `resume`), check passes in progress are interrupted, the
+	 * server closes and the socket is removed. Fails with `DaemonBusy` while runs or
+	 * `runChecks` passes are active, unless `force` is set.
 	 */
 	Rpc.make('stop', {
 		payload: { force: Schema.optionalKey(Schema.Boolean) },

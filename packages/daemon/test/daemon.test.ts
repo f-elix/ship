@@ -383,4 +383,104 @@ describe('daemon', () => {
 			}).pipe(Effect.scoped),
 		TIMEOUT
 	);
+
+	it.live(
+		'refuses a plain stop while a check pass runs, until it ends or its client disconnects',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const gate = join(fx.dir, 'gate');
+				fx.configure(
+					{ locks: { cpu: 2 } },
+					{
+						checks: [
+							{ name: 'gated', run: `while [ ! -f '${gate}' ]; do sleep 0.05; done` }
+						]
+					}
+				);
+				const running = yield* daemon(fx.home, yield* fakes);
+				const rpc = yield* client(fx.home);
+				const repo = { cwd: fx.work, env: fx.env };
+				/** Starts a pass from its own client; resolves once its check has started. */
+				const startPass = Effect.gen(function* () {
+					const scope = yield* Scope.make();
+					const own = yield* client(fx.home).pipe(Scope.provide(scope));
+					const started = yield* Deferred.make<void>();
+					const fiber = yield* own.runChecks(repo).pipe(
+						Stream.tap((event) =>
+							event._tag === 'CheckStarted'
+								? Deferred.succeed(started, undefined)
+								: Effect.void
+						),
+						Stream.runCollect,
+						Effect.forkChild
+					);
+					yield* Deferred.await(started);
+					return { scope, fiber };
+				});
+				const stopped = rpc.stop({}).pipe(
+					Effect.as(true),
+					Effect.catchTag('DaemonBusy', () => Effect.succeed(false))
+				);
+
+				// A pass that ends: refused while it runs, the count released when it ends.
+				const first = yield* startPass;
+				const busy = yield* Effect.flip(rpc.stop({}));
+				expect(busy).toBeInstanceOf(DaemonBusy);
+				expect(busy).toMatchObject({ activeRuns: 0, activeCheckPasses: 1 });
+				// The handshake still reports runs only.
+				expect(yield* rpc.handshake({ version: VERSION })).toEqual({
+					version: VERSION,
+					activeRuns: 0
+				});
+				writeFileSync(gate, '');
+				const events = yield* Fiber.join(first.fiber);
+				expect(Array.from(events).at(-1)).toMatchObject({ _tag: 'LockReleased' });
+				unlinkSync(gate);
+
+				// A pass whose client disconnects mid-pass releases the count too.
+				const second = yield* startPass;
+				expect(yield* Effect.flip(rpc.stop({}))).toMatchObject({ activeCheckPasses: 1 });
+				yield* Fiber.interrupt(second.fiber);
+				yield* Scope.close(second.scope, Exit.void);
+				yield* eventually(stopped);
+				yield* running.stopRequested;
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'stops at once with force while a check pass runs',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				fx.configure(
+					{ locks: { cpu: 2 } },
+					{ checks: [{ name: 'slow', run: 'sleep 30' }] }
+				);
+				const scope = yield* Scope.make();
+				const running = yield* daemon(fx.home, yield* fakes).pipe(Scope.provide(scope));
+				const rpc = yield* client(fx.home);
+				const started = yield* Deferred.make<void>();
+				const pass = yield* rpc.runChecks({ cwd: fx.work, env: fx.env }).pipe(
+					Stream.tap((event) =>
+						event._tag === 'CheckStarted'
+							? Deferred.succeed(started, undefined)
+							: Effect.void
+					),
+					Stream.runDrain,
+					Effect.exit,
+					Effect.forkChild
+				);
+				yield* Deferred.await(started);
+
+				yield* rpc.stop({ force: true });
+				yield* running.stopRequested;
+				yield* Scope.close(scope, Exit.void);
+				// The pass was interrupted: its stream did not complete.
+				expect(Exit.isSuccess(yield* Fiber.join(pass))).toBe(false);
+				expect(existsSync(running.paths.socket)).toBe(false);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
 });
