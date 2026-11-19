@@ -310,7 +310,6 @@ describe('reviewerConventionFiles', () => {
 const reviewer = (conventions?: ReviewerDef['conventions']): ReviewerDef => ({
 	name: 'standards',
 	triggers: Schema.decodeUnknownSync(ReviewerTriggers)({ always: true }),
-	blocking: true,
 	brief: 'The standards brief.',
 	...(conventions === undefined ? {} : { conventions })
 });

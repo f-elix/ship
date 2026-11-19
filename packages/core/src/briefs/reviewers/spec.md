@@ -2,8 +2,6 @@
 # Adapted from the Spec reviewer of Matt Pocock's code-review skill (MIT); see ../ATTRIBUTION.md.
 name: spec
 description: Whether the change implements the plan's spec and implementation plan; missing, partial or wrong requirements and unrequested behaviour.
-# Blocking: a quoted requirement the code misses is a concrete defect.
-blocking: true
 model: sonnet
 triggers:
     always: true

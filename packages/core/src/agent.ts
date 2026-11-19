@@ -30,7 +30,7 @@ import { AgentSession } from './run.ts';
  *   sandboxed.
  * - `read-only`: reviewers and the verifier. Only `Read`, `Grep` and `Glob` exist, and
  *   `dontAsk` denies anything not pre-approved.
- * - `none`: no tools; everything the agent needs is in the prompt (the LLM router).
+ * - `none`: no tools; everything the agent needs is in the prompt.
  */
 export type AgentAccess = 'edit' | 'read-only' | 'none';
 

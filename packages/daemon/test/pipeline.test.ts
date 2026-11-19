@@ -32,6 +32,7 @@ import {
 import {
 	AgentFake,
 	ChecksFake,
+	ClefFake,
 	exitCodesByCheck,
 	GhFake,
 	GitFake,
@@ -123,6 +124,7 @@ const tempDir = Effect.acquireRelease(
 const harness = (dir: string, permits: Readonly<Record<string, number>>) => {
 	const fakes = Layer.mergeAll(
 		AgentFake.layer,
+		ClefFake.layer,
 		GhFake.layer,
 		GitFake.layer(),
 		Locks.layer(permits)
@@ -133,7 +135,7 @@ const harness = (dir: string, permits: Readonly<Record<string, number>>) => {
 		Conventions.layer,
 		Pr.layer,
 		ShipHome.layer(join(dir, 'home'))
-	).pipe(Layer.provideMerge(fakes), Layer.provide(NodeServices.layer));
+	).pipe(Layer.provideMerge(fakes), Layer.provideMerge(NodeServices.layer));
 	const journal = JournalSpy.layer.pipe(
 		Layer.provideMerge(RunStore.layerFile(join(dir, 'ship.db')))
 	);
@@ -159,7 +161,7 @@ const configWith = (project: Record<string, unknown> = {}) =>
 	Effect.map(
 		decodeProjectConfig({
 			checks: [{ name: 'test', run: 'pnpm test' }],
-			reviewers: { llmRouter: false },
+			reviewers: { clef: false },
 			...project
 		}),
 		(projectConfig): ResolvedConfig =>
@@ -222,10 +224,10 @@ const implementsWith =
 
 const SUBJECT = 'Add the feature module';
 
-const findingAt = (claim: string) => ({
+const findingAt = (claim: string, severity: 'must-fix' | 'nit' | 'tradeoff' = 'must-fix') => ({
 	file: 'src/feature.ts',
 	line: 3,
-	severity: 'must-fix',
+	severity,
 	claim,
 	evidence: 'const x = 1;'
 });
@@ -233,6 +235,26 @@ const findingAt = (claim: string) => ({
 const reviewerSays = (...findings: ReadonlyArray<ReturnType<typeof findingAt>>) => ({
 	output: { findings },
 	costUsd: 0.1
+});
+
+/** A verifier answer confirming `count` findings, with the statuses of previous ones. */
+const verifierSays = (
+	count: number,
+	previous: ReadonlyArray<{ id: string; status: 'fixed' | 'unfixed'; repeatedBy?: number }> = []
+) => ({
+	output: {
+		verdicts: Array.from({ length: count }, (_, index) => {
+			const repeated = previous.find((entry) => entry.repeatedBy === index);
+			return {
+				index,
+				verdict: 'confirmed',
+				reason: 'Seen',
+				...(repeated === undefined ? {} : { repeats: repeated.id })
+			};
+		}),
+		previous: previous.map(({ id, status }) => ({ id, status, evidence: 'Checked' }))
+	},
+	costUsd: 0.2
 });
 
 const prText = {
@@ -618,6 +640,135 @@ describe('pipeline', () => {
 				expect(commits).toEqual([SUBJECT]);
 			})
 		)
+	);
+
+	it.effect('opens a PR when only tradeoffs remain, listing them in its body', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
+				const git = yield* GitFake;
+				yield* agent.script({ step: 'implement' }, edits(git, 'feature.ts'));
+				yield* agent.script(
+					{ step: 'review', label: 'standards' },
+					reviewerSays(findingAt('One query per row', 'tradeoff'))
+				);
+				yield* agent.script({ step: 'verify' }, verifierSays(1));
+				yield* agent.script({ step: 'pr' }, prText);
+				const state = yield* newRun();
+
+				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
+
+				expect(summary).toMatchObject({ status: 'done', rounds: 1 });
+				expect(summary.tradeoffs.map((finding) => finding.claim)).toEqual([
+					'One query per row'
+				]);
+				expect((yield* agent.calls).some((call) => call.step === 'fix')).toBe(false);
+				const [pr] = yield* (yield* GhFake).prs;
+				expect(pr?.body).toContain('## Tradeoffs');
+				expect(pr?.body).toContain('One query per row');
+			})
+		)
+	);
+
+	it.effect('fixes nits, and a nit the fix did not resolve is not a stall', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
+				const git = yield* GitFake;
+				yield* agent.script({ step: 'implement' }, edits(git, 'feature.ts'));
+				yield* agent.script(
+					{ step: 'review', label: 'standards' },
+					reviewerSays(findingAt('Unclear name', 'nit')),
+					reviewerSays(findingAt('Still an unclear name', 'nit')),
+					reviewerSays()
+				);
+				yield* agent.script(
+					{ step: 'verify' },
+					verifierSays(1),
+					verifierSays(1, [{ id: 'r1-1', status: 'unfixed', repeatedBy: 0 }]),
+					verifierSays(0, [{ id: 'r2-1', status: 'fixed' }])
+				);
+				yield* agent.script(
+					{ step: 'fix' },
+					edits(git, 'feature.ts', 0.25),
+					edits(git, 'feature.ts', 0.25)
+				);
+				yield* agent.script({ step: 'pr' }, prText);
+				const state = yield* newRun();
+
+				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
+
+				expect(summary).toMatchObject({ status: 'done', rounds: 3 });
+				const fix = (yield* agent.calls).find((call) => call.step === 'fix');
+				expect(fix?.prompt).toContain('# Nits');
+				expect(fix?.prompt).toContain('Unclear name');
+			})
+		)
+	);
+
+	it.effect(
+		'reviews the whole branch again with the reviewers the fix touched and those with a must-fix',
+		() =>
+			withHarness((dir) =>
+				Effect.gen(function* () {
+					const docsReviewer = (name: string) =>
+						`---\nname: ${name}\ntriggers:\n    paths: ['docs/**']\n---\n\nThe ${name} brief.\n`;
+					writeFileSync(join(dir, 'briefs/reviewers/docs.md'), docsReviewer('docs'));
+					writeFileSync(join(dir, 'briefs/reviewers/links.md'), docsReviewer('links'));
+					const agent = yield* AgentFake;
+					const git = yield* GitFake;
+					yield* agent.script({ step: 'implement' }, () =>
+						Effect.as(
+							git.edit([
+								{ path: 'src/feature.ts', status: 'added' },
+								{ path: 'docs/guide.md', status: 'added' }
+							]),
+							{ costUsd: 0.5 }
+						)
+					);
+					yield* agent.script(
+						{ step: 'review', label: 'docs' },
+						reviewerSays({ ...findingAt('Wrong flag'), file: 'docs/guide.md' }),
+						reviewerSays()
+					);
+					yield* agent.script({ step: 'review', label: 'links' }, reviewerSays());
+					yield* agent.script(
+						{ step: 'review', label: 'standards' },
+						reviewerSays(),
+						reviewerSays()
+					);
+					yield* agent.script(
+						{ step: 'verify' },
+						verifierSays(1),
+						verifierSays(0, [{ id: 'r1-1', status: 'fixed' }])
+					);
+					// The fix touches source only, so the docs triggers no longer match its range.
+					yield* agent.script({ step: 'fix' }, () =>
+						Effect.as(
+							Effect.andThen(
+								git.update((current) => ({ ...current, changedFiles: [] })),
+								git.edit([{ path: 'src/feature.ts', status: 'modified' }])
+							),
+							{ costUsd: 0.25 }
+						)
+					);
+					yield* agent.script({ step: 'pr' }, prText);
+					const state = yield* newRun();
+
+					const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
+
+					expect(summary).toMatchObject({ status: 'done', rounds: 2 });
+					const started = (yield* eventsOf(state.runId)).flatMap((event) =>
+						event._tag === 'ReviewStarted' ? [event] : []
+					);
+					expect(
+						started.map((event) => [event.round, event.fromSha, event.reviewers])
+					).toEqual([
+						[1, state.baseSha, ['docs', 'links', 'standards']],
+						[2, state.baseSha, ['docs', 'standards']]
+					]);
+				})
+			)
 	);
 
 	it.effect('falls back to the default commit message when the subject is invalid', () =>

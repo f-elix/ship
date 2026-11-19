@@ -1,8 +1,6 @@
 ---
 name: security
 description: Authentication, authorisation, secrets, cryptography, injection (shell, SQL, HTML, path), untrusted input and unsafe deserialisation.
-# Blocking: an exploitable hole with a traced path from untrusted input must not merge.
-blocking: true
 model: opus
 triggers:
     paths:
@@ -26,6 +24,6 @@ Look for security holes the change introduces.
 - Crypto: home-made schemes, weak hashes for passwords, `Math.random` for tokens, non-constant-time comparison of secrets, disabled TLS verification.
 - Untrusted data: unsafe deserialisation, unbounded input sizes, path traversal, SSRF through user-supplied URLs, permissive CORS.
 
-Trace the path: where the input comes from, that an attacker controls it, and that no layer sanitises it. A traced, reachable hole is `must-fix`. Hardening with no demonstrated path is `tradeoff`.
+Trace the path: where the input comes from, that an attacker controls it, and that no layer sanitises it. A traced, reachable hole is `must-fix`. Hardening with no demonstrated path is not a finding.
 
 Out of scope: general error handling (error-handling), dependency vulnerabilities (deps), data integrity (data).

@@ -2,15 +2,22 @@
 
 `reviewers/*.md` are the built-in reviewers; `verifier.md` is the verifier's brief. A project reviewer in `~/.ship/projects/<project>/reviewers/` replaces the built-in with the same name.
 
-The markdown body reaches the model on every review, so keep it short. Of the frontmatter, only `description` reaches a model (the router); YAML comments cost nothing. The rules every reviewer shares (scope, falsification, severity, output) live in `reviewerPrompt` in `../reviewers.ts`, not in the briefs.
+The markdown body reaches the model on every review, so keep it short. Of the frontmatter, only `description` reaches a model (Cloudflare Clef, which routes reviewers); YAML comments cost nothing. The rules every reviewer shares (scope, falsification, severity, output) live in `reviewerPrompt` in `../reviewers.ts`, not in the briefs.
 
 Frontmatter:
 
 - `name`: matches the file name.
-- `description`: one sentence of scope, read by the LLM router.
+- `description`: one sentence of scope. Clef reads it to decide whether to add the reviewer; without it, Clef reads the brief's first paragraph.
 - `triggers`: `always`, `paths` (globs), `addedLines` (regexes), `fileKinds`. See `ReviewerTriggers` in `../reviewer.ts`.
 - `model`: `haiku` for narrow, mechanical reviewers (comments, deps, domain-language), `sonnet` for spec and design, and `opus` for security. Leaving it out uses the configured `review` model.
 - `conventions`: the conventions the reviewer reads, listed in its prompt by absolute path: topic names, given only when the topic applies to the repo's stack and the change, and `references/<name>`, always given. `'*'` gives every topic that applies (standards). Leaving it out gives none. See `../conventions/README.md`.
-- `blocking`: whether the reviewer's must-fix findings start a fix round. Non-blocking reviewers (design, comments, performance, domain-language) cover judgement calls; their must-fix findings are filed as tradeoffs for the PR body. Each file says why in a YAML comment. `blocking` defaults to `true`, so a project copy of a non-blocking brief must keep `blocking: false`.
+
+Severities, as `reviewerPrompt` defines them for every reviewer:
+
+- `must-fix`: a defect with concrete evidence. The next fix round fixes it.
+- `nit`: style or wording with no effect on behaviour. The same fix round fixes it.
+- `tradeoff`: the change deviates from the spec or plan, or has an impact the plan did not foresee. The loop never fixes it; the PR body lists it.
+
+A severity line in a brief must fit these: a judgement call that is neither a defect nor a deviation is not a `tradeoff`.
 
 Attribution for adapted material is in `ATTRIBUTION.md`.

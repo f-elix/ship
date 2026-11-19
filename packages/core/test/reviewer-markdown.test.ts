@@ -10,7 +10,6 @@ describe('parseReviewerMarkdown', () => {
 			const reviewer = yield* parse(`---
 name: security
 model: opus
-blocking: false
 triggers:
   # comments are fine
   paths: ["src/auth/**", '**/*.sql']
@@ -27,7 +26,6 @@ Look for injection.
 			expect(reviewer).toEqual({
 				name: 'security',
 				model: 'opus',
-				blocking: false,
 				triggers: {
 					always: false,
 					paths: ['src/auth/**', '**/*.sql'],
@@ -44,7 +42,6 @@ Look for injection.
 			const reviewer = yield* parse('---\nname: security\n---\nBrief.\n');
 			expect(reviewer).toEqual({
 				name: 'security',
-				blocking: true,
 				triggers: { always: false, paths: [], addedLines: [], fileKinds: [] },
 				brief: 'Brief.'
 			});

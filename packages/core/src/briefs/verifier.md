@@ -18,13 +18,17 @@ For refactors, compare the old and new semantics before accepting a regression. 
 
 Written project rules include ship's conventions: a rule a finding quotes from the conventions directory named below counts like one quoted from AGENTS.md. Open the file to confirm the quote; where it conflicts with the repository's own written rules (AGENTS.md, CLAUDE.md, its docs), the repository's rules win.
 
-Severity: `must-fix` needs a real defect shown directly: a `traced` failure, a fact you can see in the code (a lockfile not updated with its manifest, an unlabelled input, a test with no assertion), or a quoted requirement or written project rule the code breaks. A quoted requirement or decision of the spec or implementation plan that the code visibly contradicts is a must-fix by itself: seeing the contradiction in the code is the proof, so keep `must-fix` even when no runtime failure was traced. Disprove it instead if the quote is not in the spec or plan, does not apply to this code, or the code actually meets it. For every other must-fix (never a visible spec or plan contradiction), lower it to `tradeoff` when its consequence is only inferred, its proof is `structural`, or a necessary premise cannot be checked. Lower formatter, linter and taste remarks to `nit`, or disprove them when they cost nothing. Never raise a severity.
+Severity: `must-fix` needs a real defect shown directly: a `traced` failure, a fact you can see in the code (a lockfile not updated with its manifest, an unlabelled input, a test with no assertion), or a quoted requirement or written project rule the code breaks. A quoted requirement or decision of the spec or implementation plan that the code visibly contradicts is a must-fix by itself: seeing the contradiction in the code is the proof, so keep `must-fix` even when no runtime failure was traced. Disprove it instead if the quote is not in the spec or plan, does not apply to this code, or the code actually meets it. A finding you cannot fully trace keeps its reported severity: drop a finding only when it is irrelevant or disproved. Lower a must-fix to `nit` only when it is a formatter, linter or taste remark, or disprove it when it costs nothing. Never move a finding into or out of `tradeoff`: it is a kind of finding (a deviation from the spec or plan, or an impact the plan did not foresee), not a level. Never raise a severity.
 
 ## Previous findings
 
-Previous findings are earlier rounds' must-fix findings that the latest fix was meant to resolve. Read the current code, not just the diff.
+Previous findings are the last round's must-fix findings and nits, which the latest fix was meant to resolve. Read the current code, not just the diff.
 
 - `fixed`: the cause is gone. Not moved, renamed, suppressed, or hidden by a test changed to accept it.
 - `unfixed`: quote the current code that still has the problem.
 
 A confirmed finding of this round that is the same problem as a previous finding, even at a moved line, `repeats` that previous id. Match by root cause, not wording. Do not match two different problems that happen to sit in the same file.
+
+## Known tradeoffs
+
+Known tradeoffs are earlier rounds' tradeoffs, already listed for the PR. A confirmed tradeoff of this round that is the same tradeoff as a known one `repeats` its id, so the PR lists it once. Mark `duplicate` or `repeats` only between findings of the same kind: a tradeoff with a tradeoff, a must-fix or nit with a must-fix or nit.

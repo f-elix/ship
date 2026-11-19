@@ -130,7 +130,7 @@ const summaryLines = (summary: Summary): Array<string> => {
 	};
 	findings('unresolved must-fix', summary.unresolvedMustFix);
 	findings('tradeoffs', summary.tradeoffs);
-	findings('nits', summary.nits);
+	findings('unresolved nits', summary.nits);
 	return lines;
 };
 

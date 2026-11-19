@@ -91,8 +91,8 @@ describe('Pr.open', () => {
 			});
 			expect(pr?.body).toContain('## Summary\n\nAdds a.');
 			expect(pr?.body).toContain('## Tradeoffs');
-			expect(pr?.body).toContain('## Nits');
 			expect(pr?.body).not.toContain('Unresolved must-fix');
+			expect(pr?.body).not.toContain('Naming.');
 
 			const [call] = yield* (yield* AgentFake).calls;
 			expect(call).toMatchObject({ step: 'pr', model: 'haiku', access: 'read-only' });
@@ -111,22 +111,30 @@ describe('Pr.open', () => {
 		}).pipe(Effect.provide(PrTest))
 	);
 
-	it.effect('always opens a draft listing unresolved must-fix findings when escalated', () =>
-		Effect.gen(function* () {
-			yield* scriptBody;
-			const result = yield* (yield* Pr).open({ ...input, unresolved, escalation: 'stall' });
-			expect(result).toMatchObject({
-				draft: true,
-				created: true,
-				cost: { step: 'escalate' }
-			});
-			const [pr] = yield* (yield* GhFake).prs;
-			expect(pr?.draft).toBe(true);
-			expect(pr?.body).toMatch(/^> \[!WARNING\]\n> ship escalated this run/u);
-			expect(pr?.body).toContain(
-				'## Unresolved must-fix findings\n\n- `src/a.ts:1` (security, standards): Injection.'
-			);
-		}).pipe(Effect.provide(PrTest))
+	it.effect(
+		'always opens a draft listing unresolved must-fix findings and nits when escalated',
+		() =>
+			Effect.gen(function* () {
+				yield* scriptBody;
+				const result = yield* (yield* Pr).open({
+					...input,
+					unresolved,
+					escalation: 'stall'
+				});
+				expect(result).toMatchObject({
+					draft: true,
+					created: true,
+					cost: { step: 'escalate' }
+				});
+				const [pr] = yield* (yield* GhFake).prs;
+				expect(pr?.draft).toBe(true);
+				expect(pr?.body).toMatch(/^> \[!WARNING\]\n> ship escalated this run/u);
+				expect(pr?.body).toContain(
+					'## Unresolved must-fix findings\n\n- `src/a.ts:1` (security, standards): Injection.'
+				);
+				expect(pr?.body).toContain('## Unresolved nits');
+				expect(pr?.body).toContain('Naming.');
+			}).pipe(Effect.provide(PrTest))
 	);
 
 	it.effect(

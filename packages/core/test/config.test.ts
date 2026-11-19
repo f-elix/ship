@@ -35,12 +35,11 @@ describe('GlobalConfig', () => {
 		expect(config.models).toEqual({
 			implement: 'opus',
 			fix: 'opus',
-			route: 'haiku',
 			review: 'sonnet',
 			verify: 'sonnet',
 			pr: 'haiku'
 		});
-		expect(config.caps).toEqual({ checkFixAttempts: 3, reviewRounds: 3 });
+		expect(config.caps).toEqual({ checkFixAttempts: 3, reviewRounds: 10 });
 		expect(Duration.toMinutes(config.timeouts.implement)).toBe(60);
 		expect(Duration.toMinutes(config.timeouts.review)).toBe(20);
 	});
@@ -59,14 +58,14 @@ describe('GlobalConfig', () => {
 
 	it('round-trips through JSON, writing timeouts in the largest whole unit', () => {
 		const config = decodeGlobal({
-			timeouts: { implement: '90 minutes', route: '45 seconds', pr: '0.5 hours' }
+			timeouts: { implement: '90 minutes', verify: '45 seconds', pr: '0.5 hours' }
 		});
 		const encoded = Schema.encodeSync(GlobalConfig)(config);
 		expect(encoded.timeouts).toMatchObject({
 			implement: '90 minutes',
-			route: '45 seconds',
+			verify: '45 seconds',
 			pr: '30 minutes',
-			verify: '15 minutes'
+			review: '20 minutes'
 		});
 		expect(jsonRoundTrip(GlobalConfig, config)).toEqual(config);
 	});
@@ -95,7 +94,7 @@ describe('ProjectConfig', () => {
 	it('decodes {} to defaults and leaves global overrides absent', () => {
 		expect(decodeProject({})).toEqual({
 			checks: [],
-			reviewers: { disable: [], llmRouter: true },
+			reviewers: { disable: [], clef: true },
 			pr: { draft: true, squash: true }
 		});
 	});
@@ -106,7 +105,7 @@ describe('ProjectConfig', () => {
 				{ name: 'lint', run: 'oxlint {files}', fix: 'oxlint --fix {files}' },
 				{ name: 'test', run: 'vitest run', lock: 'db' }
 			],
-			reviewers: { disable: ['ui-a11y'], llmRouter: false },
+			reviewers: { disable: ['ui-a11y'], clef: false },
 			pr: { draft: false },
 			caps: { reviewRounds: 1 },
 			timeouts: { checks: '1 hour' }
@@ -181,7 +180,7 @@ describe('ResolvedConfig', () => {
 		expect(resolved.caps).toEqual({ checkFixAttempts: 1, reviewRounds: 5 });
 		expect(resolved.timeouts.checks).toBe(3_600_000);
 		expect(resolved.timeouts.implement).toBe(3_600_000);
-		expect(resolved.timeouts.route).toBe(300_000);
+		expect(resolved.timeouts.verify).toBe(900_000);
 		expect(resolved.checks).toEqual([{ name: 'lint', run: 'oxlint {files}', lock: 'cpu' }]);
 		expect(resolved.format).toBe('prettier --write {files}');
 		expect(resolved.pr).toEqual({ draft: true, squash: false });

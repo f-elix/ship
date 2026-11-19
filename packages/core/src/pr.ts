@@ -27,7 +27,7 @@ export interface OpenPrInput {
 	/** Check passes, for the body's evidence. */
 	readonly checks: ReadonlyArray<CheckRound>;
 	readonly unresolved: UnresolvedFindings;
-	/** Set when the run escalated: the PR is a draft and lists the unresolved must-fix findings. */
+	/** Set when the run escalated: the PR is a draft and lists the unresolved must-fix findings and nits. */
 	readonly escalation: EscalationReason | null;
 	/** The project's `pr.draft`. */
 	readonly draft: boolean;
@@ -121,7 +121,7 @@ Merge Danger: a two-way door is cheap to roll back; destructive or hard-to-rever
 
 const ESCALATION_TEXT: Record<EscalationReason, string> = {
 	'check-fix-cap': 'checks still fail after the last check-fix attempt',
-	'review-cap': 'must-fix findings remain after the last review round',
+	'review-cap': 'must-fix findings or nits remain after the last review round',
 	stall: 'a fix round left a must-fix finding unresolved',
 	timeout: 'a step timed out'
 };
@@ -143,7 +143,7 @@ export const prPrompt = (input: OpenPrInput): string =>
 		'',
 		PR_TEMPLATE,
 		'',
-		'The title is one short imperative sentence. Do not list review findings; ship appends them after your body.',
+		'The title is one short imperative sentence. Do not list review findings; ship appends the tradeoffs after your body.',
 		'',
 		`- Spec: ${input.specPath}`,
 		`- Implementation plan: ${input.planPath}`,
@@ -174,7 +174,8 @@ const findingsSection = (title: string, findings: ReadonlyArray<VerifiedFinding>
 
 /**
  * The full body: an escalation notice, the agent's body, then the review findings left
- * for a human, written by ship so none is lost or reworded.
+ * for a human, written by ship so none is lost or reworded. A finished run lists only its
+ * tradeoffs; an escalated one also lists the must-fix findings and nits it left unresolved.
  */
 export const renderPrBody = (
 	agentBody: string,
@@ -192,9 +193,11 @@ export const renderPrBody = (
 		'',
 		...(input.escalation === null
 			? []
-			: findingsSection('Unresolved must-fix findings', input.unresolved.mustFix)),
-		...findingsSection('Tradeoffs', input.unresolved.tradeoffs),
-		...findingsSection('Nits', input.unresolved.nits)
+			: [
+					...findingsSection('Unresolved must-fix findings', input.unresolved.mustFix),
+					...findingsSection('Unresolved nits', input.unresolved.nits)
+				]),
+		...findingsSection('Tradeoffs', input.unresolved.tradeoffs)
 	]
 		.join('\n')
 		.trimEnd()

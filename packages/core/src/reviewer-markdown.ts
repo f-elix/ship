@@ -36,7 +36,7 @@ const formatIssue = SchemaIssue.makeFormatterDefault();
 
 /**
  * Parses a reviewer file: YAML frontmatter (`name`, `description`, `triggers`, `model`,
- * `blocking`) and a markdown body, the brief. `name` must match the file name without
+ * `conventions`) and a markdown body, the brief. `name` must match the file name without
  * `.md`, so a project file overrides the built-in it is named after.
  */
 export const parseReviewerMarkdown = Effect.fn('parseReviewerMarkdown')(function* (

@@ -14,6 +14,7 @@ import { readDaemonPid } from '@ship/daemon/client';
 import { Console, Effect, Option, Schema, Stream } from 'effect';
 import { Argument, Command, Flag } from 'effect/cli';
 import { resolve } from 'node:path';
+import { auth } from './auth.ts';
 import {
 	cliError,
 	connectDaemon,
@@ -344,5 +345,5 @@ export const ship = Command.make('ship').pipe(
 	Command.withDescription(
 		'Run the scripted part of a coding-agent workflow: implement, checks, review, fix, PR.'
 	),
-	Command.withSubcommands([run, resume, cancel, status, list, logs, daemon, init])
+	Command.withSubcommands([run, resume, cancel, status, list, logs, daemon, init, auth])
 );

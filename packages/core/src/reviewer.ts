@@ -33,7 +33,7 @@ const compilableRegExp = Schema.makeFilter(
  * Deterministic triggers. A reviewer runs when any of them matches the diff under review:
  * `always`, any changed path matching a glob in `paths`, any added line matching a
  * pattern in `addedLines` (outside `docs` files), or any changed file of a kind in `fileKinds`.
- * A reviewer with no matching trigger can still be picked by the LLM router.
+ * A reviewer with no matching trigger can still be picked by Cloudflare Clef (see `clef.ts`).
  */
 export const ReviewerTriggers = Schema.Struct({
 	always: Schema.Boolean.pipe(withDefault(false)),
@@ -57,15 +57,13 @@ export const ConventionRef = Schema.String.check(
 export const ReviewerFrontmatter = Schema.Struct({
 	name: ReviewerName,
 	/**
-	 * One sentence on what the reviewer covers. The LLM router picks reviewers from it;
-	 * without one it reads the brief's first paragraph.
+	 * One sentence on what the reviewer covers. Clef decides from it whether to add the
+	 * reviewer; without one it reads the brief's first paragraph.
 	 */
 	description: Schema.optionalKey(Schema.NonEmptyString),
 	triggers: ReviewerTriggers.pipe(withDefault({})),
 	/** Overrides the configured `review` model for this reviewer. */
 	model: Schema.optionalKey(ModelId),
-	/** Must-fix findings from a non-blocking reviewer are filed as tradeoffs, so they never start a fix round. */
-	blocking: Schema.Boolean.pipe(withDefault(true)),
 	/**
 	 * The conventions the reviewer is given: topics, given only when they apply to the repo
 	 * and the change, and references, always given. `'*'` gives every topic that applies.

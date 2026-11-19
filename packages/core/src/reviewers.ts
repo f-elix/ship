@@ -2,13 +2,13 @@ import { Context, Effect, FileSystem, Layer, Result, Schema, Struct } from 'effe
 import { fileURLToPath } from 'node:url';
 import {
 	Agent,
-	agentErrorCost,
 	AgentOutputMismatch,
 	billedTo,
 	type AgentCallCost,
 	type AgentError,
 	type TranscriptTarget
 } from './agent.ts';
+import { Clef, type ClefError, type CloudflareCredentials } from './clef.ts';
 import { REPO_RULES_WIN, reviewerConventionFiles, type ConventionScope } from './conventions.ts';
 import {
 	Finding,
@@ -71,25 +71,26 @@ export interface ReviewDelta extends ReviewChanges {
 
 export interface RouteInput {
 	readonly reviewers: ReadonlyArray<ReviewerDef>;
-	/** Round 1: `base..HEAD`. Later rounds: `lastReviewedSha..HEAD`, so only reviewers the fix touched run again. */
+	/**
+	 * What routing looks at. Round 1: `base..HEAD`. Later rounds: `lastReviewedSha..HEAD`,
+	 * the fix commits, so only reviewers the fix touched are routed again.
+	 */
 	readonly changes: ReviewDelta;
-	/** The LLM router, when the project's `reviewers.llmRouter` is on; `null` skips it. */
-	readonly llm: null | {
-		readonly model: string;
-		readonly timeoutMs: number;
-		readonly context: AgentContext;
-	};
+	/**
+	 * Clef, when the project's `reviewers.clef` is on and Cloudflare credentials are saved;
+	 * `null` routes with the deterministic triggers only.
+	 */
+	readonly clef: null | { readonly credentials: CloudflareCredentials };
 }
 
 export interface RouteResult {
-	/** Deterministic picks first, then the LLM router's additions. */
+	/** Deterministic picks first, then Clef's additions. */
 	readonly reviewers: ReadonlyArray<RoutedReviewer>;
-	readonly costs: ReadonlyArray<AgentCallCost>;
 	/**
-	 * Why the LLM router failed, if it did. Routing then keeps the deterministic picks:
-	 * the router may only add reviewers, so its failure must not block the review.
+	 * Why Clef failed, if it did. Routing then keeps the deterministic picks: Clef may
+	 * only add reviewers, so its failure must not block the review.
 	 */
-	readonly llmError: AgentError | null;
+	readonly clefError: ClefError | null;
 }
 
 export interface ReviewInput extends ReviewSubject {
@@ -120,11 +121,16 @@ export interface VerifyInput extends ReviewSubject {
 	/** Every finding reported this round. */
 	readonly findings: ReadonlyArray<Finding>;
 	/**
-	 * Verified findings from earlier rounds to check again: normally the must-fix findings
+	 * Verified findings from earlier rounds to check again: the must-fix findings and nits
 	 * the last fix step was given. The verifier says which are fixed; an unfixed one comes
-	 * back as a finding of this round that `repeats` it, which is a stall.
+	 * back as a finding of this round that `repeats` it. A repeated must-fix is a stall.
 	 */
 	readonly previous: ReadonlyArray<VerifiedFinding>;
+	/**
+	 * Earlier rounds' tradeoffs, already listed for the PR. Used only to match repeats: a
+	 * tradeoff of this round that repeats one is dropped, so the PR lists it once.
+	 */
+	readonly knownTradeoffs: ReadonlyArray<VerifiedFinding>;
 	readonly model: string;
 	readonly timeoutMs: number;
 	readonly context: AgentContext;
@@ -149,8 +155,8 @@ export interface ReviewersShape {
 		input: LoadReviewersInput
 	) => Effect.Effect<ReadonlyArray<ReviewerDef>, ReviewerFileError>;
 	/**
-	 * Picks the reviewers for `changes`: every one whose triggers match, then the ones the
-	 * LLM router adds. The LLM router never removes a deterministic pick.
+	 * Picks the reviewers for `changes`: every one whose triggers match, then the ones Clef
+	 * adds. Clef never removes a deterministic pick.
 	 */
 	readonly route: (input: RouteInput) => Effect.Effect<RouteResult>;
 	/**
@@ -200,11 +206,6 @@ export const ReviewerOutput = Schema.Struct({
 });
 export interface ReviewerOutput extends Schema.Schema.Type<typeof ReviewerOutput> {}
 
-export const RouterOutput = Schema.Struct({
-	reviewers: Schema.Array(Schema.Struct({ name: Schema.String, reason: Schema.String }))
-});
-export interface RouterOutput extends Schema.Schema.Type<typeof RouterOutput> {}
-
 /**
  * The verifier's judgement of each finding by its index in the list it was given, and of
  * each previous finding by id. Ship assembles the verified findings from it.
@@ -217,9 +218,9 @@ export const VerifierOutput = Schema.Struct({
 			reason: Schema.NonEmptyString,
 			/** For `duplicate`: the index of the finding it repeats. */
 			duplicateOf: Schema.optionalKey(NonNegativeInt),
-			/** For `confirmed`: the id of the previous finding it is the same problem as. */
+			/** For `confirmed`: the id of the previous finding or known tradeoff it is the same problem as. */
 			repeats: Schema.optionalKey(Schema.String),
-			/** For `confirmed`: a lower severity, when the evidence does not support the reported one. */
+			/** For `confirmed`: `nit` for a must-fix that is only a formatter, linter or taste remark. */
 			severity: Schema.optionalKey(Severity)
 		})
 	),
@@ -237,7 +238,6 @@ export interface VerifierOutput extends Schema.Schema.Type<typeof VerifierOutput
 
 /** Reviewers get the whole diff up to this size; beyond it they read the files themselves. */
 const MAX_REVIEW_DIFF_CHARS = 200_000;
-const MAX_ROUTER_DIFF_CHARS = 30_000;
 
 const subjectSection = (subject: ReviewSubject) => {
 	const commits =
@@ -271,12 +271,12 @@ const subjectSection = (subject: ReviewSubject) => {
 const REVIEWER_RULES = `## Rules
 
 - Stay inside your brief. Other reviewers own what it lists as out of scope.
-- Report problems this change introduces or makes worse. Older problems count only when the change newly exposes them. After a fix round the diff may hold only the fix commits; read the files for context.
+- Report problems this change introduces or makes worse. Older problems count only when the change newly exposes them.
 - Try to disprove each finding before reporting it: read the surrounding code, callers and tests, confirm what you call missing is missing, and confirm any helper or API you suggest exists.
 - Severity:
-  - \`must-fix\`: a real defect shown by concrete evidence, such as a traced failing path, a quoted requirement or a quoted written project rule. Suspicion, preference or a missing best practice is never must-fix.
-  - \`tradeoff\`: a judgement call worth a human's attention; state its cost.
+  - \`must-fix\`: a defect shown by concrete evidence, such as a traced failing path, a quoted requirement or a quoted written project rule. Suspicion, preference or a missing best practice is never must-fix.
   - \`nit\`: style or wording with no effect on behaviour.
+  - \`tradeoff\`: the change deviates from the spec or plan, or has an impact the plan did not foresee. State what it gives up, and its cost.
 
 ## Output
 
@@ -316,45 +316,17 @@ export const reviewerPrompt = (reviewer: ReviewerDef, subject: ReviewSubject): s
 		REVIEWER_RULES
 	].join('\n');
 
-const firstParagraph = (brief: string): string => {
-	const paragraph = brief.split(/\n\s*\n/u).find((part) => !part.trim().startsWith('#')) ?? '';
-	const text = paragraph.replace(/\s+/gu, ' ').trim();
-	return text.length > 300 ? `${text.slice(0, 300)}…` : text;
-};
-
-export const routerPrompt = (
-	candidates: ReadonlyArray<ReviewerDef>,
-	changes: ReviewDelta
-): string =>
-	[
-		'Pick the code reviewers this change needs, beyond those already chosen. Pick a reviewer only when the change clearly touches what its description covers; pick none when in doubt.',
-		'',
-		'## Reviewers you can pick',
-		'',
-		...candidates.map(
-			(reviewer) =>
-				`- ${reviewer.name}: ${reviewer.description ?? firstParagraph(reviewer.brief)}`
-		),
-		'',
-		'## Changed files',
-		'',
-		...changes.files.map((file) => `- ${file.status} ${file.path}`),
-		'',
-		'## Diff',
-		'',
-		'```diff',
-		truncateDiff(changes.diff, MAX_ROUTER_DIFF_CHARS),
-		'```',
-		'',
-		'Return the names you pick, each with a one-sentence reason.'
-	].join('\n');
-
 const findingLine = (finding: Finding) =>
 	`${finding.reviewer} | ${finding.severity} | ${finding.file}${finding.line === undefined ? '' : `:${finding.line}`} | ${finding.claim} | evidence: ${finding.evidence}`;
 
+const findingList = (findings: ReadonlyArray<VerifiedFinding>): ReadonlyArray<string> =>
+	findings.length === 0
+		? ['(none)']
+		: findings.map((finding) => `${finding.id}. ${findingLine(finding)}`);
+
 export const verifierPrompt = (
 	brief: string,
-	input: Pick<VerifyInput, 'findings' | 'previous'> & ReviewSubject
+	input: Pick<VerifyInput, 'findings' | 'previous' | 'knownTradeoffs'> & ReviewSubject
 ): string =>
 	[
 		brief,
@@ -373,15 +345,19 @@ export const verifierPrompt = (
 		'',
 		'## Previous findings',
 		'',
-		'Findings from earlier rounds, which the latest fix was meant to resolve. One per line: `id. reviewer | severity | location | claim | evidence`.',
+		"The last round's must-fix findings and nits, which the latest fix was meant to resolve. One per line: `id. reviewer | severity | location | claim | evidence`.",
 		'',
-		...(input.previous.length === 0
-			? ['(none)']
-			: input.previous.map((finding) => `${finding.id}. ${findingLine(finding)}`)),
+		...findingList(input.previous),
+		'',
+		'## Known tradeoffs',
+		'',
+		'Tradeoffs from earlier rounds, already listed for the PR. Use them only to match repeats. One per line: `id. reviewer | severity | location | claim | evidence`.',
+		'',
+		...findingList(input.knownTradeoffs),
 		'',
 		'## Output',
 		'',
-		'Give one verdict per finding, by index: `confirmed`, `disproved` or `duplicate` (with `duplicateOf`, the index of the finding it repeats), and a reason. For a confirmed finding that is the same problem as a previous finding, set `repeats` to that id; set `severity` only to lower one the evidence does not support. A kept finding takes the highest severity among the duplicates merged into it; its `severity` lowers that merged result. Then give each previous finding, by id, a status, `fixed` or `unfixed`, with evidence.'
+		'Give one verdict per finding, by index: `confirmed`, `disproved` or `duplicate` (with `duplicateOf`, the index of the finding it repeats), and a reason. Mark a duplicate only between findings of the same kind: a tradeoff with a tradeoff, or a must-fix or nit with a must-fix or nit. For a confirmed finding that is the same problem as a previous finding, or the same tradeoff as a known one, set `repeats` to that id. Set `severity` to `nit` only to lower a must-fix that is a formatter, linter or taste remark; never move a finding into or out of `tradeoff`. A kept finding takes the highest severity among the duplicates merged into it; its `severity` lowers that merged result. Then give each previous finding, by id, a status, `fixed` or `unfixed`, with evidence.'
 	].join('\n');
 
 /** What reviewers and the verifier may read outside the repo: the plan and the conventions. */
@@ -389,38 +365,41 @@ const readableDirs = (subject: ReviewSubject) => [...planDirs(subject), subject.
 
 // --- Severity ---
 
-const SEVERITY_RANK: Record<Severity, number> = { nit: 0, tradeoff: 1, 'must-fix': 2 };
+/**
+ * `tradeoff` is a kind of finding, not a level: only must-fix and nit are ranked, and
+ * duplicates merge only within a kind, so a tradeoff is never compared with either.
+ */
+const mostSevere = (a: Severity, b: Severity): Severity => (a === 'must-fix' ? a : b);
 
-const mostSevere = (a: Severity, b: Severity): Severity =>
-	SEVERITY_RANK[a] >= SEVERITY_RANK[b] ? a : b;
-
-const leastSevere = (a: Severity, b: Severity): Severity => (mostSevere(a, b) === a ? b : a);
-
-/** A non-blocking reviewer's must-fix becomes a tradeoff, so it never starts a fix round. */
-const capSeverity = (reviewer: ReviewerDef, severity: Severity): Severity =>
-	!reviewer.blocking && severity === 'must-fix' ? 'tradeoff' : severity;
+/** Whether `a` and `b` are the same kind of finding: both tradeoffs, or neither. */
+const sameKind = (a: Severity, b: Severity): boolean => (a === 'tradeoff') === (b === 'tradeoff');
 
 // --- Verification ---
 
 const invalidVerdicts = (output: VerifierOutput, detail: string) =>
 	new AgentOutputMismatch({ step: 'verify', detail, output: JSON.stringify(output) });
 
+type Verdict = VerifierOutput['verdicts'][number];
+
 /**
  * Builds the round's verified findings from the verifier's verdicts. Ship assigns ids
  * (`r<round>-<n>`) and merges duplicates into the finding they repeat, which takes the
- * highest severity among them. The verifier may lower a severity but never raise it, so
- * only a blocking reviewer's must-fix, reported or merged in, can start a fix round.
+ * highest severity among them. The verifier may lower a must-fix to a nit and nothing
+ * else: any other `severity` is ignored, so a finding never moves into or out of
+ * `tradeoff`.
  *
- * A finding with no verdict is kept, as is a duplicate of a finding that was not kept:
- * a finding is dropped only when the verifier disproves or merges it. Likewise a previous
- * finding with no status counts as unfixed, so it is never dropped silently.
+ * A finding with no verdict is kept, as is a duplicate of a finding that was not kept or
+ * of another kind (a tradeoff and a must-fix or nit): a finding is dropped only when the
+ * verifier disproves or merges it, or when it is a tradeoff that repeats a known one,
+ * which the PR already lists. Likewise a previous finding with no status counts as
+ * unfixed, so it is never dropped silently.
  */
 export const assembleVerified = (
-	input: Pick<VerifyInput, 'round' | 'findings' | 'previous'>,
+	input: Pick<VerifyInput, 'round' | 'findings' | 'previous' | 'knownTradeoffs'>,
 	output: VerifierOutput
 ): Effect.Effect<Omit<VerifyResult, 'cost'>, AgentOutputMismatch> =>
 	Effect.gen(function* () {
-		const verdicts = new Map<number, VerifierOutput['verdicts'][number]>();
+		const verdicts = new Map<number, Verdict>();
 		for (const verdict of output.verdicts) {
 			if (verdict.index >= input.findings.length) {
 				return yield* invalidVerdicts(
@@ -432,6 +411,21 @@ export const assembleVerified = (
 				return yield* invalidVerdicts(output, `two verdicts for finding ${verdict.index}`);
 			}
 			verdicts.set(verdict.index, verdict);
+		}
+		// A duplicate of another kind counts as no verdict, so the finding is kept.
+		for (const [index, verdict] of verdicts) {
+			const target =
+				verdict.verdict === 'duplicate' && verdict.duplicateOf !== undefined
+					? input.findings[verdict.duplicateOf]
+					: undefined;
+			const finding = input.findings[index];
+			if (
+				target !== undefined &&
+				finding !== undefined &&
+				!sameKind(finding.severity, target.severity)
+			) {
+				verdicts.delete(index);
+			}
 		}
 
 		/** The kept finding `index` merges into, or `null` when it is kept itself or dropped. */
@@ -449,11 +443,19 @@ export const assembleVerified = (
 			return verdicts.get(current)?.verdict === 'disproved' ? null : current;
 		};
 
+		/** The earlier finding `verdict` says `finding` repeats, when it is of the same kind. */
 		const previousIds = new Set<string>(input.previous.map((finding) => finding.id));
-		const kept = new Map<
-			number,
-			{ finding: Finding; repeats?: FindingId; severity?: Severity }
-		>();
+		const knownTradeoffIds = new Set<string>(input.knownTradeoffs.map((finding) => finding.id));
+		const repeatsOf = (
+			finding: Finding,
+			verdict: Verdict | undefined
+		): FindingId | undefined => {
+			if (verdict?.repeats === undefined) return undefined;
+			const ids = finding.severity === 'tradeoff' ? knownTradeoffIds : previousIds;
+			return ids.has(verdict.repeats) ? FindingId.make(verdict.repeats) : undefined;
+		};
+
+		const kept = new Map<number, { finding: Finding; repeats?: FindingId; lowered: boolean }>();
 		const merged = new Map<number, Array<Finding>>();
 		const disproved: Array<DisprovedFinding> = [];
 		input.findings.forEach((finding, index) => {
@@ -469,14 +471,11 @@ export const assembleVerified = (
 					return;
 				}
 			}
-			const repeats =
-				verdict?.repeats !== undefined && previousIds.has(verdict.repeats)
-					? FindingId.make(verdict.repeats)
-					: undefined;
+			const repeats = repeatsOf(finding, verdict);
 			kept.set(index, {
 				finding,
 				...(repeats === undefined ? {} : { repeats }),
-				...(verdict?.severity === undefined ? {} : { severity: verdict.severity })
+				lowered: verdict?.severity === 'nit'
 			});
 		});
 
@@ -487,13 +486,14 @@ export const assembleVerified = (
 		};
 		const verified: Array<VerifiedFinding> = [];
 		for (const [index, entry] of kept) {
+			// Already listed for the PR under the known tradeoff's id.
+			if (entry.finding.severity === 'tradeoff' && entry.repeats !== undefined) continue;
 			const duplicates = merged.get(index) ?? [];
 			const reported = duplicates.reduce(
 				(severity, duplicate) => mostSevere(severity, duplicate.severity),
 				entry.finding.severity
 			);
-			const severity =
-				entry.severity === undefined ? reported : leastSevere(entry.severity, reported);
+			const severity = entry.lowered && reported === 'must-fix' ? 'nit' : reported;
 			verified.push({
 				...entry.finding,
 				severity,
@@ -538,6 +538,7 @@ const make = (briefsDir: string) =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem;
 		const agent = yield* Agent;
+		const clef = yield* Clef;
 
 		const fileError = (path: string) => (error: { message: string }) =>
 			new ReviewerFileError({ path, detail: error.message });
@@ -580,49 +581,31 @@ const make = (briefsDir: string) =>
 			const deterministic = routeDeterministic(input.reviewers, input.changes);
 			const picked = new Set(deterministic.map((routed) => routed.reviewer.name));
 			const candidates = input.reviewers.filter((reviewer) => !picked.has(reviewer.name));
-			if (input.llm === null || candidates.length === 0) {
-				return {
-					reviewers: deterministic,
-					costs: [],
-					llmError: null
-				} satisfies RouteResult;
+			if (input.clef === null || candidates.length === 0) {
+				return { reviewers: deterministic, clefError: null } satisfies RouteResult;
 			}
-			const { llm } = input;
-			const outcome = yield* agent
-				.runStructured(
-					{
-						step: 'route',
-						prompt: routerPrompt(candidates, input.changes),
-						model: llm.model,
-						access: 'none',
-						cwd: llm.context.cwd,
-						env: llm.context.env,
-						timeoutMs: llm.timeoutMs,
-						transcript: llm.context.transcript
-					},
-					RouterOutput
-				)
+			const outcome = yield* clef
+				.pick({
+					candidates,
+					changes: input.changes,
+					credentials: input.clef.credentials
+				})
 				.pipe(Effect.result);
 			if (Result.isFailure(outcome)) {
-				const cost = agentErrorCost(outcome.failure);
 				return {
 					reviewers: deterministic,
-					costs: cost === null ? [] : [cost],
-					llmError: outcome.failure
+					clefError: outcome.failure
 				} satisfies RouteResult;
 			}
-			const result = outcome.success;
-			const added = new Map<string, RoutedReviewer>();
-			for (const pick of result.output.reviewers) {
+			const added = outcome.success.flatMap((pick): ReadonlyArray<RoutedReviewer> => {
 				const reviewer = candidates.find((candidate) => candidate.name === pick.name);
-				if (reviewer !== undefined && !added.has(reviewer.name)) {
-					added.set(reviewer.name, { reviewer, reasons: [`llm: ${pick.reason}`] });
-				}
-			}
+				return reviewer === undefined
+					? []
+					: [{ reviewer, reasons: [`clef: p=${pick.probability.toFixed(2)}`] }];
+			});
 			return {
-				reviewers: [...deterministic, ...added.values()],
-				costs: [result.cost],
-				llmError: null
+				reviewers: [...deterministic, ...added],
+				clefError: null
 			} satisfies RouteResult;
 		});
 
@@ -651,8 +634,7 @@ const make = (briefsDir: string) =>
 							reviewer: reviewer.name,
 							findings: result.output.findings.map((finding) => ({
 								reviewer: reviewer.name,
-								...finding,
-								severity: capSeverity(reviewer, finding.severity)
+								...finding
 							})),
 							cost: result.cost
 						};
@@ -705,7 +687,7 @@ const make = (briefsDir: string) =>
 export class Reviewers extends Context.Service<Reviewers, ReviewersShape>()(
 	'@ship/core/Reviewers'
 ) {
-	/** Built-in briefs from the package. Needs `Agent` and `FileSystem`. */
+	/** Built-in briefs from the package. Needs `Agent`, `Clef` and `FileSystem`. */
 	static readonly layer = Layer.effect(this, make(BUILTIN_BRIEFS_DIR));
 	/** Built-in briefs from `briefsDir` instead, for tests. */
 	static readonly layerWithBriefs = (briefsDir: string) => Layer.effect(this, make(briefsDir));

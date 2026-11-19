@@ -62,11 +62,11 @@ export interface Check extends Schema.Schema.Type<typeof Check> {}
 // and a global struct that fills every field.
 
 // `fixChecks` resumes the implementer session with the `fix` model; `escalate` writes
-// its PR body with the `pr` model. `baseline`, `checks` and `triage` run no agent.
+// its PR body with the `pr` model. `baseline`, `checks`, `route` and `triage` run no
+// agent: `route` asks Cloudflare Clef.
 const modelFields = {
 	implement: ModelId,
 	fix: ModelId,
-	route: ModelId,
 	review: ModelId,
 	verify: ModelId,
 	pr: ModelId
@@ -76,7 +76,6 @@ export const Models = Schema.Struct(
 	Struct.evolve(modelFields, {
 		implement: withDefault('opus'),
 		fix: withDefault('opus'),
-		route: withDefault('haiku'),
 		review: withDefault('sonnet'),
 		verify: withDefault('sonnet'),
 		pr: withDefault('haiku')
@@ -94,7 +93,7 @@ const capFields = {
 export const Caps = Schema.Struct(
 	Struct.evolve(capFields, {
 		checkFixAttempts: withDefault(3),
-		reviewRounds: withDefault(3)
+		reviewRounds: withDefault(10)
 	})
 );
 export interface Caps extends Schema.Schema.Type<typeof Caps> {}
@@ -134,19 +133,19 @@ export const Timeout = Schema.String.check(
 	)
 );
 
-// Every step except the deterministic `triage` has a timeout.
+// Every step has a timeout except the deterministic `triage` and `route`, whose Clef call
+// has a fixed one (`CLEF_TIMEOUT`).
 const timeoutFields = {
 	baseline: Timeout,
 	implement: Timeout,
 	checks: Timeout,
 	fixChecks: Timeout,
-	route: Timeout,
 	review: Timeout,
 	verify: Timeout,
 	fix: Timeout,
 	escalate: Timeout,
 	pr: Timeout
-} satisfies Record<Exclude<Step, 'triage'>, typeof Timeout>;
+} satisfies Record<Exclude<Step, 'triage' | 'route'>, typeof Timeout>;
 
 export const Timeouts = Schema.Struct(
 	Struct.evolve(timeoutFields, {
@@ -154,7 +153,6 @@ export const Timeouts = Schema.Struct(
 		implement: withDefault('1 hour'),
 		checks: withDefault('30 minutes'),
 		fixChecks: withDefault('20 minutes'),
-		route: withDefault('5 minutes'),
 		review: withDefault('20 minutes'),
 		verify: withDefault('15 minutes'),
 		fix: withDefault('30 minutes'),
@@ -167,7 +165,7 @@ export interface Timeouts extends Schema.Schema.Type<typeof Timeouts> {}
 const MODELS_DESCRIPTION = 'Agent model per step';
 const CAPS_DESCRIPTION = 'Loop caps before escalating';
 const TIMEOUTS_DESCRIPTION =
-	'Timeout per step. baseline and checks apply to each check command, route to the router call and review to each reviewer call; time spent waiting for a lock does not count';
+	'Timeout per step. baseline and checks apply to each check command and review to each reviewer call; time spent waiting for a lock does not count';
 
 // --- Global config: ~/.ship/config.json ---
 
@@ -186,8 +184,11 @@ export const ReviewersConfig = Schema.Struct({
 	disable: Schema.Array(ReviewerName).pipe(
 		withDefault([], 'Built-in reviewers to disable, by name')
 	),
-	llmRouter: Schema.Boolean.pipe(
-		withDefault(true, 'Run the LLM router after the deterministic triggers')
+	clef: Schema.Boolean.pipe(
+		withDefault(
+			true,
+			'Ask Cloudflare Clef to add reviewers after the deterministic triggers; needs `ship auth cloudflare`'
+		)
 	)
 });
 export interface ReviewersConfig extends Schema.Schema.Type<typeof ReviewersConfig> {}

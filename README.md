@@ -72,10 +72,15 @@ Ctrl-C detaches instead of cancelling, and prints how to follow, check or cancel
 | `ship daemon restart [--force]`      | Restart it, e.g. after upgrading ship or editing lock permits                          |
 | `ship init --detect`                 | Print a draft project config for the current directory                                 |
 | `ship init --write <file> [--force]` | Validate and save the project config, then run every check once                        |
+| `ship auth cloudflare`               | Save the Cloudflare credentials reviewer routing uses, after checking them             |
 
 Runs are hosted by a background daemon, which the commands that need it start when it is not running (`ship daemon stop` does not); its output goes to `daemon.log` in ship's home. The CLI and the daemon must be the same version: after an upgrade, commands ask for `ship daemon restart`. Stopping or restarting the daemon is refused while runs are active; `--force` interrupts them, and `ship resume <id>` continues them later.
 
 The implementing agent runs unattended with every permission (`bypassPermissions`) in the project directory. Reviewers can only read.
+
+## Reviewer routing
+
+Each review round picks reviewers with the deterministic triggers in their briefs, then asks [Cloudflare Clef](https://developers.cloudflare.com/workers-ai/models/clef-flash/) whether the change needs any of the others. Clef can only add reviewers. `ship auth cloudflare` asks for a Cloudflare account id and an API token with the Workers AI permission, checks them with one Clef call, and saves them to `credentials.json` in ship's home, readable by you only (mode 0600). That file is the only place ship reads them from; delete it to remove them. Without credentials, routing uses the triggers only and logs a warning to `daemon.log`; set `reviewers.clef` to `false` in the project config to turn Clef off.
 
 ## Conventions
 

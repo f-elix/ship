@@ -1,8 +1,6 @@
 ---
 name: comments
 description: Accuracy and value of code comments, docstrings and docs the change adds.
-# Not blocking: a wrong or noisy added comment misleads but does not break behaviour.
-blocking: false
 model: haiku
 conventions: [comments]
 triggers:
@@ -18,6 +16,6 @@ Check the comments, docstrings and docs this change adds.
 - Missing: a non-obvious constraint, invariant or workaround the code relies on with no explanation. Report this only when a reader would likely break it.
 - Leftover TODO, FIXME or commented-out code without an owner or reason.
 
-A wrong comment or doc is `tradeoff`; noise and wording are `nit`.
+A comment or doc the code contradicts is `must-fix`: quote both. Noise and wording are `nit`.
 
 Out of scope: existing docs or comments the change makes stale (standards), the code's behaviour, names (standards, domain-language), and the plan files.

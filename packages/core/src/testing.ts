@@ -1,5 +1,5 @@
 /**
- * Fake `Git`, `Checks`, `Agent` and `Gh` layers for machine and daemon tests. `Locks` is
+ * Fake `Git`, `Checks`, `Agent`, `Gh` and `Clef` layers for machine and daemon tests. `Locks` is
  * in memory, so tests use the real one.
  */
 import { Context, Effect, Layer, Ref, Struct } from 'effect';
@@ -23,6 +23,14 @@ import {
 	type ShellCommand,
 	type ShellExecutor
 } from './checks.ts';
+import {
+	Clef,
+	CLEF_THRESHOLD,
+	ClefError,
+	type ClefPick,
+	type ClefPickInput,
+	type ClefShape
+} from './clef.ts';
 import { Gh, GhError, type CreatePrInput, type GhShape } from './gh.ts';
 import {
 	Git,
@@ -509,6 +517,67 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 					Ref.update(failures, (current) => Struct.omit(current, [method]))
 			};
 			return Context.empty().pipe(Context.add(Gh, Gh.of(gh)), Context.add(GhFake, fake));
+		})
+	);
+}
+
+// --- Clef ---
+
+export interface ClefFakeShape {
+	/** Every `pick` call that asked Clef, oldest first; a call with no candidates asks nothing. */
+	readonly calls: Effect.Effect<ReadonlyArray<ClefPickInput>>;
+	/**
+	 * The probability Clef gives each reviewer, by name; unlisted reviewers get 0. `pick`
+	 * applies {@link CLEF_THRESHOLD} as the real Clef does.
+	 */
+	readonly answer: (probabilities: Readonly<Record<string, number>>) => Effect.Effect<void>;
+	/** Makes `pick` and `verify` fail with a `ClefError`, until cleared with `succeed`. */
+	readonly fail: (error: ClefError) => Effect.Effect<void>;
+	readonly succeed: Effect.Effect<void>;
+}
+
+export class ClefFake extends Context.Service<ClefFake, ClefFakeShape>()('@ship/core/ClefFake') {
+	/** A fake `Clef` that gives scripted probabilities, plus `ClefFake` to script and inspect it. */
+	static readonly layer: Layer.Layer<Clef | ClefFake> = Layer.effectContext(
+		Effect.gen(function* () {
+			const calls = yield* Ref.make<ReadonlyArray<ClefPickInput>>([]);
+			const probabilities = yield* Ref.make<Readonly<Record<string, number>>>({});
+			const failure = yield* Ref.make<ClefError | null>(null);
+
+			const guard = Effect.flatMap(Ref.get(failure), (error) =>
+				error === null ? Effect.void : Effect.fail(error)
+			);
+
+			const clef: ClefShape = {
+				pick: (input) =>
+					input.candidates.length === 0
+						? Effect.succeed([])
+						: Ref.update(calls, (current) => [...current, input]).pipe(
+								Effect.andThen(guard),
+								Effect.andThen(Ref.get(probabilities)),
+								Effect.map((answers) =>
+									input.candidates.flatMap(
+										(reviewer): ReadonlyArray<ClefPick> => {
+											const probability = answers[reviewer.name] ?? 0;
+											return probability >= CLEF_THRESHOLD
+												? [{ name: reviewer.name, probability }]
+												: [];
+										}
+									)
+								)
+							),
+				verify: () => guard
+			};
+			const fake: ClefFakeShape = {
+				calls: Ref.get(calls),
+				answer: (next) => Ref.set(probabilities, next),
+				fail: (error) => Ref.set(failure, error),
+				succeed: Ref.set(failure, null)
+			};
+			return Context.empty().pipe(
+				Context.add(Clef, Clef.of(clef)),
+				Context.add(ClefFake, fake)
+			);
 		})
 	);
 }

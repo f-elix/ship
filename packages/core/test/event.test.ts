@@ -158,8 +158,9 @@ describe('run domain', () => {
 			lastReviewedSha: headSha,
 			review: {
 				round: 2,
-				fromSha: headSha,
+				fromSha: baseSha,
 				toSha: headSha,
+				routedFromSha: headSha,
 				reviewers: ['comments'],
 				findings: [finding]
 			},

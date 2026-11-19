@@ -1,8 +1,6 @@
 ---
 name: error-handling
 description: How failures are raised, propagated, recovered from and reported; swallowed errors, wrong fallbacks, lost causes, retries and cleanup.
-# Blocking: a swallowed error or a wrong fallback is a real defect once the failing path is traced.
-blocking: true
 conventions: [error-handling]
 triggers:
     addedLines:

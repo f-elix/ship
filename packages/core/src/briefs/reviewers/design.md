@@ -2,13 +2,14 @@
 # Adapted from the Design reviewer of Matt Pocock's code-review skill (MIT); see ../ATTRIBUTION.md.
 name: design
 description: Ownership, module boundaries, interfaces, persistence strategy and new abstractions or services; whether a simpler structure would serve the same requirements.
-# Not blocking: design findings are judgement calls for the human reading the PR, and a fix loop on them churns.
-blocking: false
 model: sonnet
 conventions: [references/software-design-philosophy, references/codebase-design, file-organization]
 triggers:
     addedLines:
         - '^\s*export\s+(?:default\s+)?(?:abstract\s+)?class\s'
+        - '^\s*export\s+(?:default\s+)?(?:async\s+)?function\b'
+        - '^\s*export\s+(?:const|let|var)\s'
+        - '^\s*export\s+(?:declare\s+)?(?:type|interface|enum)\s'
         - '\bCREATE\s+TABLE\b|[`''"]\s*create\s+table\b'
 ---
 
