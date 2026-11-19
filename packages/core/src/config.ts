@@ -78,7 +78,7 @@ export const Models = Schema.Struct(
 		fix: withDefault('opus'),
 		route: withDefault('haiku'),
 		review: withDefault('sonnet'),
-		verify: withDefault('opus'),
+		verify: withDefault('sonnet'),
 		pr: withDefault('haiku')
 	})
 );

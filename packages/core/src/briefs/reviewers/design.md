@@ -4,7 +4,7 @@ name: design
 description: Ownership, module boundaries, interfaces, persistence strategy and new abstractions or services; whether a simpler structure would serve the same requirements.
 # Not blocking: design findings are judgement calls for the human reading the PR, and a fix loop on them churns.
 blocking: false
-model: opus
+model: sonnet
 triggers:
     addedLines:
         - '^\s*export\s+(?:default\s+)?(?:abstract\s+)?class\s'

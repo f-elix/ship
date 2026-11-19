@@ -45,7 +45,7 @@
 				"verify": {
 					"type": "string",
 					"minLength": 1,
-					"default": "opus"
+					"default": "sonnet"
 				},
 				"pr": {
 					"type": "string",
