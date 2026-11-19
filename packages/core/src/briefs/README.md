@@ -10,6 +10,7 @@ Frontmatter:
 - `description`: one sentence of scope, read by the LLM router.
 - `triggers`: `always`, `paths` (globs), `addedLines` (regexes), `fileKinds`. See `ReviewerTriggers` in `../reviewer.ts`.
 - `model`: `haiku` for narrow, mechanical reviewers (comments, deps, domain-language), `sonnet` for spec and design, and `opus` for security. Leaving it out uses the configured `review` model.
+- `conventions`: the conventions the reviewer reads, listed in its prompt by absolute path: topic names, given only when the topic applies to the repo's stack and the change, and `references/<name>`, always given. `'*'` gives every topic that applies (standards). Leaving it out gives none. See `../conventions/README.md`.
 - `blocking`: whether the reviewer's must-fix findings start a fix round. Non-blocking reviewers (design, comments, performance, domain-language) cover judgement calls; their must-fix findings are filed as tradeoffs for the PR body. Each file says why in a YAML comment. `blocking` defaults to `true`, so a project copy of a non-blocking brief must keep `blocking: false`.
 
 Attribution for adapted material is in `ATTRIBUTION.md`.

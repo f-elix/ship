@@ -3,6 +3,7 @@ export * from './checks.ts';
 export * from './config-loader.ts';
 export * from './config.ts';
 export * from './contract.ts';
+export * from './conventions.ts';
 export * from './detect.ts';
 export * from './finding.ts';
 export * from './gh.ts';

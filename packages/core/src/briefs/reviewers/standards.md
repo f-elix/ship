@@ -4,6 +4,7 @@ name: standards
 description: Repository conventions and written project rules (AGENTS.md, CLAUDE.md, contributing guides), local idioms, readability and reuse of existing helpers.
 # Blocking: a broken written rule is objective once the rule is quoted. Heuristics stay tradeoffs.
 blocking: true
+conventions: '*'
 triggers:
     always: true
 ---

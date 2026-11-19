@@ -5,6 +5,7 @@ description: Ownership, module boundaries, interfaces, persistence strategy and 
 # Not blocking: design findings are judgement calls for the human reading the PR, and a fix loop on them churns.
 blocking: false
 model: sonnet
+conventions: [references/software-design-philosophy, references/codebase-design, file-organization]
 triggers:
     addedLines:
         - '^\s*export\s+(?:default\s+)?(?:abstract\s+)?class\s'

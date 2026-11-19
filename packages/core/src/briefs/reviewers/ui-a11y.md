@@ -3,6 +3,7 @@ name: ui-a11y
 description: User interface behaviour and accessibility (semantics, keyboard use, focus, labels, contrast, motion) and loading, empty and error states.
 # Blocking: a control that keyboard or screen reader users cannot operate is a defect, and the fixes are usually local.
 blocking: true
+conventions: [svelte-components, styling]
 triggers:
     fileKinds: [ui]
 ---

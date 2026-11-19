@@ -1,9 +1,10 @@
 import { NodeServices } from '@effect/platform-node';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import {
 	BUILTIN_BRIEFS_DIR,
+	BUILTIN_CONVENTIONS_DIR,
 	Reviewers,
 	routeDeterministic,
 	type ReviewChanges,
@@ -52,6 +53,43 @@ describe('built-in reviewers', () => {
 		expect(
 			builtins.filter((reviewer) => !reviewer.blocking).map((reviewer) => reviewer.name)
 		).toEqual(['comments', 'design', 'domain-language', 'performance']);
+	});
+
+	it('gives each reviewer the conventions the spec lists for it', () => {
+		expect(
+			Object.fromEntries(
+				builtins.flatMap((reviewer) =>
+					reviewer.conventions === undefined
+						? []
+						: [[reviewer.name, reviewer.conventions]]
+				)
+			)
+		).toEqual({
+			comments: ['comments'],
+			design: [
+				'references/software-design-philosophy',
+				'references/codebase-design',
+				'file-organization'
+			],
+			'error-handling': ['error-handling'],
+			standards: '*',
+			tests: ['testing', 'test-cases', 'references/testing'],
+			'ui-a11y': ['svelte-components', 'styling']
+		});
+		for (const reviewer of builtins) {
+			if (reviewer.conventions === undefined || reviewer.conventions === '*') continue;
+			for (const entry of reviewer.conventions) {
+				const path = entry.startsWith('references/')
+					? `${BUILTIN_CONVENTIONS_DIR}/${entry}/SKILL.md`
+					: `${BUILTIN_CONVENTIONS_DIR}/${entry}.md`;
+				expect(existsSync(path), `${reviewer.name}: ${entry}`).toBe(true);
+			}
+		}
+	});
+
+	it('tells the verifier that a quoted convention rule is a written project rule', () => {
+		const brief = readFileSync(`${BUILTIN_BRIEFS_DIR}/verifier.md`, 'utf8');
+		expect(brief).toContain("Written project rules include ship's conventions");
 	});
 
 	it('ships a verifier brief', () => {

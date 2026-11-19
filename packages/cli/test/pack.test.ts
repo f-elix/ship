@@ -5,6 +5,7 @@ import { beforeAll, expect, test } from 'vitest';
 
 const cliDir = fileURLToPath(new URL('..', import.meta.url));
 const briefsDir = fileURLToPath(new URL('../../core/src/briefs', import.meta.url));
+const conventionsDir = fileURLToPath(new URL('../../core/src/conventions', import.meta.url));
 
 beforeAll(() => {
 	execFileSync('pnpm', ['run', '--silent', 'build'], {
@@ -13,14 +14,18 @@ beforeAll(() => {
 	});
 }, 60_000);
 
-test('the package ships every built-in brief and the attribution file', () => {
+const packedFiles = () => {
 	const output = execFileSync('pnpm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
 		cwd: cliDir,
 		encoding: 'utf8',
 		stdio: ['ignore', 'pipe', 'ignore']
 	});
 	const packed = JSON.parse(output) as { files: Array<{ path: string }> };
-	const files = new Set(packed.files.map((file) => file.path));
+	return new Set(packed.files.map((file) => file.path));
+};
+
+test('the package ships every built-in brief and the attribution file', () => {
+	const files = packedFiles();
 
 	const reviewers = readdirSync(`${briefsDir}/reviewers`).filter((name) => name.endsWith('.md'));
 	expect(reviewers.length).toBeGreaterThan(0);
@@ -31,6 +36,15 @@ test('the package ships every built-in brief and the attribution file', () => {
 	]) {
 		expect(files, path).toContain(path);
 	}
+}, 60_000);
+
+test('the package ships every convention and reference file', () => {
+	const files = packedFiles();
+	const sources = readdirSync(conventionsDir, { recursive: true, withFileTypes: true })
+		.filter((entry) => entry.isFile())
+		.map((entry) => `${entry.parentPath}/${entry.name}`.slice(conventionsDir.length + 1));
+	expect(sources).toContain('references/testing/SKILL.md');
+	for (const path of sources) expect(files, path).toContain(`dist/conventions/${path}`);
 }, 60_000);
 
 test('the commands do not load the daemon, the Agent SDK or sqlite', () => {

@@ -43,6 +43,16 @@ export const ReviewerTriggers = Schema.Struct({
 });
 export interface ReviewerTriggers extends Schema.Schema.Type<typeof ReviewerTriggers> {}
 
+/**
+ * A convention a reviewer reads: a topic name such as `testing`, or a reference such as
+ * `references/testing`. See `conventions.ts`.
+ */
+export const ConventionRef = Schema.String.check(
+	Schema.isPattern(/^(?:references\/)?[a-z0-9]+(?:-[a-z0-9]+)*$/u, {
+		expected: 'a convention topic name or references/<name>'
+	})
+);
+
 /** The parsed frontmatter of a reviewer markdown file. */
 export const ReviewerFrontmatter = Schema.Struct({
 	name: ReviewerName,
@@ -55,7 +65,14 @@ export const ReviewerFrontmatter = Schema.Struct({
 	/** Overrides the configured `review` model for this reviewer. */
 	model: Schema.optionalKey(ModelId),
 	/** Must-fix findings from a non-blocking reviewer are filed as tradeoffs, so they never start a fix round. */
-	blocking: Schema.Boolean.pipe(withDefault(true))
+	blocking: Schema.Boolean.pipe(withDefault(true)),
+	/**
+	 * The conventions the reviewer is given: topics, given only when they apply to the repo
+	 * and the change, and references, always given. `'*'` gives every topic that applies.
+	 */
+	conventions: Schema.optionalKey(
+		Schema.Union([Schema.Literal('*'), Schema.Array(ConventionRef)])
+	)
 });
 export interface ReviewerFrontmatter extends Schema.Schema.Type<typeof ReviewerFrontmatter> {}
 

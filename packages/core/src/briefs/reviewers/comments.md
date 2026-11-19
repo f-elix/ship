@@ -4,6 +4,7 @@ description: Accuracy and value of code comments, docstrings and docs the change
 # Not blocking: a wrong or noisy added comment misleads but does not break behaviour.
 blocking: false
 model: haiku
+conventions: [comments]
 triggers:
     fileKinds: [docs]
     addedLines:

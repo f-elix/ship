@@ -2,6 +2,7 @@ import { NodeHttpServer, NodeServices } from '@effect/platform-node';
 import {
 	Checks,
 	ConfigLoader,
+	Conventions,
 	Git,
 	Locks,
 	Pr,
@@ -167,6 +168,7 @@ const daemonServices = (options: DaemonOptions, paths: ShipPaths) => {
 		ShipHome.layer(options.home),
 		Checks.layer.pipe(Layer.provide([locks, platform])),
 		Reviewers.layer.pipe(Layer.provide([git, external, platform])),
+		Conventions.layer.pipe(Layer.provide([git, platform])),
 		Pr.layer.pipe(Layer.provide(external)),
 		RunStore.journal.pipe(Layer.provide(store))
 	);

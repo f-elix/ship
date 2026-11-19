@@ -9,6 +9,7 @@ import {
 	type AgentError,
 	type TranscriptTarget
 } from './agent.ts';
+import { REPO_RULES_WIN, reviewerConventionFiles, type ConventionScope } from './conventions.ts';
 import {
 	Finding,
 	FindingId,
@@ -50,6 +51,8 @@ export interface ReviewSubject {
 	/** Absolute paths of the plan's `spec.md` and `implementation-plan.md`. */
 	readonly specPath: string;
 	readonly planPath: string;
+	/** The conventions that apply to the repo and the change; reviewers and the verifier may read its dir. */
+	readonly conventions: ConventionScope;
 }
 
 export interface LoadReviewersInput {
@@ -279,7 +282,26 @@ const REVIEWER_RULES = `## Rules
 
 For each finding give the repo-relative \`file\`, the \`line\` in the new version when there is one, the \`severity\`, a one-sentence \`claim\`, and \`evidence\`: the quoted code (and rule or spec text where it applies), the reasoning that links them, and what you inferred but did not verify. Return an empty \`findings\` list when nothing survives; never pad it.`;
 
-/** The prompt for one reviewer: its brief, then the change. */
+/** The convention files a reviewer reads, and how their rules count; empty when it has none. */
+const conventionsSection = (
+	reviewer: ReviewerDef,
+	subject: ReviewSubject
+): ReadonlyArray<string> => {
+	const files = reviewerConventionFiles(subject.conventions, reviewer.conventions);
+	if (files.length === 0) return [];
+	return [
+		'## Conventions',
+		'',
+		"Read these convention files before reviewing; a topic's details file follows its base file:",
+		'',
+		...files.map((file) => `- ${file}`),
+		'',
+		`Check the change against every rule in them, including rules a linter also enforces. A rule quoted from them counts as a written project rule, like one in AGENTS.md: breaking it can be \`must-fix\`. ${REPO_RULES_WIN}`,
+		''
+	];
+};
+
+/** The prompt for one reviewer: its brief, its conventions, then the change. */
 export const reviewerPrompt = (reviewer: ReviewerDef, subject: ReviewSubject): string =>
 	[
 		`You are the "${reviewer.name}" reviewer of a code change. You can read and search the repository but not change it.`,
@@ -288,6 +310,7 @@ export const reviewerPrompt = (reviewer: ReviewerDef, subject: ReviewSubject): s
 		'',
 		reviewer.brief,
 		'',
+		...conventionsSection(reviewer, subject),
 		subjectSection(subject),
 		'',
 		REVIEWER_RULES
@@ -336,6 +359,8 @@ export const verifierPrompt = (
 	[
 		brief,
 		'',
+		`Conventions directory: ${input.conventions.dir}`,
+		'',
 		subjectSection(input),
 		'',
 		'## Findings to verify',
@@ -358,6 +383,9 @@ export const verifierPrompt = (
 		'',
 		'Give one verdict per finding, by index: `confirmed`, `disproved` or `duplicate` (with `duplicateOf`, the index of the finding it repeats), and a reason. For a confirmed finding that is the same problem as a previous finding, set `repeats` to that id; set `severity` only to lower one the evidence does not support. A kept finding takes the highest severity among the duplicates merged into it; its `severity` lowers that merged result. Then give each previous finding, by id, a status, `fixed` or `unfixed`, with evidence.'
 	].join('\n');
+
+/** What reviewers and the verifier may read outside the repo: the plan and the conventions. */
+const readableDirs = (subject: ReviewSubject) => [...planDirs(subject), subject.conventions.dir];
 
 // --- Severity ---
 
@@ -613,7 +641,7 @@ const make = (briefsDir: string) =>
 								access: 'read-only',
 								cwd: input.context.cwd,
 								env: input.context.env,
-								additionalDirectories: planDirs(input),
+								additionalDirectories: readableDirs(input),
 								timeoutMs: input.timeoutMs,
 								transcript: input.context.transcript
 							},
@@ -656,7 +684,7 @@ const make = (briefsDir: string) =>
 					access: 'read-only',
 					cwd: input.context.cwd,
 					env: input.context.env,
-					additionalDirectories: planDirs(input),
+					additionalDirectories: readableDirs(input),
 					timeoutMs: input.timeoutMs,
 					transcript: input.context.transcript
 				},

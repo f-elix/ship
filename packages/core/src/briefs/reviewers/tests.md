@@ -3,6 +3,7 @@ name: tests
 description: Whether changed behaviour is covered by tests, and whether the tests can fail, assert the right thing and stay deterministic.
 # Blocking: changed behaviour with no test, or a test that cannot fail, is a concrete gap in an unattended pipeline.
 blocking: true
+conventions: [testing, test-cases, references/testing]
 triggers:
     fileKinds: [source, test]
 ---

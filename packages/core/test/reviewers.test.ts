@@ -75,7 +75,8 @@ const subject: ReviewSubject = {
 	diff: 'diff --git a/src/a.ts b/src/a.ts\n+const a = 1;',
 	commits: [{ sha: fakeSha(1), subject: 'Add a' }],
 	specPath: '/plans/feature/spec.md',
-	planPath: '/plans/feature/implementation-plan.md'
+	planPath: '/plans/feature/implementation-plan.md',
+	conventions: { dir: '/conventions', topics: [] }
 };
 
 const sourceChange: ReviewDelta = {
@@ -384,7 +385,7 @@ describe('Reviewers.review', () => {
 				expect(standards).toMatchObject({
 					access: 'read-only',
 					model: 'sonnet',
-					additionalDirectories: ['/plans/feature']
+					additionalDirectories: ['/plans/feature', '/conventions']
 				});
 				expect(standards?.prompt).toContain('The standards brief.');
 				expect(standards?.prompt).toContain(subject.diff);
@@ -593,8 +594,13 @@ describe('Reviewers.verify', () => {
 				});
 
 				const [call] = yield* fake.calls;
-				expect(call).toMatchObject({ step: 'verify', access: 'read-only' });
+				expect(call).toMatchObject({
+					step: 'verify',
+					access: 'read-only',
+					additionalDirectories: ['/plans/feature', '/conventions']
+				});
 				expect(call?.prompt).toContain('You verify findings.');
+				expect(call?.prompt).toContain('Conventions directory: /conventions');
 				expect(call?.prompt).toContain('0. security | must-fix | src/a.ts:3 | Injection.');
 				expect(call?.prompt).toContain(
 					'r1-2. security | must-fix | src/a.ts:3 | Unguarded.'
