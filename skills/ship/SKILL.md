@@ -8,7 +8,7 @@ description: Hand a planned change to ship, which implements it, runs the checks
 ship runs the whole loop in its daemon: baseline checks → implement → checks → review → fix → PR. Your job is to start the run, wait for it, and report. Write no code yourself in this session.
 
 1. **Prepare.**
-    - **Plan dir**: a directory holding `spec.md` (the goal and agreed decisions) and `implementation-plan.md` (the steps). Both must be self-contained: the implementer sees only these files and the repo. Use the plan dir the user points to; when the work was agreed in conversation and no plan dir exists, write both files to a new temp dir outside the repo. ship excludes the dir from git when it sits inside the repo; it never commits plan files.
+    - **Plan dir**: the dir the `plan-out` skill wrote, holding `spec.md` and `implementation-plan.md`. The implementer sees only these files and the repo, so both must be self-contained. Use the dir the user points to, or the one `plan-out` wrote in this session. When there is none, run `plan-out` with the user first. ship excludes the dir from git when it sits inside the repo; it never commits plan files.
     - **Branch**: ship refuses the default branch. Create a feature branch from the default branch with a name describing the change.
     - **Clean tree**: commit or stash nothing on the user's behalf. When `git status` shows changes outside the plan dir, ask the user how to proceed.
     - **Config**: when the run fails with an unknown project config, run the `ship-init` skill, then start over.

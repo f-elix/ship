@@ -19,10 +19,10 @@ cd packages/cli && pnpm pack && npm i -g ./f-elix-ship-*.tgz
 
 ### Agent skills
 
-`skills/` holds two skills: `ship` hands a plan to `ship run` and reports the result, and `ship-init` sets up a project. Link them into your agent's skills folder so they follow the checkout:
+`skills/` holds three skills: `plan-out` designs a change with you and writes the plan dir (`spec.md` and `implementation-plan.md`), `ship` hands that plan to `ship run` and reports the result, and `ship-init` sets up a project. Link them into your agent's skills folder so they follow the checkout:
 
 ```sh
-ln -s "$PWD/skills/ship" "$PWD/skills/ship-init" ~/.agents/skills/
+ln -s "$PWD/skills/plan-out" "$PWD/skills/ship" "$PWD/skills/ship-init" ~/.agents/skills/
 ```
 
 ## Set up a project
