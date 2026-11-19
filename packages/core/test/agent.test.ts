@@ -197,6 +197,27 @@ describe('Agent', () => {
 		})
 	);
 
+	it.effect('fails with AgentOutputMismatch when the SDK gives up on structured output', () =>
+		Effect.gen(function* () {
+			const agent = yield* agentWith(
+				scripted([
+					result({
+						subtype: 'error_max_structured_output_retries',
+						is_error: true,
+						errors: ['output did not match the schema']
+					})
+				])
+			);
+			const error = yield* Effect.flip(agent.runStructured(input, Output));
+			expect(error).toBeInstanceOf(AgentOutputMismatch);
+			expect(error).toMatchObject({
+				step: 'review',
+				detail: expect.stringContaining('did not match'),
+				spend: { cost: { costUsd: 0.5 } }
+			});
+		})
+	);
+
 	it.effect('times out, aborting the agent', () =>
 		Effect.gen(function* () {
 			const calls: Array<Recorded> = [];

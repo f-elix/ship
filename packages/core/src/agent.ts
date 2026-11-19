@@ -250,18 +250,18 @@ const resultSpend = (input: AgentRunInput, result: SDKResultMessage): AgentSpend
 	};
 };
 
-const resultError = (input: AgentRunInput, result: SDKResultMessage): AgentSdkError => {
-	const detail =
-		result.subtype === 'success'
-			? result.result
-			: [...result.errors, result.stop_reason ?? ''].filter(Boolean).join('; ');
-	return new AgentSdkError({
+const resultDetail = (result: SDKResultMessage): string =>
+	(result.subtype === 'success'
+		? result.result
+		: [...result.errors, result.stop_reason ?? ''].filter(Boolean).join('; ')) || 'no detail';
+
+const resultError = (input: AgentRunInput, result: SDKResultMessage): AgentSdkError =>
+	new AgentSdkError({
 		step: input.step,
 		reason: result.subtype,
-		detail: detail || 'no detail',
+		detail: resultDetail(result),
 		spend: resultSpend(input, result)
 	});
-};
 
 const toJsonText = (value: unknown): string => {
 	try {
@@ -380,6 +380,16 @@ export const makeAgent = (runQuery: QueryFn) =>
 					step: input.step,
 					reason: 'no-result',
 					detail: 'The agent ended without a result message'
+				});
+			}
+			// The SDK gave up on producing output that matches the schema: the same failure
+			// as a decode mismatch, so callers with a fallback can handle both alike.
+			if (schema !== undefined && result.subtype === 'error_max_structured_output_retries') {
+				return yield* new AgentOutputMismatch({
+					step: input.step,
+					detail: resultDetail(result),
+					output: 'none',
+					spend: resultSpend(input, result)
 				});
 			}
 			if (result.subtype !== 'success' || result.is_error) {

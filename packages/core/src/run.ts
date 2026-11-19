@@ -104,6 +104,17 @@ export const AgentSession = Schema.Struct({
 export interface AgentSession extends Schema.Schema.Type<typeof AgentSession> {}
 
 /**
+ * The subject line of the run's commit: imperative mood, at most 72 characters, no
+ * trailing period. The implementer writes it.
+ */
+export const CommitSubject = Schema.NonEmptyString.check(
+	Schema.isTrimmed(),
+	Schema.isMaxLength(72),
+	Schema.isPattern(/^[^\n]*[^.\n]$/u, { expected: 'one line without a trailing period' })
+);
+export type CommitSubject = typeof CommitSubject.Type;
+
+/**
  * The machine context, persisted in snapshots. Values the run has not produced yet are
  * `null` so the context always has the same keys.
  */
@@ -119,6 +130,12 @@ export const RunState = Schema.Struct({
 	config: ResolvedConfig,
 	/** Set by `implement`; every fix step resumes this session. */
 	implementerSession: Schema.NullOr(AgentSession),
+	/**
+	 * The subject the implementer wrote for the round-0 commit and the squashed commit.
+	 * Optional, unlike the other not-yet-produced values: it stays absent when `implement`
+	 * gave no valid subject, and the commit falls back to `Implement <plan name>`.
+	 */
+	commitSubject: Schema.optionalKey(CommitSubject),
 	/** Current review round; 0 before the first review. */
 	round: NonNegativeInt,
 	/** Check-fix attempts in the current round. */
@@ -168,7 +185,7 @@ export const initialRunState = (start: NewRunState): RunState => ({
  * Bump it when a change to `RunState` or the machine's states makes older snapshots
  * unsafe to restore; runs saved under another version can no longer be resumed.
  */
-export const SNAPSHOT_VERSION = 1;
+export const SNAPSHOT_VERSION = 2;
 
 /** The JSON `ship run` prints on stdout when the run ends; also kept in the run store. */
 export const Summary = Schema.Struct({
