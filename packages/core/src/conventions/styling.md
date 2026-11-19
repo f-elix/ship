@@ -262,7 +262,8 @@ Tailwind provides an escape hatch from the established config, but these should 
 
 `!important` classes should be avoided at all cost. If you find yourself needing it to make your styles work, take a step back and re-evaluate what you're doing, you probably messed up somewhere. Use the design system. Exceptions can happen, but they should be very rare.
 
-<!-- ❌ Bad: !important calsses -->
+```svelte
+<!-- ❌ Bad: !important classes -->
 <div class="text-14! bg-gray-400!"></div>
 ```
 

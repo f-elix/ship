@@ -3,7 +3,9 @@ import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Schema } from 'effect';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import {
+	BUILTIN_BRIEFS_DIR,
 	BUILTIN_CONVENTIONS_DIR,
 	CONVENTION_REFERENCES,
 	Conventions,
@@ -16,6 +18,7 @@ import {
 	reviewerPrompt,
 	ReviewerTriggers,
 	selectConventions,
+	splitFrontmatter,
 	type Convention,
 	type ConventionScope,
 	type ReviewChanges,
@@ -48,6 +51,22 @@ const bundledFiles = (
 	.map((entry) => join(entry.parentPath, entry.name));
 
 describe('bundled conventions', () => {
+	it("resolves every entry in a built-in brief's conventions list", () => {
+		const briefsDir = join(BUILTIN_BRIEFS_DIR, 'reviewers');
+		for (const file of readdirSync(briefsDir).filter((name) => name.endsWith('.md'))) {
+			const parts = splitFrontmatter(readFileSync(join(briefsDir, file), 'utf8'));
+			const list = (parseYaml(parts?.frontmatter ?? '') as { conventions?: unknown })
+				.conventions;
+			if (list === undefined || list === '*') continue;
+			for (const entry of list as ReadonlyArray<string>) {
+				const exists = entry.startsWith('references/')
+					? existsSync(join(DIR, entry, 'SKILL.md'))
+					: topics.some((topic) => topic.name === entry);
+				expect(exists, `${file}: ${entry}`).toBe(true);
+			}
+		}
+	});
+
 	it('parses every topic with the stack the spec gives it', () => {
 		expect(Object.fromEntries(topics.map((topic) => [topic.name, topic.stack]))).toEqual({
 			comments: ['typescript'],
