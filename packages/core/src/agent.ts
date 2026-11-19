@@ -189,9 +189,6 @@ export const callCost = (totalCostUsd: number, resume: AgentSession | undefined)
 };
 
 const READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob'];
-// TODO: confirm against the real SDK that `json_schema` output still arrives under
-// `dontAsk` with a restricted tool list (`read-only`) and with no tools (`none`): the SDK
-// delivers it through a tool call, and nothing documents whether `dontAsk` allows it.
 
 /** SDK options for one call. */
 export const sdkOptions = (
