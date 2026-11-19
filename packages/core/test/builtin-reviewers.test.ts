@@ -10,14 +10,17 @@ import {
 	type ReviewChanges,
 	type ReviewerDef
 } from '../src/index.ts';
-import { AgentFake } from '../src/testing.ts';
+import { AgentFake, ClefFake } from '../src/testing.ts';
 
 const loadBuiltins = Effect.gen(function* () {
 	const reviewers = yield* Reviewers;
 	return yield* reviewers.load({ projectDir: '/nonexistent', disable: [] });
 }).pipe(
 	Effect.provide(
-		Reviewers.layer.pipe(Layer.provide(AgentFake.layer), Layer.provide(NodeServices.layer))
+		Reviewers.layer.pipe(
+			Layer.provide([AgentFake.layer, ClefFake.layer]),
+			Layer.provide(NodeServices.layer)
+		)
 	)
 );
 
@@ -42,17 +45,11 @@ describe('built-in reviewers', () => {
 		]);
 	});
 
-	it('gives each reviewer a description for the LLM router and a known model alias', () => {
+	it('gives each reviewer a description for Clef and a known model alias', () => {
 		for (const reviewer of builtins) {
 			expect(reviewer.description, reviewer.name).toBeDefined();
 			expect([undefined, 'haiku', 'sonnet', 'opus'], reviewer.name).toContain(reviewer.model);
 		}
-	});
-
-	it('blocks only on reviewers whose must-fix findings are concrete defects', () => {
-		expect(
-			builtins.filter((reviewer) => !reviewer.blocking).map((reviewer) => reviewer.name)
-		).toEqual(['comments', 'design', 'domain-language', 'performance']);
 	});
 
 	it('gives each reviewer the conventions the spec lists for it', () => {
@@ -155,6 +152,26 @@ describe('routing with the built-in triggers', () => {
 			'error handling in an API route',
 			{ 'src/api/save.ts': ['try {', '} catch {}'] },
 			['contracts', 'error-handling', ...source]
+		],
+		[
+			'a new exported function',
+			{ 'src/save.ts': ['export async function save(run: Run) {'] },
+			['design', ...source]
+		],
+		[
+			'a new exported constant',
+			{ 'src/limits.ts': ['export const MAX_RUNS = 4;'] },
+			['design', ...source]
+		],
+		[
+			'a new exported type',
+			{ 'src/run.ts': ['export type RunStatus = "running" | "done";'] },
+			['design', 'domain-language', ...source]
+		],
+		[
+			'a new exported interface',
+			{ 'src/run.ts': ['export interface RunSummary {'] },
+			['design', 'domain-language', ...source]
 		],
 		[
 			'a public entry point',

@@ -16,7 +16,7 @@ ship runs the whole loop in its daemon: baseline checks → implement → checks
 2. **Run.** From the repo root, start `ship run <plan-dir>` in the background and wait for it to exit. stderr streams the run's events; stdout is the summary JSON. A run takes minutes to an hour. Ctrl-C only detaches; `ship cancel <id>` stops a run.
 
 3. **Report** from the summary and the exit code:
-    - **0, done**: the PR URL, the cost, and the tradeoffs and nits left in the PR body, one line each.
-    - **2, escalated**: a draft PR is up. Give the `escalationReason` and every unresolved must-fix finding, then offer to fix them (`ship resume` does not apply; the run is over).
+    - **0, done**: the PR URL, the cost, and the tradeoffs listed in the PR body, one line each.
+    - **2, escalated**: a draft PR is up. Give the `escalationReason` and every unresolved must-fix finding and nit, then offer to fix them (`ship resume` does not apply; the run is over).
     - **1, failed**: a precondition message, a failing baseline (show the failing checks' `outputTail`: ship spent no tokens), or the run's `error`. A failed baseline means the branch is red before any change; offer to fix it first. An interrupted run (the daemon stopped) prints a resume hint: offer `ship resume <id>`.
     - **130, detached**: give the run id and `ship logs <id> --follow` / `ship status <id>`.

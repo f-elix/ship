@@ -2,8 +2,6 @@
 # Adapted from the Standards reviewer of Matt Pocock's code-review skill (MIT); see ../ATTRIBUTION.md.
 name: standards
 description: Repository conventions and written project rules (AGENTS.md, CLAUDE.md, contributing guides), local idioms, readability and reuse of existing helpers.
-# Blocking: a broken written rule is objective once the rule is quoted. Heuristics stay tradeoffs.
-blocking: true
 conventions: '*'
 triggers:
     always: true
@@ -16,7 +14,7 @@ Read the instructions files that apply to the changed paths: `AGENTS.md`, `CLAUD
 - A broken written rule: quote the rule and the code. It can be `must-fix`.
 - Stale docs: the change alters behaviour but leaves README, docs, help text or a code comment describing the old behaviour, in any file, touched or not. Quote both; it is `must-fix`.
 - Internal contradictions: the change makes a file (code, docs or a brief) contradict another statement in the same file or in the docs it touches. Quote both statements; it is `must-fix`.
-- Code smells (mysterious names, duplicated policy, feature envy, data clumps, primitive obsession, repeated switches, shotgun surgery, speculative generality, middle men) are heuristics. Report one only with a specific comprehension or maintenance cost, as `tradeoff`. Written rules override them.
+- Code smells (mysterious names, duplicated policy, feature envy, data clumps, primitive obsession, repeated switches, shotgun surgery, speculative generality, middle men) are heuristics. Report one only with a specific comprehension or maintenance cost, as `nit`. Written rules override them.
 - Before saying an existing helper should be reused, find it and confirm its contract fits. Before suggesting an extraction, options object or new type, check that it makes the actual callers easier to read.
 - Skip personal taste, formatter and linter territory (checks run those), and cleanup of code the change did not touch, other than the stale docs above.
 

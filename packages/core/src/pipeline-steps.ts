@@ -8,6 +8,7 @@ import {
 } from './agent.ts';
 import { baselinePass, Checks, filesForChecks } from './checks.ts';
 import { Conventions, implementerConventionsSection } from './conventions.ts';
+import { readCredentials, type Credentials } from './credentials.ts';
 import type { CheckEvent } from './event.ts';
 import type { VerifiedFinding } from './finding.ts';
 import { Git, type CommitRange } from './git.ts';
@@ -320,17 +321,24 @@ const describeFinding = (finding: VerifiedFinding): string =>
 		`Evidence: ${finding.evidence}`
 	].join('\n');
 
-/** Resumes the implementer with the verified must-fix findings of the latest review. */
+/** A heading and the findings under it; nothing when there are none. */
+const findingsSection = (
+	heading: string,
+	findings: ReadonlyArray<VerifiedFinding>
+): ReadonlyArray<string> =>
+	findings.length === 0 ? [] : [`# ${heading}`, '', ...findings.map(describeFinding), ''];
+
+/** Resumes the implementer with the verified must-fix findings and nits of the latest review. */
 export const fixStep = (state: RunState) =>
 	implementerCall(
 		'fix',
 		state,
 		(conventions) =>
 			[
-				'Reviewers found these problems in your changes, and each was verified against the code. Fix every one.',
+				'Reviewers found these problems in your changes, and each was verified against the code. Fix every one, the nits included.',
 				'',
-				...state.unresolved.mustFix.map(describeFinding),
-				'',
+				...findingsSection('Must-fix', state.unresolved.mustFix),
+				...findingsSection('Nits', state.unresolved.nits),
 				IMPLEMENTER_RULES,
 				'',
 				conventions
@@ -368,45 +376,91 @@ const loadReviewers = Effect.fnUntraced(function* (state: RunState) {
 });
 
 /**
- * Picks the reviewers for the range under review: `base..HEAD` in round 1, then
- * `lastReviewedSha..HEAD`, and starts the round.
+ * The Clef input for routing: the saved Cloudflare credentials, or `null` when the project
+ * turned Clef off, none are saved, or the file cannot be read, which logs a warning.
+ */
+const clefRouting = Effect.fnUntraced(function* (state: RunState) {
+	if (!state.config.reviewers.clef) return null;
+	const home = yield* ShipHome;
+	const credentials: Credentials = yield* readCredentials(home.home).pipe(
+		Effect.catchTag('CredentialsFileError', (error) =>
+			Effect.as(Effect.logWarning('Routing without Clef', error), {})
+		)
+	);
+	if (credentials.cloudflare === undefined) {
+		yield* Effect.logWarning(
+			'No Cloudflare credentials are saved (`ship auth cloudflare`); routing without Clef'
+		);
+		return null;
+	}
+	return { credentials: credentials.cloudflare };
+});
+
+/**
+ * Picks the round's reviewers and starts the round. Every round reviews the whole branch,
+ * `base..HEAD`. Routing looks at `base..HEAD` in round 1, then at the fix commits,
+ * `lastReviewedSha..HEAD`, and from round 2 every reviewer that had a must-fix finding in
+ * the previous round runs again too.
  */
 export const routeStep = (state: RunState) =>
 	runStep('route', state, { timeoutMs: null }, (kit) =>
 		Effect.gen(function* () {
 			const git = yield* Git;
 			const reviewers = yield* Reviewers;
-			const fromSha = state.lastReviewedSha ?? state.baseSha;
+			const routedFromSha = state.lastReviewedSha ?? state.baseSha;
 			const toSha = yield* git.headSha(state);
-			const changes = yield* reviewChanges(state, { from: fromSha, to: toSha });
+			const changes = yield* reviewChanges(state, { from: routedFromSha, to: toSha });
+			const loaded = yield* loadReviewers(state);
 			const routed = yield* reviewers.route({
-				reviewers: yield* loadReviewers(state),
+				reviewers: loaded,
 				changes,
-				llm: state.config.reviewers.llmRouter
-					? {
-							model: state.config.models.route,
-							timeoutMs: state.config.timeouts.route,
-							context: yield* agentContext(state)
-						}
-					: null
+				clef: yield* clefRouting(state)
 			});
-			yield* Effect.forEach(routed.costs, kit.recordCost, { discard: true });
-			if (routed.llmError !== null) {
-				yield* Effect.logWarning(`The LLM router failed: ${routed.llmError.message}`);
+			if (routed.clefError !== null) {
+				yield* Effect.logWarning(
+					'Routing with the deterministic triggers only',
+					routed.clefError
+				);
 			}
-			const names = routed.reviewers.map((picked) => picked.reviewer.name);
+			const reasons = new Map(
+				routed.reviewers.map((picked) => [picked.reviewer.name, picked.reasons])
+			);
+			const previous = state.reviewRounds.at(-1);
+			if (previous !== undefined) {
+				const returning = previous.findings
+					.filter((finding) => finding.severity === 'must-fix')
+					.flatMap((finding) => finding.alsoReportedBy.concat(finding.reviewer));
+				for (const name of returning) {
+					reasons.set(name, [
+						...new Set([
+							...(reasons.get(name) ?? []),
+							`must-fix in round ${previous.round}`
+						])
+					]);
+				}
+			}
+			// In load order, and only reviewers that still exist.
+			const picked = loaded
+				.map((reviewer) => reviewer.name)
+				.filter((name) => reasons.has(name));
+			for (const name of picked) {
+				yield* Effect.logInfo(
+					`Round ${state.round} reviewer ${name}: ${(reasons.get(name) ?? []).join(', ')}`
+				);
+			}
 			yield* kit.report({
 				_tag: 'ReviewStarted',
 				round: state.round,
-				fromSha,
+				fromSha: state.baseSha,
 				toSha,
-				reviewers: names
+				reviewers: picked
 			});
 			return {
 				round: state.round,
-				fromSha,
+				fromSha: state.baseSha,
 				toSha,
-				reviewers: names,
+				routedFromSha,
+				reviewers: picked,
 				findings: []
 			} satisfies ReviewInProgress;
 		})
@@ -446,7 +500,10 @@ export const reviewStep = (state: RunState) =>
 		})
 	);
 
-/** Verifies the round's findings and checks whether the last fix resolved the must-fix ones. */
+/**
+ * Verifies the round's findings and checks whether the last fix resolved the must-fix
+ * findings and nits it was given.
+ */
 export const verifyStep = (state: RunState) =>
 	runStep('verify', state, { timeoutMs: state.config.timeouts.verify }, (kit) =>
 		Effect.gen(function* () {
@@ -457,7 +514,8 @@ export const verifyStep = (state: RunState) =>
 				...(yield* reviewSubject(state, { from: review.fromSha, to: review.toSha })),
 				round: review.round,
 				findings: review.findings,
-				previous: state.unresolved.mustFix,
+				previous: [...state.unresolved.mustFix, ...state.unresolved.nits],
+				knownTradeoffs: state.unresolved.tradeoffs,
 				model: state.config.models.verify,
 				timeoutMs: state.config.timeouts.verify,
 				context: yield* agentContext(state)
@@ -496,24 +554,37 @@ const mergeById = (
 };
 
 /**
- * Sorts the latest round's verified findings and picks what comes next. Only this
- * round's must-fix findings loop; tradeoffs and nits pile up for the PR body. A must-fix
- * finding that repeats an earlier one is a stall; the review cap applies after that.
+ * Sorts the latest round's verified findings and picks what comes next. This round's
+ * must-fix findings and nits loop: a round with neither opens the PR. Tradeoffs never
+ * loop; they pile up for the PR body. A must-fix finding that repeats an earlier round's
+ * must-fix is a stall, which escalates at once; a repeated nit just loops. The review cap
+ * applies after that.
  */
 export const triage = (state: RunState): TriageResult => {
 	const verified = state.reviewRounds.at(-1)?.findings ?? [];
 	const bySeverity = (severity: VerifiedFinding['severity']) =>
 		verified.filter((finding) => finding.severity === severity);
 	const mustFix = bySeverity('must-fix');
+	const nits = bySeverity('nit');
 	const unresolved: UnresolvedFindings = {
 		mustFix,
 		tradeoffs: mergeById(state.unresolved.tradeoffs, bySeverity('tradeoff')),
-		nits: mergeById(state.unresolved.nits, bySeverity('nit'))
+		nits
 	};
+	const earlierMustFix = new Set(
+		state.reviewRounds
+			.slice(0, -1)
+			.flatMap((round) => round.findings)
+			.filter((finding) => finding.severity === 'must-fix')
+			.map((finding) => finding.id)
+	);
 	const next =
-		mustFix.length === 0
+		mustFix.length === 0 && nits.length === 0
 			? TriageNext.pr()
-			: mustFix.some((finding) => finding.repeats !== undefined)
+			: mustFix.some(
+						(finding) =>
+							finding.repeats !== undefined && earlierMustFix.has(finding.repeats)
+				  )
 				? TriageNext.escalate({ reason: 'stall' })
 				: state.round >= state.config.caps.reviewRounds
 					? TriageNext.escalate({ reason: 'review-cap' })

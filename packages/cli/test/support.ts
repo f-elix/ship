@@ -1,6 +1,6 @@
 import { NodeServices } from '@effect/platform-node';
 import { DAEMON_PROCESS_SCRIPT, VERSION } from '@ship/daemon/testing';
-import { Console, Duration, Effect, Layer } from 'effect';
+import { Console, Duration, Effect, Layer, Terminal } from 'effect';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { DaemonTimeouts } from '../src/connection.ts';
 import { DaemonLauncher, Invocation } from '../src/invocation.ts';
@@ -30,6 +30,8 @@ export interface CliOptions {
 	readonly captured?: Captured;
 	/** Default: {@link testTimeouts}. */
 	readonly timeouts?: (typeof DaemonTimeouts)['Service'];
+	/** Default: the process's terminal. Prompts read from it. */
+	readonly terminal?: Terminal.Terminal;
 }
 
 const noLauncher: DaemonLauncher['Service'] = {
@@ -61,6 +63,9 @@ export const cli = (args: ReadonlyArray<string>, options: CliOptions) => {
 		})),
 		Effect.provideService(Console.Console, capturingConsole(captured)),
 		Effect.provideService(DaemonTimeouts, options.timeouts ?? testTimeouts),
+		options.terminal === undefined
+			? (effect) => effect
+			: Effect.provideService(Terminal.Terminal, options.terminal),
 		Effect.provide(
 			Layer.mergeAll(
 				NodeServices.layer,

@@ -124,7 +124,6 @@ describe('routeDeterministic', () => {
 	const reviewer = (name: string, t: Partial<typeof ReviewerTriggers.Encoded>): ReviewerDef => ({
 		name,
 		triggers: triggers(t),
-		blocking: true,
 		brief: `The ${name} brief.`
 	});
 	const reviewers = [

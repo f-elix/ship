@@ -1,8 +1,6 @@
 ---
 name: domain-language
 description: Names of domain concepts against the project's glossary (CONTEXT.md, ADRs, the spec); one name per concept, one concept per name.
-# Not blocking: naming drift costs comprehension, not correctness.
-blocking: false
 model: haiku
 triggers:
     paths:
@@ -22,6 +20,6 @@ Read the glossary first: `CONTEXT.md` or `CONTEXT-MAP.md` (and the context files
 - Leaking layers: storage or transport vocabulary in domain types, or domain types named after their implementation.
 - Glossary drift: the change introduces or redefines a concept and the glossary, if there is one, does not record it; or the glossary changes and code still uses the old term.
 
-Quote the glossary or the existing usage. Findings are `tradeoff` when they would confuse a reader and `nit` otherwise.
+Quote the glossary or the existing usage. A name that contradicts a quoted glossary entry is `must-fix`; other naming drift is `nit`.
 
 Out of scope: general naming and readability (standards), comments (comments).

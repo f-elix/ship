@@ -84,8 +84,14 @@ export interface UnresolvedFindings extends Schema.Schema.Type<typeof Unresolved
  */
 export const ReviewInProgress = Schema.Struct({
 	round: PositiveInt,
+	/** The reviewed range is `fromSha..toSha`: always the whole branch, from `baseSha`. */
 	fromSha: GitSha,
 	toSha: GitSha,
+	/**
+	 * Where the range routing looked at starts: `baseSha` in round 1, then
+	 * `lastReviewedSha`, so routing sees only the fix commits.
+	 */
+	routedFromSha: GitSha,
 	reviewers: Schema.Array(ReviewerName),
 	/** What the reviewers reported; empty until `review` ends. */
 	findings: Schema.Array(Finding)
@@ -185,7 +191,7 @@ export const initialRunState = (start: NewRunState): RunState => ({
  * Bump it when a change to `RunState` or the machine's states makes older snapshots
  * unsafe to restore; runs saved under another version can no longer be resumed.
  */
-export const SNAPSHOT_VERSION = 2;
+export const SNAPSHOT_VERSION = 3;
 
 /** The JSON `ship run` prints on stdout when the run ends; also kept in the run store. */
 export const Summary = Schema.Struct({
@@ -197,7 +203,9 @@ export const Summary = Schema.Struct({
 	checks: Schema.Array(CheckRound),
 	costUsd: CostUsd,
 	unresolvedMustFix: Schema.Array(VerifiedFinding),
+	/** Every tradeoff the reviews kept, as the PR body lists them. */
 	tradeoffs: Schema.Array(VerifiedFinding),
+	/** Nits the last review round left unresolved; empty when the run is done. */
 	nits: Schema.Array(VerifiedFinding),
 	escalationReason: Schema.NullOr(EscalationReason),
 	/** Why the run failed, when `status` is `failed`. */

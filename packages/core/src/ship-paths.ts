@@ -17,6 +17,8 @@ export const shipPaths = (home: string) => {
 	return {
 		home,
 		globalConfig: `${home}/config.json`,
+		/** Secrets ship calls other services with, mode 0600; see `credentials.ts`. */
+		credentials: `${home}/credentials.json`,
 		projectConfig: (key: ProjectKey) => `${project(key)}.json`,
 		projectReviewers: (key: ProjectKey) => `${project(key)}/reviewers`,
 		db: `${home}/ship.db`,

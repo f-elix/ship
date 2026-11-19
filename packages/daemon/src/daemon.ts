@@ -11,6 +11,7 @@ import {
 	shipPaths,
 	ShipRpcs,
 	type Agent,
+	type Clef,
 	type Gh,
 	type ShipPaths
 } from '@ship/core';
@@ -31,10 +32,10 @@ export interface DaemonOptions {
 	/** The daemon's version; a client with another version fails the handshake. */
 	readonly version: string;
 	/**
-	 * The services that reach outside the machine. Production passes the real Agent SDK and
-	 * `gh` layers ({@link productionServices}); tests pass fakes.
+	 * The services that reach outside the machine. Production passes the real Agent SDK,
+	 * `gh` and Clef layers ({@link productionServices}); tests pass fakes.
 	 */
-	readonly services: Layer.Layer<Agent | Gh>;
+	readonly services: Layer.Layer<Agent | Gh | Clef>;
 }
 
 /** Another daemon is listening on the socket. */

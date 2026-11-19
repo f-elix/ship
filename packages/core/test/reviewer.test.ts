@@ -6,11 +6,10 @@ import { jsonRoundTrip } from './fixtures.ts';
 const decodeFrontmatter = Schema.decodeUnknownSync(ReviewerFrontmatter);
 
 describe('ReviewerFrontmatter', () => {
-	it('defaults to blocking with no deterministic triggers', () => {
+	it('defaults to no deterministic triggers', () => {
 		expect(decodeFrontmatter({ name: 'design' })).toEqual({
 			name: 'design',
-			triggers: { always: false, paths: [], addedLines: [], fileKinds: [] },
-			blocking: true
+			triggers: { always: false, paths: [], addedLines: [], fileKinds: [] }
 		});
 	});
 
@@ -31,7 +30,6 @@ describe('ReviewerDef', () => {
 			name: 'security',
 			triggers: { paths: ['**/auth/**'], addedLines: ['\\beval\\('], fileKinds: ['deps'] },
 			model: 'opus',
-			blocking: false,
 			brief: 'Look for injection and secrets.'
 		});
 		expect(jsonRoundTrip(ReviewerDef, reviewer)).toEqual(reviewer);

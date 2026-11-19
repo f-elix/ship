@@ -10,7 +10,7 @@ import {
 	type AgentRunInput,
 	type RunId
 } from '@ship/core';
-import { AgentFake, GhFake, type AgentReply, type AgentScript } from '@ship/core/testing';
+import { AgentFake, ClefFake, GhFake, type AgentReply, type AgentScript } from '@ship/core/testing';
 import { Context, Effect, Layer, References, Schedule, Stream } from 'effect';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -109,7 +109,7 @@ export const fixture = Effect.gen(function* () {
 		{ locks: { cpu: 2 } },
 		{
 			checks: [{ name: 'caller-env', run: 'test "$SHIP_CALLER" = yes' }],
-			reviewers: { disable: otherReviewers, llmRouter: false }
+			reviewers: { disable: otherReviewers, clef: false }
 		}
 	);
 
@@ -126,8 +126,8 @@ export const fixture = Effect.gen(function* () {
 	} satisfies Fixture;
 });
 
-/** Fake Agent SDK and GitHub, built once so tests can script and inspect them. */
-export const fakes = Layer.build(Layer.mergeAll(AgentFake.layer, GhFake.layer));
+/** Fake Agent SDK, GitHub and Clef, built once so tests can script and inspect them. */
+export const fakes = Layer.build(Layer.mergeAll(AgentFake.layer, GhFake.layer, ClefFake.layer));
 export type Fakes = Effect.Success<typeof fakes>;
 
 /** Fakes whose implementer never finishes, so runs on them stay active until stopped. */

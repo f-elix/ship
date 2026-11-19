@@ -1,8 +1,6 @@
 ---
 name: performance
 description: Algorithmic cost, queries in loops, blocking I/O on hot paths, unbounded concurrency, memory growth, missing pagination and needless repeated work.
-# Not blocking: without a measurement, a performance concern is a judgement call.
-blocking: false
 triggers:
     addedLines:
         - '\b\w+Sync\(|\bsetInterval\(|\bsleep\(|\bwhile\s*\(\s*true\b|\bfor\s*\(\s*;;'

@@ -1,13 +1,14 @@
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
-import { Agent, Gh, shipPaths } from '@ship/core';
+import { Agent, Clef, Gh, shipPaths } from '@ship/core';
 import { Effect, FileSystem, Layer, Logger } from 'effect';
 import { serveDaemon } from './daemon.ts';
 import { shipHomeDir } from './home.ts';
 
-/** The real Agent SDK and `gh`. */
-export const productionServices: Layer.Layer<Agent | Gh> = Layer.mergeAll(
+/** The real Agent SDK, `gh` and Cloudflare Clef. */
+export const productionServices: Layer.Layer<Agent | Gh | Clef> = Layer.mergeAll(
 	Agent.layer,
-	Gh.layer
+	Gh.layer,
+	Clef.layer
 ).pipe(Layer.provide(NodeServices.layer));
 
 /**

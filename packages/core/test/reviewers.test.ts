@@ -6,18 +6,18 @@ import {
 	AgentOutputMismatch,
 	AgentSdkError,
 	BUILTIN_BRIEFS_DIR,
+	ClefError,
 	FindingId,
 	reviewChanges,
 	Reviewers,
 	ReviewerTriggers,
-	SessionId,
 	type Finding,
 	type ReviewDelta,
 	type ReviewerDef,
 	type ReviewSubject,
 	type VerifiedFinding
 } from '../src/index.ts';
-import { AgentFake, fakeSha, GitFake } from '../src/testing.ts';
+import { AgentFake, ClefFake, fakeSha, GitFake } from '../src/testing.ts';
 import { tempDir } from './temp-repo.ts';
 
 const reviewerFile = (name: string, triggers: string, brief = `The ${name} brief.`) =>
@@ -44,13 +44,15 @@ const briefsDir = Effect.gen(function* () {
 	return dir;
 });
 
-const withReviewers = <A, E>(f: (dir: string) => Effect.Effect<A, E, Reviewers | AgentFake>) =>
+const withReviewers = <A, E>(
+	f: (dir: string) => Effect.Effect<A, E, Reviewers | AgentFake | ClefFake>
+) =>
 	Effect.gen(function* () {
 		const dir = yield* briefsDir;
 		return yield* f(dir).pipe(
 			Effect.provide(
 				Reviewers.layerWithBriefs(dir).pipe(
-					Layer.provideMerge(AgentFake.layer),
+					Layer.provideMerge(Layer.mergeAll(AgentFake.layer, ClefFake.layer)),
 					Layer.provide(NodeServices.layer)
 				)
 			)
@@ -64,7 +66,6 @@ const def = (
 ): ReviewerDef => ({
 	name,
 	triggers: Schema.decodeUnknownSync(ReviewerTriggers)(triggers),
-	blocking: true,
 	brief: `The ${name} brief.`,
 	...(model === undefined ? {} : { model })
 });
@@ -154,7 +155,7 @@ describe('Reviewers.load', () => {
 			}).pipe(
 				Effect.provide(
 					Reviewers.layerWithBriefs(dir).pipe(
-						Layer.provide(AgentFake.layer),
+						Layer.provide([AgentFake.layer, ClefFake.layer]),
 						Layer.provide(NodeServices.layer)
 					)
 				)
@@ -174,7 +175,7 @@ describe('Reviewers.load', () => {
 		}).pipe(
 			Effect.provide(
 				Reviewers.layer.pipe(
-					Layer.provide(AgentFake.layer),
+					Layer.provide([AgentFake.layer, ClefFake.layer]),
 					Layer.provide(NodeServices.layer)
 				)
 			)
@@ -189,135 +190,84 @@ describe('Reviewers.route', () => {
 		def('design', {}),
 		def('security', { addedLines: ['token'] })
 	];
-	const llm = { model: 'haiku', timeoutMs: 60_000, context };
+	const clef = { credentials: { accountId: 'account', apiToken: 'token' } };
 
-	it.effect('routes deterministically without the LLM router', () =>
+	it.effect('routes deterministically without Clef', () =>
 		withReviewers(() =>
 			Effect.gen(function* () {
+				yield* (yield* ClefFake).answer({ design: 1 });
 				const result = yield* (yield* Reviewers).route({
 					reviewers: all,
 					changes: sourceChange,
-					llm: null
+					clef: null
 				});
 				expect(result.reviewers.map((routed) => routed.reviewer.name)).toEqual([
 					'standards',
 					'tests'
 				]);
-				expect(result.costs).toEqual([]);
-				expect(yield* (yield* AgentFake).calls).toEqual([]);
+				expect(result.clefError).toBeNull();
+				expect(yield* (yield* ClefFake).calls).toEqual([]);
 			})
 		)
 	);
 
-	it.effect('lets the LLM router add reviewers but never remove one', () =>
+	it.effect('lets Clef add the reviewers it picks, asking only about the others', () =>
 		withReviewers(() =>
 			Effect.gen(function* () {
-				const fake = yield* AgentFake;
-				yield* fake.script(
-					{ step: 'route' },
-					{
-						output: {
-							reviewers: [
-								{ name: 'design', reason: 'new module' },
-								{ name: 'tests', reason: 'already picked' },
-								{ name: 'made-up', reason: 'unknown' }
-							]
-						},
-						costUsd: 0.01
-					}
-				);
+				const fake = yield* ClefFake;
+				yield* fake.answer({ design: 0.82, security: 0.2 });
 				const result = yield* (yield* Reviewers).route({
 					reviewers: all,
 					changes: sourceChange,
-					llm
+					clef
 				});
 				expect(
 					result.reviewers.map((routed) => [routed.reviewer.name, routed.reasons])
 				).toEqual([
 					['standards', ['always']],
 					['tests', ['kind source']],
-					['design', ['llm: new module']]
-				]);
-				expect(result.costs).toEqual([
-					{ step: 'route', model: 'haiku', sessionId: 'fake-session-1', costUsd: 0.01 }
+					['design', ['clef: p=0.82']]
 				]);
 				const [call] = yield* fake.calls;
-				expect(call).toMatchObject({ step: 'route', model: 'haiku', access: 'none' });
-				// Only reviewers not already picked are offered.
-				expect(call?.prompt).toContain('- design: The design brief.');
-				expect(call?.prompt).toContain('- security:');
-				expect(call?.prompt).not.toContain('- standards:');
+				expect(call?.candidates.map((reviewer) => reviewer.name)).toEqual([
+					'design',
+					'security'
+				]);
+				expect(call?.credentials).toEqual(clef.credentials);
+				expect(call?.changes.files).toEqual(sourceChange.files);
 			})
 		)
 	);
 
-	it.effect(
-		"describes candidates by their frontmatter description, else the brief's first paragraph",
-		() =>
-			withReviewers(() =>
-				Effect.gen(function* () {
-					const fake = yield* AgentFake;
-					yield* fake.script({ step: 'route' }, { output: { reviewers: [] } });
-					yield* (yield* Reviewers).route({
-						reviewers: [
-							{ ...def('design', {}), description: 'Module boundaries.' },
-							def('security', {})
-						],
-						changes: sourceChange,
-						llm
-					});
-					const [call] = yield* fake.calls;
-					expect(call?.prompt).toContain('- design: Module boundaries.');
-					expect(call?.prompt).toContain('- security: The security brief.');
-				})
-			)
-	);
-
-	it.effect('keeps the deterministic picks when the LLM router fails', () =>
+	it.effect('keeps the deterministic picks when Clef fails', () =>
 		withReviewers(() =>
 			Effect.gen(function* () {
-				const failure = new AgentSdkError({
-					step: 'route',
-					reason: 'error_max_turns',
-					detail: 'too many turns',
-					spend: {
-						session: { sessionId: SessionId.make('s-1'), cumulativeCostUsd: 0.03 },
-						cost: {
-							step: 'route',
-							model: 'haiku',
-							sessionId: SessionId.make('s-1'),
-							costUsd: 0.03
-						}
-					}
-				});
-				yield* (yield* AgentFake).script({ step: 'route' }, failure);
+				const failure = new ClefError({ status: 401, detail: 'Authentication error' });
+				yield* (yield* ClefFake).fail(failure);
 				const result = yield* (yield* Reviewers).route({
 					reviewers: all,
 					changes: sourceChange,
-					llm
+					clef
 				});
 				expect(result.reviewers.map((routed) => routed.reviewer.name)).toEqual([
 					'standards',
 					'tests'
 				]);
-				expect(result.llmError).toBe(failure);
-				expect(result.costs).toEqual([
-					{ step: 'route', model: 'haiku', sessionId: 's-1', costUsd: 0.03 }
-				]);
+				expect(result.clefError).toBe(failure);
 			})
 		)
 	);
 
-	it.effect('skips the LLM router when every reviewer is already picked', () =>
+	it.effect('skips Clef when every reviewer is already picked', () =>
 		withReviewers(() =>
 			Effect.gen(function* () {
 				const result = yield* (yield* Reviewers).route({
 					reviewers: [def('standards', { always: true })],
 					changes: sourceChange,
-					llm
+					clef
 				});
 				expect(result.reviewers).toHaveLength(1);
-				expect(yield* (yield* AgentFake).calls).toEqual([]);
+				expect(yield* (yield* ClefFake).calls).toEqual([]);
 			})
 		)
 	);
@@ -453,42 +403,6 @@ describe('Reviewers.review', () => {
 	);
 });
 
-describe('Reviewers.review blocking', () => {
-	it.effect("files a non-blocking reviewer's must-fix findings as tradeoffs", () =>
-		withReviewers(() =>
-			Effect.gen(function* () {
-				const fake = yield* AgentFake;
-				const mustFix = {
-					file: 'src/a.ts',
-					severity: 'must-fix',
-					claim: 'Split this module.',
-					evidence: 'const a'
-				};
-				for (const label of ['design', 'security']) {
-					yield* fake.script(
-						{ step: 'review', label },
-						{ output: { findings: [mustFix] } }
-					);
-				}
-				const reports = yield* (yield* Reviewers).review({
-					...subject,
-					reviewers: [{ ...def('design', {}), blocking: false }, def('security', {})],
-					model: 'sonnet',
-					timeoutMs: 60_000,
-					context,
-					onReport: () => Effect.void
-				});
-				expect(
-					reports.map((report) => [report.reviewer, report.findings[0]?.severity])
-				).toEqual([
-					['design', 'tradeoff'],
-					['security', 'must-fix']
-				]);
-			})
-		)
-	);
-});
-
 describe('Reviewers.verify', () => {
 	const found = (
 		reviewer: string,
@@ -511,6 +425,7 @@ describe('Reviewers.verify', () => {
 	const verifyInput = {
 		...subject,
 		round: 2,
+		knownTradeoffs: [],
 		model: 'opus',
 		timeoutMs: 60_000,
 		context
@@ -533,7 +448,7 @@ describe('Reviewers.verify', () => {
 									verdict: 'confirmed',
 									reason: 'Real.',
 									repeats: 'r1-1',
-									severity: 'tradeoff'
+									severity: 'nit'
 								},
 								{ index: 5, verdict: 'confirmed', reason: 'Real.', repeats: 'r9-9' }
 							],
@@ -574,7 +489,7 @@ describe('Reviewers.verify', () => {
 					])
 				).toEqual([
 					['r2-1', 'security', 'must-fix', ['standards'], undefined],
-					['r2-2', 'design', 'tradeoff', [], 'r1-1'],
+					['r2-2', 'design', 'nit', [], 'r1-1'],
 					['r2-3', 'tests', 'must-fix', [], undefined],
 					['r2-4', 'deps', 'must-fix', [], undefined],
 					['r2-5', 'security', 'must-fix', [], 'r1-3'],
@@ -609,7 +524,7 @@ describe('Reviewers.verify', () => {
 		)
 	);
 
-	it.effect('never raises a severity, and a merged finding takes its highest severity', () =>
+	it.effect('only lowers a must-fix to a nit, after merging duplicates of the same kind', () =>
 		withReviewers(() =>
 			Effect.gen(function* () {
 				yield* (yield* AgentFake).script(
@@ -631,7 +546,19 @@ describe('Reviewers.verify', () => {
 									reason: 'Real.',
 									severity: 'nit'
 								},
-								{ index: 4, verdict: 'duplicate', duplicateOf: 3, reason: 'Same.' }
+								{ index: 4, verdict: 'duplicate', duplicateOf: 3, reason: 'Same.' },
+								{
+									index: 5,
+									verdict: 'confirmed',
+									reason: 'Real.',
+									severity: 'nit'
+								},
+								{
+									index: 6,
+									verdict: 'confirmed',
+									reason: 'Real.',
+									severity: 'tradeoff'
+								}
 							],
 							previous: []
 						}
@@ -640,21 +567,109 @@ describe('Reviewers.verify', () => {
 				const result = yield* (yield* Reviewers).verify({
 					...verifyInput,
 					findings: [
-						found('design', 'Raised.', 'tradeoff'),
-						found('comments', 'Kept.', 'tradeoff'),
-						found('security', 'Kept, again.', 'must-fix'),
-						found('standards', 'Lowered.', 'tradeoff'),
-						found('security', 'Lowered, again.', 'must-fix')
+						found('design', 'Not raised.', 'tradeoff'),
+						found('comments', 'Merged up.', 'nit'),
+						found('security', 'Merged up, again.', 'must-fix'),
+						found('standards', 'Lowered.', 'must-fix'),
+						found('security', 'Lowered, again.', 'must-fix'),
+						found('data', 'Not lowered.', 'tradeoff'),
+						found('tests', 'Not moved.', 'must-fix')
 					],
 					previous: []
 				});
 				expect(result.verified.map((f) => [f.claim, f.severity, f.alsoReportedBy])).toEqual(
 					[
-						['Raised.', 'tradeoff', []],
-						['Kept.', 'must-fix', ['security']],
-						['Lowered.', 'nit', ['security']]
+						['Not raised.', 'tradeoff', []],
+						['Merged up.', 'must-fix', ['security']],
+						['Lowered.', 'nit', ['security']],
+						['Not lowered.', 'tradeoff', []],
+						['Not moved.', 'must-fix', []]
 					]
 				);
+			})
+		)
+	);
+
+	it.effect('keeps both findings of a duplicate verdict across kinds', () =>
+		withReviewers(() =>
+			Effect.gen(function* () {
+				yield* (yield* AgentFake).script(
+					{ step: 'verify' },
+					{
+						output: {
+							verdicts: [
+								{ index: 0, verdict: 'confirmed', reason: 'Real.' },
+								{ index: 1, verdict: 'duplicate', duplicateOf: 0, reason: 'Same.' }
+							],
+							previous: []
+						}
+					}
+				);
+				const result = yield* (yield* Reviewers).verify({
+					...verifyInput,
+					findings: [
+						found('security', 'Must fix.', 'must-fix'),
+						found('design', 'A tradeoff.', 'tradeoff')
+					],
+					previous: []
+				});
+				expect(result.verified.map((f) => [f.claim, f.severity, f.alsoReportedBy])).toEqual(
+					[
+						['Must fix.', 'must-fix', []],
+						['A tradeoff.', 'tradeoff', []]
+					]
+				);
+			})
+		)
+	);
+
+	it.effect('drops a tradeoff that repeats a known one and matches repeats by kind', () =>
+		withReviewers(() =>
+			Effect.gen(function* () {
+				yield* (yield* AgentFake).script(
+					{ step: 'verify' },
+					{
+						output: {
+							verdicts: [
+								{
+									index: 0,
+									verdict: 'confirmed',
+									reason: 'Same.',
+									repeats: 'r1-5'
+								},
+								{
+									index: 1,
+									verdict: 'confirmed',
+									reason: 'Real.',
+									repeats: 'r1-1'
+								},
+								{ index: 2, verdict: 'confirmed', reason: 'Real.', repeats: 'r1-5' }
+							],
+							previous: [{ id: 'r1-1', status: 'unfixed', evidence: 'Still there.' }]
+						}
+					}
+				);
+				const knownTradeoff: VerifiedFinding = {
+					...found('design', 'Known tradeoff.', 'tradeoff'),
+					id: FindingId.make('r1-5'),
+					round: 1,
+					alsoReportedBy: []
+				};
+				const result = yield* (yield* Reviewers).verify({
+					...verifyInput,
+					findings: [
+						found('design', 'Known tradeoff, again.', 'tradeoff'),
+						found('data', 'Tradeoff on a must-fix id.', 'tradeoff'),
+						found('security', 'Must-fix on a tradeoff id.', 'must-fix')
+					],
+					previous: [previous(1, 'Earlier must-fix.')],
+					knownTradeoffs: [knownTradeoff]
+				});
+				expect(result.verified.map((f) => [f.claim, f.severity, f.repeats])).toEqual([
+					['Tradeoff on a must-fix id.', 'tradeoff', undefined],
+					['Must-fix on a tradeoff id.', 'must-fix', undefined],
+					['Earlier must-fix.', 'must-fix', 'r1-1']
+				]);
 			})
 		)
 	);
