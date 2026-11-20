@@ -48,6 +48,8 @@ Run from a feature branch with a clean working tree, with a plan dir holding `sp
 ship run .plans/my-feature
 ```
 
+The run starts with a baseline: every check once, before any change. A check that fails there does not stop the run, but the change is not held to it: its failures later neither fail a pass nor go to the check-fix agent, and the PR body lists it under "Checks failing before this change".
+
 Events stream to stderr as one line each: state changes, check results, lock waits, findings counts, cost, the PR URL. When the run ends, its summary JSON is printed on stdout and nothing else is, so `ship run <dir> > summary.json` keeps it. The exit code says how the run ended:
 
 | Code | Meaning                                                  |
@@ -65,6 +67,10 @@ Ctrl-C detaches instead of cancelling, and prints how to follow, check or cancel
 | `ship review <pr> [--post]`                 | Review a pull request of the current repository; see [Reviewing a PR](#reviewing-a-pr)                                                            |
 | `ship fix <source> [--local] [--no-checks]` | Fix the findings of a PR's review threads or of a stored review, then push; see [Fixing and rechecking findings](#fixing-and-rechecking-findings) |
 | `ship recheck <source> [--local]`           | Check which findings of a PR are fixed and resolve their threads; see [Fixing and rechecking findings](#fixing-and-rechecking-findings)           |
+| `ship implement <plan-dir> [--no-checks]`   | Implement a plan and commit it, without review or PR; see [Running one part of the loop](#running-one-part-of-the-loop)                           |
+| `ship checks`                               | Run the checks on the branch, fix failing ones and commit the fixes; see [Running one part of the loop](#running-one-part-of-the-loop)            |
+| `ship pr [--plan <dir>]`                    | Push the branch and open or update its PR; see [Running one part of the loop](#running-one-part-of-the-loop)                                      |
+| `ship post <review-id>`                     | Post a stored review on its PR; see [Running one part of the loop](#running-one-part-of-the-loop)                                                 |
 | `ship resume <id>`                          | Continue an interrupted run with the current env; streams and exits like the command that started it                                              |
 | `ship cancel <id>`                          | Stop a run; it ends as `cancelled`                                                                                                                |
 | `ship status [id] [--json]`                 | A run's details and summary, or the active runs                                                                                                   |
@@ -102,6 +108,15 @@ Events and the summary JSON go to stderr and stdout like `ship run`; the summary
 
 `ship recheck` asks the verifier, over the diff from the merge base to the head, whether each finding is fixed, and resolves the threads of the fixed ones on GitHub unless you pass `--local`; it fails, resolving nothing, when `HEAD` has moved since the run started. It uses the project config when there is one and the defaults otherwise. The summary has `"kind": "recheck"`, each finding with its status and evidence, and the resolved threads; it exits 0 when every finding is fixed, 2 when some are not, and 1 when the run failed, was cancelled or did not start. Both exit 130 on Ctrl-C, and `ship resume` continues either without redoing a push or a resolved thread.
 
+### Running one part of the loop
+
+Four commands each run one part of `ship run` on its own, in the checkout you run them from. Like `ship run`, they stream events to stderr, print the summary JSON (`"kind"` is the command) on stdout, and exit 0 when done, 1 when the run failed, was cancelled or did not start, and 130 on Ctrl-C. `ship resume` continues any of them.
+
+- `ship implement <plan-dir>` runs the baseline, the implementer, then the checks, fixing failing ones, and commits with the implementer's subject. It needs what `ship run` needs: a feature branch, a clean tree outside the plan dir, the plan files and the project config. With `--no-checks` it skips the baseline and the checks and commits the implementer's work as it is. It opens no PR and requests no review.
+- `ship checks` runs every check on the files the branch changed since it left the default branch, has the check-fix agent fix failing ones, and commits the fixes as one commit, `Fix failing checks`. There is no baseline: every failing check is the branch's to fix. Failing checks after the last fix attempt fail the run and leave the fixes uncommitted. It needs a feature branch, a clean tree and the project config.
+- `ship pr` pushes the branch and has the PR agent open or update its PR, as described in [The pull request](#the-pull-request). It never squashes, whatever `pr.squash` says: the commits go up as they are. `--plan <dir>` gives the agent a spec and plan to describe the change with; without one, the commits and the diff describe it. It needs a feature branch and a clean tree outside the plan dir, and uses the project config when there is one and the defaults otherwise.
+- `ship post <review-id>` posts a review `ship review` stored, as `ship review --post` would. It needs `HEAD` at the reviewed head (`gh pr checkout <n>`), and refuses a review with no PR, of another repository, or with no findings.
+
 ## Reviewer routing
 
 Each review round picks reviewers with the deterministic triggers in their briefs, then asks [Cloudflare Clef](https://developers.cloudflare.com/workers-ai/models/clef-flash/) whether the change needs any of the others. Clef can only add reviewers. `ship auth cloudflare` asks for a Cloudflare account id and an API token with the Workers AI permission, checks them with one Clef call, and saves them to `credentials.json` in ship's home, readable by you only (mode 0600). That file is the only place ship reads them from; delete it to remove them. Without credentials, routing uses the triggers only and logs a warning to `daemon.log`; set `reviewers.clef` to `false` in the project config to turn Clef off.
@@ -113,6 +128,12 @@ ship carries a programming philosophy and its conventions, and applies them to e
 A topic applies when the repo uses its stack: a dependency in a git-tracked `package.json` (or a tracked `tsconfig.json` for TypeScript). The implementer gets the base file of every applying topic, the `codebase-design` and `testing` references and the philosophy; each reviewer gets the topics its brief lists, when they apply to the change. A rule quoted from a convention counts as a written project rule, so breaking it can be must-fix. The repo's own written rules (AGENTS.md, CLAUDE.md, its docs) win where they conflict.
 
 See `packages/core/src/conventions/README.md` for the file layout and frontmatter.
+
+## The pull request
+
+ship pushes the branch, then has an agent open or update the PR by following a `pr` skill: the repo's own, at `.agents/skills/pr/SKILL.md` or `.claude/skills/pr/SKILL.md`, or ship's, in `packages/core/src/skills/pr/`. Nobody is there to answer, so ship tells the agent the branch, the base and whether to open a draft, and the agent asks nothing: where the skill would wait for an answer, it takes the default or leaves the choice out. It does every other step, including the skill's writes to GitHub, such as labels and comments. The agent may run commands, and ship refuses its PR when the head is no longer the commit ship pushed.
+
+ship then adds its own parts to the body, between `<!-- ship:… -->` comments, replacing the ones an earlier run added: a warning on top when the run escalated, and at the end the checks that failed before the change and the review findings left for a human.
 
 ## Develop
 

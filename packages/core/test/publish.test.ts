@@ -7,7 +7,7 @@ import {
 	type PrInput,
 	type VerifiedFinding
 } from '../src/index.ts';
-import { AgentFake, fakeSha, GhFake, GitFake } from '../src/testing.ts';
+import { AgentFake, fakeSha, GhFake, GitFake, opensPr } from '../src/testing.ts';
 import { resolvedConfig } from './fixtures.ts';
 import { recordingKit, scopeWith, withPrimitives } from './primitive-harness.ts';
 
@@ -42,9 +42,9 @@ const twoCommits = {
 };
 
 const scriptText = Effect.gen(function* () {
-	const text = { output: { title: 'Add a', body: '## Summary\n\nAdds a.' }, costUsd: 0.05 };
-	yield* (yield* AgentFake).script({ step: 'pr' }, text);
-	yield* (yield* AgentFake).script({ step: 'escalate' }, text);
+	const text = { title: 'Add a', body: '## Summary\n\nAdds a.', costUsd: 0.05 };
+	yield* (yield* AgentFake).script({ step: 'pr' }, yield* opensPr(text));
+	yield* (yield* AgentFake).script({ step: 'escalate' }, yield* opensPr(text));
 });
 
 describe('prPrimitive', () => {

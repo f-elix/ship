@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { DaemonBusy, FindingId, RunId, RunStatus, shipPaths, type GitSha } from '@ship/core';
-import { AgentFake, GhFake, type AgentScript } from '@ship/core/testing';
+import { AgentFake, GhFake, opensPr, type AgentScript } from '@ship/core/testing';
 import {
 	addsFeature,
 	client,
@@ -257,7 +257,7 @@ describe('ship run', () => {
 			Effect.gen(function* () {
 				const fx = yield* fixture;
 				const services = yield* fakes;
-				yield* scriptHappyRun(Context.get(services, AgentFake));
+				yield* scriptHappyRun(services);
 				yield* daemon(fx.home, services);
 
 				// A relative plan dir resolves against the caller's cwd.
@@ -327,10 +327,11 @@ describe('ship run', () => {
 				yield* agent.script({ step: 'implement' }, addsFeature);
 				yield* agent.script(
 					{ step: 'escalate' },
-					{
-						output: { title: 'Add the feature', body: '## Summary\n\nStuck.' },
+					yield* opensPr({
+						title: 'Add the feature',
+						body: '## Summary\n\nStuck.',
 						costUsd: 0.05
-					}
+					}).pipe(Effect.provide(services))
 				);
 				yield* daemon(fx.home, services);
 
@@ -737,6 +738,50 @@ describe('ship fix and ship recheck', () => {
 	);
 });
 
+describe('ship implement, ship checks, ship pr and ship post', () => {
+	it.live(
+		'implements a plan with --no-checks, commits it and exits 0',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				yield* Context.get(services, AgentFake).script({ step: 'implement' }, addsFeature);
+				yield* daemon(fx.home, services);
+
+				const result = yield* shipIn(fx, ['implement', '.plans/feature', '--no-checks']);
+
+				expect(result.code).toBe(0);
+				expect(parseSummary(result.stdout)).toMatchObject({
+					kind: 'implement',
+					status: 'done',
+					commits: [fx.git('rev-parse', 'HEAD')],
+					checks: []
+				});
+				expect(fx.git('log', '-1', '--format=%s')).toBe('Implement feature');
+				expect(result.stderr).toContain('implement created on feature');
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'reports a refused post, exits 1 and starts nothing',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				yield* daemon(fx.home, yield* fakes);
+
+				const result = yield* shipIn(fx, ['post', 'no-such-review']);
+
+				expect(result.code).toBe(1);
+				expect(result.stderr).toMatch(
+					/^ship: cannot start the run \(review-not-found\): /u
+				);
+				expect(JSON.parse((yield* shipIn(fx, ['list', '--json'])).stdout)).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
 describe('ship resume', () => {
 	it.live(
 		"streams only the resumed run's events and exits like ship run",
@@ -758,7 +803,7 @@ describe('ship resume', () => {
 				yield* Scope.close(first, Exit.void);
 
 				const services = yield* fakes;
-				yield* scriptHappyRun(Context.get(services, AgentFake));
+				yield* scriptHappyRun(services);
 				yield* daemon(fx.home, services);
 
 				const result = yield* shipIn(fx, ['resume', runId]);
@@ -840,15 +885,14 @@ describe('ship cancel, status, list and logs', () => {
 			Effect.gen(function* () {
 				const fx = yield* fixture;
 				const services = yield* fakes;
-				const agent = Context.get(services, AgentFake);
-				yield* scriptHappyRun(agent);
+				yield* scriptHappyRun(services);
 				yield* daemon(fx.home, services);
 				const rpc = yield* client(fx.home);
 				const first = (yield* rpc.run(fx.request)).runId;
 				yield* eventually(
 					Effect.map(rpc.status({ runId: first }), (info) => info.status === 'done')
 				);
-				yield* scriptHappyRun(agent);
+				yield* scriptHappyRun(services);
 				const second = (yield* rpc.run(fx.request)).runId;
 				yield* eventually(
 					Effect.map(rpc.status({ runId: second }), (info) => info.status === 'done')

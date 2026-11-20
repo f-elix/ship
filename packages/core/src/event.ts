@@ -19,7 +19,7 @@ import {
 	Url
 } from './primitives.ts';
 import { ReviewerName } from './reviewer.ts';
-import { EscalationReason, RecheckedFinding, Summary } from './run.ts';
+import { EscalationReason, PrimitiveRunKind, RecheckedFinding, Summary } from './run.ts';
 
 const at = { at: Timestamp };
 
@@ -84,6 +84,22 @@ export const RunEvent = Schema.TaggedUnion({
 		findings: Schema.Array(VerifiedFinding),
 		/** The open review threads left out because their author may not push to the repository. */
 		ignoredThreads: Schema.Array(Url)
+	},
+	/**
+	 * A `ship implement`, `ship checks`, `ship pr` or `ship post` run was created, by `kind`.
+	 * `repoDir` is the caller's checkout and `baseSha` where the run's range starts. The
+	 * branch and plan are `null` where the command has none; `review` is the review `post`
+	 * posts.
+	 */
+	PrimitiveRunCreated: {
+		...at,
+		kind: PrimitiveRunKind,
+		projectKey: ProjectKey,
+		repoDir: AbsolutePath,
+		baseSha: GitSha,
+		branch: Schema.NullOr(Schema.NonEmptyString),
+		planDir: Schema.NullOr(AbsolutePath),
+		review: Schema.NullOr(ReviewId)
 	},
 	/** Machine state values as dotted paths, e.g. `checks.waiting`. */
 	StateChanged: { ...at, from: Schema.String, to: Schema.String },

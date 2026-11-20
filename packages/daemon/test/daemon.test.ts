@@ -60,7 +60,7 @@ describe('daemon', () => {
 			Effect.gen(function* () {
 				const fx = yield* fixture;
 				const services = yield* fakes;
-				yield* scriptHappyRun(Context.get(services, AgentFake));
+				yield* scriptHappyRun(services);
 				yield* daemon(fx.home, services);
 				const rpc = yield* client(fx.home);
 
@@ -214,10 +214,9 @@ describe('daemon', () => {
 			Effect.gen(function* () {
 				const fx = yield* fixture;
 				const services = yield* fakes;
-				const agent = Context.get(services, AgentFake);
 				const started = yield* Deferred.make<void>();
 				const proceed = yield* Deferred.make<void>();
-				yield* scriptHappyRun(agent, gatedImplement(started, proceed));
+				yield* scriptHappyRun(services, gatedImplement(started, proceed));
 				yield* daemon(fx.home, services);
 				const rpc = yield* client(fx.home);
 
@@ -976,6 +975,79 @@ describe('ship fix and ship recheck', () => {
 					kind: 'recheck',
 					findings: [{ finding: { id: 'r1-1' }, status: 'fixed' }],
 					resolvedThreads: [threads[0]?.id]
+				});
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
+describe('ship implement, ship checks, ship pr and ship post', () => {
+	it.live(
+		'refuse checkouts they cannot work on, before creating a run',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				yield* daemon(fx.home, yield* fakes);
+				const rpc = yield* client(fx.home);
+				const { cwd, env } = fx.request;
+
+				expect(
+					yield* reasonOf(
+						rpc.implement({ planDir: join(fx.dir, 'no-plan'), checks: true, cwd, env })
+					)
+				).toBe('missing-plan-files');
+				// The untracked plan dir makes the tree dirty for a command not given it.
+				expect(yield* reasonOf(rpc.checks({ cwd, env }))).toBe('dirty-tree');
+				expect(
+					yield* reasonOf(rpc.post({ review: ReviewId.make('run-r1'), cwd, env }))
+				).toBe('review-not-found');
+				fx.git('switch', '--quiet', 'main');
+				expect(yield* reasonOf(rpc.pr({ planDir: null, cwd, env }))).toBe(
+					'on-default-branch'
+				);
+
+				expect(yield* rpc.list({})).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'implements a plan and commits it, then runs the checks on the branch',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				yield* Context.get(services, AgentFake).script({ step: 'implement' }, addsFeature);
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+				const { cwd, env } = fx.request;
+
+				const implement = yield* rpc.implement({ ...fx.request, checks: true });
+				const events = yield* allEvents(rpc, implement.runId);
+
+				expect(events[0]).toBe('PrimitiveRunCreated');
+				expect(fx.git('log', '-1', '--format=%s')).toBe('Implement feature');
+				const commit = fx.git('rev-parse', 'HEAD');
+				const info = yield* rpc.status({ runId: implement.runId });
+				expect(info).toMatchObject({
+					kind: 'implement',
+					status: 'done',
+					planDir: fx.planDir,
+					branch: 'feature'
+				});
+				expect(info.summary).toMatchObject({ kind: 'implement', commits: [commit] });
+
+				unlinkSync(join(fx.planDir, 'spec.md'));
+				unlinkSync(join(fx.planDir, 'implementation-plan.md'));
+				const checks = yield* rpc.checks({ cwd, env });
+				yield* allEvents(rpc, checks.runId);
+
+				// The checks pass, so there is nothing to commit.
+				expect(fx.git('rev-parse', 'HEAD')).toBe(commit);
+				expect((yield* rpc.status({ runId: checks.runId })).summary).toMatchObject({
+					kind: 'checks',
+					status: 'done',
+					commits: []
 				});
 			}).pipe(Effect.scoped),
 		TIMEOUT

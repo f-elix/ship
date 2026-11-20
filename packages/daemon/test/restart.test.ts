@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { InvalidRunStatus, shipPaths } from '@ship/core';
-import { AgentFake, GhFake } from '@ship/core/testing';
+import { GhFake } from '@ship/core/testing';
 import { Context, Effect } from 'effect';
 import type { ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -40,7 +40,7 @@ describe('daemon restart', () => {
 				expect(existsSync(paths.socket)).toBe(true);
 
 				const services = yield* fakes;
-				yield* scriptHappyRun(Context.get(services, AgentFake));
+				yield* scriptHappyRun(services);
 				yield* daemon(fx.home, services);
 				const rpc = yield* client(fx.home);
 				expect((yield* rpc.status({ runId: resumed })).status).toBe('interrupted');

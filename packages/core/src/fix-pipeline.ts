@@ -97,7 +97,9 @@ export const fixMachine = setupEffect({
 						invokePrimitive(checksPrimitive, {
 							...implementerScope(input),
 							round: ROUND,
-							commitMessage: FIX_COMMIT_MESSAGE
+							commitMessage: FIX_COMMIT_MESSAGE,
+							// A fix run has no baseline: every failing check is the fix's to fix.
+							preexisting: []
 						})
 					)
 				)

@@ -5,18 +5,14 @@
  */
 import { Duration, Effect, Schema } from 'effect';
 import { Checkpoint } from './checkpoint.ts';
-import { baselinePass, Checks, filesForChecks } from './checks.ts';
+import { baselinePass, Checks, checksPassed, failingChecks, filesForChecks } from './checks.ts';
 import { Git } from './git.ts';
-import { fixChecksCall, implementerFields, type ImplementerScope } from './implementer.ts';
+import { fixChecksCall, implementerFields } from './implementer.ts';
 import { primitiveScopeFields } from './primitive-scope.ts';
 import type { Primitive } from './primitive.ts';
 import { AbsolutePath, NonNegativeInt } from './primitives.ts';
 import { StepNotReady, StepTimeout, type StepKit } from './run-step.ts';
 import { AgentSession, CheckRound } from './run.ts';
-
-/** Every check passed. */
-export const checksPassed = (round: CheckRound): boolean =>
-	round.results.every((result) => result.exitCode === 0);
 
 /** What both check primitives return: every pass they ran, and whether the last passed. */
 export const ChecksOutput = Schema.Struct({
@@ -79,7 +75,12 @@ export const ChecksInput = Schema.Struct({
 	/** The review round the passes belong to; 0 before the first review. */
 	round: NonNegativeInt,
 	/** The message of the commit made when the checks pass. */
-	commitMessage: Schema.NonEmptyString
+	commitMessage: Schema.NonEmptyString,
+	/**
+	 * The checks that failed before the change: their failures neither fail a pass nor
+	 * get fixed, since the change did not cause them.
+	 */
+	preexisting: Schema.Array(Schema.String)
 });
 export interface ChecksInput extends Schema.Schema.Type<typeof ChecksInput> {}
 
@@ -100,10 +101,14 @@ const runPass = (input: ChecksInput, kit: StepKit, attempt: number) =>
 		});
 	});
 
-/** The implementer fixes the failing checks of `pass`, within the `fixChecks` timeout. */
-const fixFailing = (input: ImplementerScope, kit: StepKit, pass: CheckRound) => {
+/**
+ * The implementer fixes the checks of `pass` that fail and did not fail before the change,
+ * within the `fixChecks` timeout.
+ */
+const fixFailing = (input: ChecksInput, kit: StepKit, pass: CheckRound) => {
 	const timeoutMs = input.config.timeouts.fixChecks;
-	const failing = pass.results.filter((result) => result.exitCode !== 0);
+	const names = failingChecks(pass, input.preexisting);
+	const failing = pass.results.filter((result) => names.includes(result.name));
 	return fixChecksCall(input, kit, failing).pipe(
 		Effect.map((reply) => reply.session),
 		Effect.timeoutOrElse({
@@ -114,7 +119,8 @@ const fixFailing = (input: ImplementerScope, kit: StepKit, pass: CheckRound) => 
 };
 
 /**
- * `checks`: runs the checks on the change. While a pass fails and fewer than
+ * `checks`: runs the checks on the change. A pass fails when a check fails that did not
+ * fail before the change (`preexisting`). While a pass fails and fewer than
  * `caps.checkFixAttempts` fixes were tried, the implementer fixes the failing checks
  * (reported as `fixChecks`) and the checks run again. A passing pass commits the work
  * with `commitMessage`.
@@ -141,7 +147,7 @@ export const checksPrimitive = {
 					runPass(input, kit, attempt)
 				);
 				passes.push(pass);
-				if (checksPassed(pass)) {
+				if (checksPassed(pass, input.preexisting)) {
 					const sha = yield* git.commit(input, input.commitMessage);
 					if (sha !== null) {
 						yield* kit.report({

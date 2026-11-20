@@ -5,12 +5,16 @@ import { AgentFake, ChecksFake, exitCodesByCheck, GitFake } from '../src/testing
 import { resolvedConfig } from './fixtures.ts';
 import { CheckpointValues, recordingKit, scopeWith, withPrimitives } from './primitive-harness.ts';
 
-const checksInput = (checkFixAttempts = 3): ChecksInput => ({
+const checksInput = (
+	checkFixAttempts = 3,
+	preexisting: ReadonlyArray<string> = []
+): ChecksInput => ({
 	...scopeWith({ caps: { ...resolvedConfig.caps, checkFixAttempts } }),
 	planDir: '/plans/feature',
 	session: null,
 	round: 0,
-	commitMessage: 'Add a'
+	commitMessage: 'Add a',
+	preexisting
 });
 
 const dirty = { dirty: true, changedFiles: [{ path: 'src/a.ts', status: 'added' as const }] };
@@ -90,6 +94,30 @@ describe('checksPrimitive', () => {
 				expect(fix?.prompt).toContain('## test (exit code 1)');
 				expect(yield* recorded.costs).toEqual([0.2]);
 				expect(yield* recorded.sessions).toContain('fake-session-1');
+			}),
+			dirty
+		)
+	);
+
+	it.effect('neither fails on nor fixes a check that failed before the change', () =>
+		withPrimitives(
+			Effect.gen(function* () {
+				yield* (yield* ChecksFake).respond(
+					yield* exitCodesByCheck({ lint: [1, 0], test: [1, 1] })
+				);
+				const agent = yield* AgentFake;
+				yield* agent.script({ step: 'fixChecks' }, { costUsd: 0.2 });
+				const recorded = yield* recordingKit;
+
+				const output = yield* checksPrimitive.run(checksInput(3, ['test']), recorded.kit);
+
+				expect(output.passed).toBe(true);
+				expect(output.passes).toHaveLength(2);
+				const [fix] = yield* agent.calls;
+				expect(fix?.prompt).toContain('## lint (exit code 1)');
+				expect(fix?.prompt).not.toContain('## test');
+				const { commits } = yield* (yield* GitFake).state;
+				expect(commits.map((commit) => commit.message)).toEqual(['Add a']);
 			}),
 			dirty
 		)

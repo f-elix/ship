@@ -13,6 +13,8 @@ import {
 	type FixRunState,
 	type RecheckRunState
 } from './pr-run.ts';
+import { primitiveMachine, type PrimitiveMachine } from './primitive-pipeline.ts';
+import { buildPrimitiveSummary, type PrimitiveRunState } from './primitive-run.ts';
 import type { Env, RunId } from './primitives.ts';
 import { recheckMachine, type RecheckMachine } from './recheck-pipeline.ts';
 import { reviewMachine, type ReviewMachine } from './review-pipeline.ts';
@@ -29,6 +31,7 @@ import { RunReporter } from './run-step.ts';
 import { buildSummary, type SummaryInput } from './run-summary.ts';
 import type {
 	FixSummary,
+	PrimitiveSummary,
 	RecheckSummary,
 	ReviewSummary,
 	RunState,
@@ -63,7 +66,8 @@ export type PipelineServices =
 			| RequirementsFrom<PipelineMachine>
 			| RequirementsFrom<ReviewMachine>
 			| RequirementsFrom<FixMachine>
-			| RequirementsFrom<RecheckMachine>,
+			| RequirementsFrom<RecheckMachine>
+			| RequirementsFrom<PrimitiveMachine>,
 			RunReporter | Checkpoint
 	  >
 	| Git
@@ -71,7 +75,7 @@ export type PipelineServices =
 
 // --- Run kinds ---
 
-/** A machine's context: a `ship run`, `ship review`, `ship fix` or `ship recheck` one. */
+/** A machine's context: a `ship run`, `ship review`, `ship fix`, `ship recheck` or primitive run's. */
 type KindContext = PersistedRunSnapshot['context'];
 
 /**
@@ -94,8 +98,9 @@ interface RunActor<C extends KindContext> {
 }
 
 /**
- * A kind of run: `ship run`, `ship review`, `ship fix` or `ship recheck`. The driver picks one by the run's context
- * when it starts or resumes it, and by its log when it cancels a run with no machine.
+ * A kind of run: `ship run`, `ship review`, `ship fix`, `ship recheck` or a primitive run.
+ * The driver picks one by the run's context when it starts or resumes it, and by its log
+ * when it cancels a run with no machine.
  */
 interface RunKind<C extends KindContext, S extends Summary> {
 	/** Creates the actor, from its input for a new run or from a stored snapshot. */
@@ -135,14 +140,22 @@ const recheckKind: RunKind<RecheckRunState, RecheckSummary> = {
 	summarize: buildRecheckSummary
 };
 
+/** `ship implement`, `ship checks`, `ship pr` and `ship post`, which share a machine. */
+const primitiveKind: RunKind<PrimitiveRunState, PrimitiveSummary> = {
+	spawn: (start) => createEffectActor(primitiveMachine, start),
+	resolve: (value, context) => void primitiveMachine.resolveState({ value, context }),
+	summarize: buildPrimitiveSummary
+};
+
 /**
- * The kind of a run whose log is `events`, by its creation event: `ReviewRunCreated`, or
- * `PrRunCreated` with its kind; any other log is a `ship run`'s.
+ * The kind of a run whose log is `events`, by its creation event: `ReviewRunCreated`,
+ * `PrRunCreated` with its kind, or `PrimitiveRunCreated`; any other log is a `ship run`'s.
  */
 const kindOfLog = (events: ReadonlyArray<RunEvent>): LogFinisher<Summary> => {
 	for (const event of events) {
 		if (event._tag === 'ReviewRunCreated') return reviewKind;
 		if (event._tag === 'PrRunCreated') return event.kind === 'fix' ? fixKind : recheckKind;
+		if (event._tag === 'PrimitiveRunCreated') return primitiveKind;
 	}
 	return shipKind;
 };
@@ -245,6 +258,16 @@ export const startFix = Effect.fn('startFix')(function* (state: FixRunState) {
 /** Starts a new `ship recheck` run from its initial state, like {@link startRun}. */
 export const startRecheck = Effect.fn('startRecheck')(function* (state: RecheckRunState) {
 	return yield* runMachine(recheckKind, { _tag: 'New', state });
+});
+
+/**
+ * Starts a new `ship implement`, `ship checks`, `ship pr` or `ship post` run from its
+ * initial state, like {@link startRun}.
+ */
+export const startPrimitiveRun = Effect.fn('startPrimitiveRun')(function* (
+	state: PrimitiveRunState
+) {
+	return yield* runMachine(primitiveKind, { _tag: 'New', state });
 });
 
 /**
@@ -474,6 +497,12 @@ export const resumeRun = Effect.fn('resumeRun')(function* (runId: RunId, env: En
 			break;
 		case 'recheck':
 			handle = yield* resumeKind(recheckKind, snapshot, context);
+			break;
+		case 'implement':
+		case 'checks':
+		case 'pr':
+		case 'post':
+			handle = yield* resumeKind(primitiveKind, snapshot, context);
 			break;
 		default:
 			handle = yield* resumeKind(shipKind, snapshot, context);

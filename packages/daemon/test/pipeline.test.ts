@@ -36,6 +36,7 @@ import {
 	exitCodesByCheck,
 	GhFake,
 	GitFake,
+	opensPr,
 	type AgentScript,
 	type GitFakeShape
 } from '@ship/core/testing';
@@ -72,7 +73,9 @@ interface Save {
 	readonly events: ReadonlyArray<AppendableEvent>;
 }
 
-type OtherKind = { readonly kind: 'review' | 'fix' | 'recheck' };
+type OtherKind = {
+	readonly kind: 'review' | 'fix' | 'recheck' | 'implement' | 'checks' | 'pr' | 'post';
+};
 
 /** `value`, which must come from a `ship run` rather than a run of another kind. */
 const shipRun = <T extends { readonly kind?: 'ship' | OtherKind['kind'] }>(
@@ -267,10 +270,7 @@ const verifierSays = (
 	costUsd: 0.2
 });
 
-const prText = {
-	output: { title: 'Add the feature', body: '## Summary\n\nAdds it.' },
-	costUsd: 0.05
-};
+const prText = { title: 'Add the feature', body: '## Summary\n\nAdds it.', costUsd: 0.05 };
 
 /** Blocks forever once called, after signalling `started`; records an interruption. */
 const hangs =
@@ -347,7 +347,7 @@ describe('pipeline', () => {
 					implementsWith(git, 'feature.ts', { commitSubject: SUBJECT })
 				);
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				const handle = yield* startRun(state);
@@ -418,7 +418,7 @@ describe('pipeline', () => {
 					implementsWith(git, 'feature.ts', { commitSubject: SUBJECT })
 				);
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
@@ -444,30 +444,37 @@ describe('pipeline', () => {
 		)
 	);
 
-	it.effect('fails on a failing baseline without calling an agent', () =>
+	it.effect('goes on after a failing baseline, holding the change only to the other checks', () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
-				const checks = yield* ChecksFake;
-				yield* checks.respond(yield* exitCodesByCheck({ test: [1] }));
+				const git = yield* GitFake;
+				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1, 1] }));
+				yield* agent.script(
+					{ step: 'implement' },
+					implementsWith(git, 'feature.ts', { commitSubject: SUBJECT })
+				);
+				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
 
-				expect(summary.status).toBe('failed');
-				expect(summary.error).toContain('Baseline checks failed');
-				expect(summary.checks).toEqual([
-					{
-						baseline: true,
-						round: 0,
-						attempt: 0,
-						results: [
-							{ name: 'test', exitCode: 1, durationMs: 0, outputTail: 'test failed' }
-						]
-					}
+				expect(summary.status).toBe('done');
+				expect(
+					shipRun(summary)?.checks.map((pass) => [
+						pass.baseline,
+						pass.results.map((result) => result.exitCode)
+					])
+				).toEqual([
+					[true, [1]],
+					[false, [1]]
 				]);
-				expect(yield* agent.calls).toEqual([]);
-				expect(transitions(yield* eventsOf(state.runId))).toEqual(['failed']);
+				// `test` failed before the change, so nobody was asked to fix it.
+				expect((yield* agent.calls).map((call) => call.step)).not.toContain('fixChecks');
+				expect((yield* git.state).commits.map((commit) => commit.message)).toEqual([
+					SUBJECT
+				]);
 			})
 		)
 	);
@@ -538,7 +545,7 @@ describe('pipeline', () => {
 				yield* checks.respond(yield* exitCodesByCheck({ test: [0, 1, 1] }));
 				yield* agent.script({ step: 'implement' }, edits(git, 'feature.ts'));
 				yield* agent.script({ step: 'fixChecks' }, edits(git, 'feature.ts', 0.25));
-				yield* agent.script({ step: 'escalate' }, prText);
+				yield* agent.script({ step: 'escalate' }, yield* opensPr(prText));
 				const state = yield* newRun({ caps: { checkFixAttempts: 1 } });
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
@@ -607,7 +614,7 @@ describe('pipeline', () => {
 					}
 				);
 				yield* agent.script({ step: 'fix' }, edits(git, 'feature.ts', 0.25));
-				yield* agent.script({ step: 'escalate' }, prText);
+				yield* agent.script({ step: 'escalate' }, yield* opensPr(prText));
 				const state = yield* newRun({ caps: { reviewRounds: 2 } });
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
@@ -659,7 +666,7 @@ describe('pipeline', () => {
 					reviewerSays(findingAt('One query per row', 'tradeoff'))
 				);
 				yield* agent.script({ step: 'verify' }, verifierSays(1));
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
@@ -699,7 +706,7 @@ describe('pipeline', () => {
 					edits(git, 'feature.ts', 0.25),
 					edits(git, 'feature.ts', 0.25)
 				);
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
@@ -758,7 +765,7 @@ describe('pipeline', () => {
 							{ costUsd: 0.25 }
 						)
 					);
-					yield* agent.script({ step: 'pr' }, prText);
+					yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 					const state = yield* newRun();
 
 					const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
@@ -788,7 +795,7 @@ describe('pipeline', () => {
 					implementsWith(git, 'feature.ts', { commitSubject: 'Add the feature.' })
 				);
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
@@ -815,7 +822,7 @@ describe('pipeline', () => {
 					implementsWith(git, 'feature.ts', { commitSubject: 'A'.repeat(73) })
 				);
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
@@ -861,7 +868,7 @@ describe('pipeline', () => {
 					}
 				);
 				yield* agent.script({ step: 'fix' }, edits(git, 'feature.ts', 0.25));
-				yield* agent.script({ step: 'escalate' }, prText);
+				yield* agent.script({ step: 'escalate' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
@@ -895,7 +902,7 @@ describe('pipeline', () => {
 					{ output: { verdicts: [], previous: [] }, costUsd: 0.2 }
 				);
 				yield* agent.script({ step: 'fix' }, hangs(started));
-				yield* agent.script({ step: 'escalate' }, prText);
+				yield* agent.script({ step: 'escalate' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				const handle = yield* startRun(state);
@@ -982,7 +989,7 @@ describe('pipeline', () => {
 					edits(git, 'feature.ts', 0.25)
 				);
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun({ caps: { checkFixAttempts: 1 } });
 
 				// The daemon stops while the check fix runs.
@@ -1036,7 +1043,7 @@ describe('pipeline', () => {
 					edits(git, 'feature.ts')
 				);
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				// The daemon stops mid-implement: the run's scope closes without finishing it.
@@ -1104,7 +1111,7 @@ describe('pipeline', () => {
 					edits(git, 'feature.ts')
 				);
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 
 				// Stopping as soon as `implement` starts leaves the baseline actor saved as done
@@ -1132,7 +1139,7 @@ describe('pipeline', () => {
 				const spy = yield* JournalSpy;
 				yield* agent.script({ step: 'implement' }, edits(git, 'feature.ts'));
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 				const state = yield* newRun();
 				const finished = yield* Effect.flatMap(startRun(state), (h) => h.await);
 				// Replay the stop: the final snapshot is saved, but the run was never finished.
@@ -1165,7 +1172,7 @@ describe('pipeline', () => {
 				const git = yield* GitFake;
 				yield* agent.script({ step: 'implement' }, edits(git, 'feature.ts'));
 				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-				yield* agent.script({ step: 'pr' }, prText);
+				yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 
 				const exit = yield* Effect.exit(Effect.flatMap(startRun(unknown), (h) => h.await));
 				// Give a machine that kept going the time to reach its PR.
@@ -1215,7 +1222,7 @@ describe('pipeline', () => {
 						)
 					);
 					yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
-					yield* agent.script({ step: 'pr' }, prText);
+					yield* agent.script({ step: 'pr' }, yield* opensPr(prText));
 					const state = yield* newRun();
 
 					const handle = yield* startRun(state);

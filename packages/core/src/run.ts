@@ -272,6 +272,42 @@ export const RecheckSummary = Schema.Struct({
 });
 export interface RecheckSummary extends Schema.Schema.Type<typeof RecheckSummary> {}
 
+/**
+ * The commands that each run one part of `ship run` on their own: `ship implement`,
+ * `ship checks`, `ship pr` and `ship post`.
+ */
+export const PrimitiveRunKind = Schema.Literals(['implement', 'checks', 'pr', 'post']);
+export type PrimitiveRunKind = typeof PrimitiveRunKind.Type;
+
+/**
+ * The JSON `ship implement`, `ship checks`, `ship pr` and `ship post` print on stdout when
+ * the run ends; also kept in the run store.
+ */
+export const PrimitiveSummary = Schema.Struct({
+	kind: PrimitiveRunKind,
+	runId: RunId,
+	/** `done`, `failed` or `cancelled`: these runs never escalate. */
+	status: TerminalRunStatus,
+	/** The commits the run made, oldest first. */
+	commits: Schema.Array(GitSha),
+	/** Every check pass, the baseline included. */
+	checks: Schema.Array(CheckRound),
+	/** The PR `ship pr` opened or updated; `null` for the other kinds. */
+	prUrl: Schema.NullOr(Url),
+	/** The review `ship post` posted; `null` for the other kinds, or until it is posted. */
+	reviewUrl: Schema.NullOr(Url),
+	costUsd: CostUsd,
+	/** Why the run failed, when `status` is `failed`. */
+	error: Schema.NullOr(Schema.String)
+});
+export interface PrimitiveSummary extends Schema.Schema.Type<typeof PrimitiveSummary> {}
+
 /** What a run of any kind ends with. A summary without `kind` is a `ship run` one. */
-export const Summary = Schema.Union([ReviewSummary, FixSummary, RecheckSummary, ShipSummary]);
+export const Summary = Schema.Union([
+	ReviewSummary,
+	FixSummary,
+	RecheckSummary,
+	PrimitiveSummary,
+	ShipSummary
+]);
 export type Summary = typeof Summary.Type;

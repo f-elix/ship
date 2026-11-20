@@ -19,4 +19,4 @@ Run from the project directory. The config is personal: it lives in ship's home 
 
 3. **Write.** Save the agreed JSON to a temp file outside the repo and run `ship init --write <file>`. It validates the config, saves it and runs every check once. A validation error lists each problem; fix the file and rerun. When a config already exists, ask the user before rerunning with `--force`.
 
-4. **Report.** Give the user each check's result from stdout. Exit code 1 means a check failed: the config stays saved, but `ship run` stops at its baseline until every check passes, so show the failing output and offer to fix the cause or adjust the check.
+4. **Report.** Give the user each check's result from stdout. Exit code 1 means a check failed: the config stays saved, and `ship run` goes on past a failing baseline but no longer holds the change to the checks that failed there, so show the failing output and offer to fix the cause or adjust the check.

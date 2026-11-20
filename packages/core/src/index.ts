@@ -26,6 +26,8 @@ export * from './pr-branch.ts';
 export * from './pr-run.ts';
 export * from './pr-url.ts';
 export * from './pr.ts';
+export * from './primitive-pipeline.ts';
+export * from './primitive-run.ts';
 export * from './primitive-scope.ts';
 export * from './primitive.ts';
 export { DEFAULT_OUTPUT_TAIL, type OutputTailLimits } from './process.ts';

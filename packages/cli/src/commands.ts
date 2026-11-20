@@ -1,6 +1,7 @@
 import {
 	endsFollow,
 	parseFindingsSource,
+	ReviewId,
 	RunEventEnvelope,
 	RunId,
 	RunInfo,
@@ -145,7 +146,9 @@ const follow = (
  */
 const startAndFollow = (
 	connection: Connection,
-	create: ReturnType<Rpc['run' | 'review' | 'fix' | 'recheck']>
+	create: ReturnType<
+		Rpc['run' | 'review' | 'fix' | 'recheck' | 'implement' | 'checks' | 'pr' | 'post']
+	>
 ) =>
 	Effect.gen(function* () {
 		const { runId } = yield* create.pipe(
@@ -162,13 +165,13 @@ const startAndFollow = (
 		yield* follow(connection, runId, 1);
 	});
 
+const planDirArgument = Argument.String('plan-dir').pipe(
+	Argument.withDescription('Directory holding spec.md and implementation-plan.md')
+);
+
 const run = Command.make(
 	'run',
-	{
-		planDir: Argument.String('plan-dir').pipe(
-			Argument.withDescription('Directory holding spec.md and implementation-plan.md')
-		)
-	},
+	{ planDir: planDirArgument },
 	Effect.fn('ship.run')(function* ({ planDir }) {
 		const invocation = yield* Invocation;
 		const connection = yield* connectDaemon();
@@ -295,6 +298,105 @@ const recheck = Command.make(
 	)
 );
 
+const STREAMS =
+	'Events stream to stderr; the summary JSON goes to stdout. Exit code 0 done, 1 failed, cancelled or interrupted, 130 interrupted by Ctrl-C (a started run keeps going).';
+
+const implement = Command.make(
+	'implement',
+	{
+		planDir: planDirArgument,
+		noChecks: Flag.Boolean('no-checks').pipe(
+			Flag.withDescription('Commit the work without running the checks'),
+			Flag.withDefault(false)
+		)
+	},
+	Effect.fn('ship.implement')(function* ({ planDir, noChecks }) {
+		const invocation = yield* Invocation;
+		const connection = yield* connectDaemon();
+		yield* startAndFollow(
+			connection,
+			connection.rpc.implement({
+				planDir: resolve(invocation.cwd, planDir),
+				checks: !noChecks,
+				cwd: invocation.cwd,
+				env: invocation.env
+			})
+		);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		`Implement a plan on the current branch: the baseline checks, the implementer, then the checks, fixing failing ones, and a commit. No review and no PR. ${STREAMS}`
+	)
+);
+
+const checks = Command.make(
+	'checks',
+	{},
+	Effect.fn('ship.checks')(function* () {
+		const invocation = yield* Invocation;
+		const connection = yield* connectDaemon();
+		yield* startAndFollow(
+			connection,
+			connection.rpc.checks({ cwd: invocation.cwd, env: invocation.env })
+		);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		`Run the checks on the files the branch changed since it left the default branch, fix failing ones, and commit the fixes. Needs a clean tree on a feature branch. ${STREAMS}`
+	)
+);
+
+const pr = Command.make(
+	'pr',
+	{
+		plan: Flag.String('plan').pipe(
+			Flag.withDescription('A plan dir whose spec and plan the PR body may draw on'),
+			Flag.optional
+		)
+	},
+	Effect.fn('ship.pr')(function* ({ plan }) {
+		const invocation = yield* Invocation;
+		const connection = yield* connectDaemon();
+		yield* startAndFollow(
+			connection,
+			connection.rpc.pr({
+				planDir: Option.match(plan, {
+					onNone: () => null,
+					onSome: (dir) => resolve(invocation.cwd, dir)
+				}),
+				cwd: invocation.cwd,
+				env: invocation.env
+			})
+		);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		`Push the current branch and open or update its PR, following the \`pr\` skill. Never squashes. Needs a clean tree on a feature branch. ${STREAMS}`
+	)
+);
+
+const post = Command.make(
+	'post',
+	{
+		review: Argument.String('review-id').pipe(
+			Argument.withDescription('The review to post, as `ship review` prints it'),
+			Argument.withSchema(ReviewId)
+		)
+	},
+	Effect.fn('ship.post')(function* ({ review }) {
+		const invocation = yield* Invocation;
+		const connection = yield* connectDaemon();
+		yield* startAndFollow(
+			connection,
+			connection.rpc.post({ review, cwd: invocation.cwd, env: invocation.env })
+		);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		`Post a stored review on its PR: changes requested when there are must-fix findings, a comment otherwise. Run it in a checkout whose HEAD is the reviewed head. ${STREAMS}`
+	)
+);
+
 const resume = Command.make(
 	'resume',
 	{ id: runIdArgument },
@@ -325,7 +427,7 @@ const resume = Command.make(
 	}, Effect.scoped)
 ).pipe(
 	Command.withDescription(
-		'Continue an interrupted run with the current env, streaming and exiting like the command that started it: `ship run`, `ship review`, `ship fix` or `ship recheck`.'
+		'Continue an interrupted run with the current env, streaming and exiting like the command that started it.'
 	)
 );
 
@@ -478,6 +580,10 @@ export const ship = Command.make('ship').pipe(
 		review,
 		fix,
 		recheck,
+		implement,
+		checks,
+		pr,
+		post,
 		resume,
 		cancel,
 		status,

@@ -8,6 +8,7 @@ import {
 	PLAN_FILES,
 	PreconditionFailed,
 	prRepoKey,
+	Reviews,
 	type Env,
 	type FindingsSource,
 	type GitSha,
@@ -18,6 +19,7 @@ import {
 	type PushTarget,
 	type ResolvedConfig,
 	type ReviewedPr,
+	type ReviewId,
 	type TargetPr
 } from '@ship/core';
 import { Effect, FileSystem } from 'effect';
@@ -73,64 +75,179 @@ export const loadProjectConfig = Effect.fn('loadProjectConfig')(function* (key: 
  * branch other than the default one, a plan dir holding the plan files, a project config
  * whose lock resources the daemon has, and a clean working tree. The plan dir is added to
  * `.git/info/exclude` before the tree is checked, so plan files are never committed and never
- * make the tree dirty.
+ * make the tree dirty. `ship implement` starts from the same checks.
  *
  * Git failures past the first check are not precondition failures, so they are defects.
  */
 export const checkPreconditions = Effect.fn('checkPreconditions')(
 	function* (request: RunRequest) {
-		const git = yield* Git;
-		const fs = yield* FileSystem.FileSystem;
 		const repo = { cwd: request.cwd, env: request.env };
+		const branch = yield* requireFeatureBranch(repo);
+		yield* requirePlanFiles(request.planDir);
+		const projectKey = yield* (yield* Git).projectKey(repo);
+		const config = yield* loadProjectConfig(projectKey);
+		yield* requireCleanTree(repo, request.planDir);
+		const baseSha = yield* (yield* Git).headSha(repo);
+		return { projectKey, branch, baseSha, config } satisfies RunStart;
+	},
+	Effect.catchTags({ GitError: Effect.die, PlatformError: Effect.die })
+);
 
-		yield* git
-			.repoRoot(repo)
-			.pipe(Effect.mapError((error) => failed('not-a-git-repo', error.message)));
-		const branch = yield* git.currentBranch(repo);
-		if (branch === null)
-			return yield* failed('detached-head', `HEAD is detached in ${request.cwd}`);
-		const defaultBranch = yield* git
-			.defaultBranch(repo)
+/** What `ship checks` or `ship pr` asks the daemon to do on the caller's branch. */
+export interface BranchRequest {
+	/** The plan the PR describes; `null` for `ship checks`, and `ship pr` without one. */
+	readonly planDir: string | null;
+	readonly cwd: string;
+	readonly env: Env;
+}
+
+/**
+ * Checks that `ship checks` or `ship pr` can work on the caller's branch: as
+ * `checkPreconditions`, except that the plan is optional and `ship pr` takes the default
+ * config when the project has none. The run's range starts at the merge base of `HEAD`
+ * and the default branch.
+ *
+ * Git failures past the first check are defects.
+ */
+export const checkBranchPreconditions = Effect.fn('checkBranchPreconditions')(
+	function* (command: 'checks' | 'pr', request: BranchRequest) {
+		const git = yield* Git;
+		const repo = { cwd: request.cwd, env: request.env };
+		const branch = yield* requireFeatureBranch(repo);
+		if (request.planDir !== null) yield* requirePlanFiles(request.planDir);
+		const projectKey = yield* git.projectKey(repo);
+		const config =
+			command === 'checks'
+				? yield* loadProjectConfig(projectKey)
+				: yield* loadConfigOrDefaults(projectKey);
+		yield* requireCleanTree(repo, request.planDir);
+		const baseSha = yield* git.baseSha(repo);
+		return { projectKey, branch, baseSha, config } satisfies RunStart;
+	},
+	Effect.catchTags({ GitError: Effect.die, PlatformError: Effect.die })
+);
+
+/** Fails unless the repo is on a branch other than the default one; returns the branch. */
+const requireFeatureBranch = Effect.fnUntraced(function* (repo: Repo) {
+	const git = yield* Git;
+	yield* git
+		.repoRoot(repo)
+		.pipe(Effect.mapError((error) => failed('not-a-git-repo', error.message)));
+	const branch = yield* git.currentBranch(repo);
+	if (branch === null) return yield* failed('detached-head', `HEAD is detached in ${repo.cwd}`);
+	const defaultBranch = yield* git
+		.defaultBranch(repo)
+		.pipe(
+			Effect.mapError(() =>
+				failed(
+					'unknown-default-branch',
+					'origin/HEAD is not set and there is no main or master; run `git remote set-head origin --auto`'
+				)
+			)
+		);
+	if (branch === defaultBranch) {
+		return yield* failed(
+			'on-default-branch',
+			`${branch} is the default branch; switch to a feature branch first`
+		);
+	}
+	return branch;
+});
+
+/** Fails unless `planDir` holds the plan files. */
+const requirePlanFiles = Effect.fnUntraced(function* (planDir: string) {
+	const fs = yield* FileSystem.FileSystem;
+	const missing = yield* Effect.filter(Object.values(PLAN_FILES), (file) =>
+		Effect.map(fs.exists(join(planDir, file)), (exists) => !exists)
+	);
+	if (missing.length > 0) {
+		return yield* failed('missing-plan-files', `${planDir} has no ${missing.join(' or ')}`);
+	}
+});
+
+/**
+ * Fails unless the tree is clean, once the plan dir, if any, is excluded from git, so
+ * plan files are never committed and never make the tree dirty.
+ */
+const requireCleanTree = Effect.fnUntraced(function* (repo: Repo, planDir: string | null) {
+	const git = yield* Git;
+	if (planDir !== null) yield* git.excludePath(repo, planDir);
+	if (!(yield* git.isClean(repo))) {
+		return yield* failed(
+			'dirty-tree',
+			`${repo.cwd} has uncommitted changes; commit or stash them first`
+		);
+	}
+});
+
+/** What `ship post` asks the daemon to post, and from where. */
+export interface PostRequest {
+	readonly review: ReviewId;
+	/** The caller's checkout of the reviewed PR, at the head the review reviewed. */
+	readonly cwd: string;
+	readonly env: Env;
+}
+
+/** What a post run starts from once its preconditions hold. */
+export interface PostStart {
+	readonly projectKey: ProjectKey;
+	/** The base the review reviewed from. */
+	readonly baseSha: GitSha;
+	readonly config: ResolvedConfig;
+}
+
+/**
+ * Checks that `ship post` can post the stored review from the caller's checkout: the
+ * review exists, has findings and a PR of the repository `origin` points at, and `HEAD` is
+ * the head it reviewed. The project config may be missing; the defaults apply.
+ *
+ * Git failures past the first check are defects.
+ */
+export const checkPostPreconditions = Effect.fn('checkPostPreconditions')(
+	function* (request: PostRequest) {
+		const git = yield* Git;
+		const reviews = yield* Reviews;
+		const repo = { cwd: request.cwd, env: request.env };
+		const projectKey = yield* originKey(repo);
+		const stored = yield* reviews
+			.get(request.review)
 			.pipe(
-				Effect.mapError(() =>
+				Effect.mapError((error) =>
 					failed(
-						'unknown-default-branch',
-						'origin/HEAD is not set and there is no main or master; run `git remote set-head origin --auto`'
+						'review-not-found',
+						`${error.message}; \`ship list\` shows the runs that stored reviews`,
+						error
 					)
 				)
 			);
-		if (branch === defaultBranch) {
+		const { subject } = stored;
+		if (subject.prUrl === null) {
 			return yield* failed(
-				'on-default-branch',
-				`${branch} is the default branch; switch to a feature branch first`
+				'review-without-pr',
+				`The review ${stored.id} has no PR to post on; open a PR and run \`ship review\` on it first`
 			);
 		}
-
-		const missing = yield* Effect.filter(Object.values(PLAN_FILES), (file) =>
-			Effect.map(fs.exists(join(request.planDir, file)), (exists) => !exists)
-		);
-		if (missing.length > 0) {
+		if (subject.projectKey !== projectKey) {
 			return yield* failed(
-				'missing-plan-files',
-				`${request.planDir} has no ${missing.join(' or ')}`
+				'pr-other-repo',
+				`The review ${stored.id} is of ${subject.prUrl}, but origin is ${projectKey}; run ship post from a clone of the PR's base repository`
 			);
 		}
-
-		const projectKey = yield* git.projectKey(repo);
-		const resolved = yield* loadProjectConfig(projectKey);
-
-		yield* git.excludePath(repo, request.planDir);
-		if (!(yield* git.isClean(repo))) {
+		if (stored.findings.length === 0) {
+			return yield* failed('no-findings', `The review ${stored.id} has no findings to post`);
+		}
+		const config = yield* loadConfigOrDefaults(projectKey);
+		const head = yield* git.headSha(repo);
+		if (head !== subject.headSha) {
+			const number = parsePrUrl(subject.prUrl)?.number;
 			return yield* failed(
-				'dirty-tree',
-				`${request.cwd} has uncommitted changes; commit or stash them first`
+				'pr-not-checked-out',
+				`HEAD in ${repo.cwd} is ${head}, not the reviewed head ${subject.headSha}${number === undefined ? '' : `; run \`gh pr checkout ${number}\`, or \`ship review ${number}\` again if the PR moved on`}`
 			);
 		}
-
-		const baseSha = yield* git.headSha(repo);
-		return { projectKey, branch, baseSha, config: resolved } satisfies RunStart;
+		return { projectKey, baseSha: subject.baseSha, config } satisfies PostStart;
 	},
-	Effect.catchTags({ GitError: Effect.die, PlatformError: Effect.die })
+	Effect.catchTags({ GitError: Effect.die })
 );
 
 /** What `ship review` asks the daemon to review, and from where. */
@@ -361,7 +478,7 @@ const requireFindings = (command: 'fix' | 'recheck', pr: PrDetails, loaded: Load
 				)
 			);
 
-// --- The checks `review`, `fix` and `recheck` share ---
+// --- The checks several commands share ---
 
 type Repo = { readonly cwd: string; readonly env: Env };
 

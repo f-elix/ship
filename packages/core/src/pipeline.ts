@@ -8,6 +8,7 @@ import { createEffectEventStreamLogic, createEffectLogic, setupEffect } from '@x
 import { Schema, type Effect } from 'effect';
 import { baselinePrimitive, ChecksOutput, checksPrimitive } from './check-primitives.ts';
 import { withCheckpointScope } from './checkpoint.ts';
+import { baselineFailures } from './checks.ts';
 import { fixPrimitive, implementPrimitive, planIntent, planName } from './implementer.ts';
 import {
 	addCost,
@@ -131,14 +132,11 @@ const { settle, onDefect } = machineKit<RunState, 'escalate' | 'failed'>({
 			: fail(context, failure.message)
 });
 
-const afterBaseline = (context: RunState, output: ChecksOutput): PipelineNext => {
-	const next = { ...context, checks: [...context.checks, ...output.passes] };
-	if (output.passed) return { target: 'implement', context: next };
-	const failing = (output.passes.at(-1)?.results ?? [])
-		.filter((result) => result.exitCode !== 0)
-		.map((result) => result.name);
-	return fail(next, `Baseline checks failed before any change: ${failing.join(', ')}`);
-};
+/** The run goes on after a failing baseline: the checks hold the change only to the rest. */
+const afterBaseline = (context: RunState, output: ChecksOutput): PipelineNext => ({
+	target: 'implement',
+	context: { ...context, checks: [...context.checks, ...output.passes] }
+});
 
 const afterChecks = (context: RunState, output: ChecksOutput): PipelineNext => {
 	const next = { ...context, checks: [...context.checks, ...output.passes] };
@@ -188,7 +186,8 @@ export const pipelineMachine = setupEffect({
 				invokePrimitive(checksPrimitive, {
 					...implementerScope(state),
 					round: state.round,
-					commitMessage: commitMessage(state)
+					commitMessage: commitMessage(state),
+					preexisting: baselineFailures(state.checks)
 				})
 			)
 		),

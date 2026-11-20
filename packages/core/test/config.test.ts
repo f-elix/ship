@@ -37,7 +37,7 @@ describe('GlobalConfig', () => {
 			fix: 'opus',
 			review: 'sonnet',
 			verify: 'sonnet',
-			pr: 'haiku'
+			pr: 'sonnet'
 		});
 		expect(config.caps).toEqual({ checkFixAttempts: 3, reviewRounds: 10 });
 		expect(Duration.toMinutes(config.timeouts.implement)).toBe(60);
