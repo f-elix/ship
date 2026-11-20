@@ -78,7 +78,7 @@ export const Models = Schema.Struct(
 		fix: withDefault('opus'),
 		review: withDefault('sonnet'),
 		verify: withDefault('sonnet'),
-		pr: withDefault('haiku')
+		pr: withDefault('sonnet')
 	})
 );
 export interface Models extends Schema.Schema.Type<typeof Models> {}

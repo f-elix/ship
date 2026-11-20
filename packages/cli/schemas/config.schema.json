@@ -45,7 +45,7 @@
 				"pr": {
 					"type": "string",
 					"minLength": 1,
-					"default": "haiku"
+					"default": "sonnet"
 				}
 			},
 			"additionalProperties": false,
