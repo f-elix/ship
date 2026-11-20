@@ -114,19 +114,6 @@ export interface GitShape {
 	readonly fetchRef: (repo: GitRepo, ref: string) => Effect.Effect<GitSha, GitError>;
 	/** The best common ancestor of `a` and `b`. */
 	readonly mergeBase: (repo: GitRepo, a: GitSha, b: GitSha) => Effect.Effect<GitSha, GitError>;
-	/**
-	 * Adds a worktree at `path` (absolute) with a detached HEAD at `sha`. Safe to repeat: a
-	 * worktree already registered at `path` is kept as is.
-	 */
-	readonly addWorktree: (
-		repo: GitRepo,
-		options: { readonly path: string; readonly sha: GitSha }
-	) => Effect.Effect<void, GitError>;
-	/**
-	 * Removes the worktree at `path` with whatever it holds, then prunes stale worktree
-	 * records. Safe to repeat: a missing worktree is not an error.
-	 */
-	readonly removeWorktree: (repo: GitRepo, path: string) => Effect.Effect<void, GitError>;
 }
 
 // --- Parsing ---
@@ -534,42 +521,9 @@ const make = Effect.gen(function* () {
 		return yield* toSha(repo, args, yield* runLine(repo, args));
 	});
 
-	/** Whether `path` is one of the repo's registered worktrees. */
-	const isWorktree = Effect.fnUntraced(function* (repo: GitRepo, path: string) {
-		const listed = new Set(
-			(yield* run(repo, ['worktree', 'list', '--porcelain', '-z']))
-				.split('\0')
-				.filter((line) => line.startsWith('worktree '))
-				.map((line) => line.slice('worktree '.length))
-		);
-		// git lists real paths, e.g. `/private/tmp` for `/tmp` on macOS.
-		const real = yield* fs.realPath(path).pipe(Effect.orElseSucceed(() => path));
-		return listed.has(path) || listed.has(real);
-	});
-
-	const addWorktree = Effect.fn('Git.addWorktree')(function* (
-		repo: GitRepo,
-		options: { readonly path: string; readonly sha: GitSha }
-	) {
-		if (yield* isWorktree(repo, options.path)) return;
-		yield* run(repo, ['worktree', 'add', '--quiet', '--detach', options.path, options.sha]);
-	});
-
-	const removeWorktree = Effect.fn('Git.removeWorktree')(function* (repo: GitRepo, path: string) {
-		if (yield* isWorktree(repo, path)) {
-			yield* run(repo, ['worktree', 'remove', '--force', '--force', path]);
-		}
-		yield* fs
-			.remove(path, { recursive: true, force: true })
-			.pipe(Effect.mapError(fsError(repo, ['worktree', 'remove', path])));
-		yield* run(repo, ['worktree', 'prune']);
-	});
-
 	return Git.of({
 		fetchRef,
 		mergeBase,
-		addWorktree,
-		removeWorktree,
 		repoRoot,
 		originUrl,
 		projectKey,

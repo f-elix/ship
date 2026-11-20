@@ -10,6 +10,7 @@ import {
 	NonNegativeInt,
 	PositiveInt,
 	ProjectKey,
+	ReviewId,
 	RunId,
 	SessionId,
 	Step,
@@ -50,10 +51,9 @@ export const RunEvent = Schema.TaggedUnion({
 		baseSha: GitSha
 	},
 	/**
-	 * A `ship review` run was created for a pull request: `repoDir` is the checkout it was
-	 * started in, where its worktree is added and removed, and the run reviews
-	 * `baseSha..headSha`, pinned at creation. `baseSha` is the merge base of the PR's base
-	 * branch and its head.
+	 * A `ship review` run was created for a pull request: `repoDir` is the checkout it runs
+	 * in, at the PR's head, and the run reviews `baseSha..headSha`, pinned at creation.
+	 * `baseSha` is the merge base of the PR's base branch and its head.
 	 */
 	ReviewRunCreated: {
 		...at,
@@ -130,6 +130,8 @@ export const RunEvent = Schema.TaggedUnion({
 	},
 	CommitCreated: { ...at, sha: GitSha, message: Schema.String },
 	PrOpened: { ...at, url: Url, draft: Schema.Boolean },
+	/** The run stored its review, which later commands find by `reviewId`. */
+	ReviewStored: { ...at, reviewId: ReviewId },
 	/**
 	 * `ship review --post` posted its review: `inline` findings as comments on diff lines,
 	 * `inBody` findings listed in the review body.

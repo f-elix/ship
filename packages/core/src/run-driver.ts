@@ -1,9 +1,11 @@
 import { createEffectActor, type RequirementsFrom } from '@xstate/effect';
 import { Cause, Data, DateTime, Deferred, Effect, Exit, Predicate, Queue, Scope } from 'effect';
 import type { StateValue } from 'xstate';
+import { Checkpoint, makeCheckpoint } from './checkpoint.ts';
 import type { RunEvent } from './event.ts';
-import { Git } from './git.ts';
-import { describeDefect, pipelineMachine, stepInput, type PipelineMachine } from './pipeline.ts';
+import type { Git } from './git.ts';
+import { describeDefect, stepInput } from './machine-kit.ts';
+import { pipelineMachine, type PipelineMachine } from './pipeline.ts';
 import type { Env, RunId } from './primitives.ts';
 import { reviewMachine, type ReviewMachine } from './review-pipeline.ts';
 import { buildReviewSummary, type ReviewRunState } from './review-run.ts';
@@ -12,12 +14,13 @@ import {
 	RunJournal,
 	SnapshotLoad,
 	type AppendableEvent,
-	type PersistedRunSnapshot
+	type PersistedRunSnapshot,
+	type StoredCheckpoint
 } from './run-journal.ts';
 import { RunReporter } from './run-step.ts';
-import { buildSummary, ofTag, type SummaryInput } from './run-summary.ts';
+import { buildSummary, type SummaryInput } from './run-summary.ts';
 import type { ReviewSummary, RunState, ShipSummary, Summary, TerminalRunStatus } from './run.ts';
-import { ShipHome } from './ship-paths.ts';
+import type { ShipHome } from './ship-paths.ts';
 import { statePath } from './state-path.ts';
 
 // --- Public types ---
@@ -36,11 +39,14 @@ export interface RunHandle<S extends Summary = Summary> {
 }
 
 /**
- * The services both machines' steps use, plus what finishing a run needs; the driver adds
- * `RunReporter` itself.
+ * The services both machines' steps use; the driver adds `RunReporter` and `Checkpoint`
+ * itself, per run.
  */
 export type PipelineServices =
-	| Exclude<RequirementsFrom<PipelineMachine> | RequirementsFrom<ReviewMachine>, RunReporter>
+	| Exclude<
+			RequirementsFrom<PipelineMachine> | RequirementsFrom<ReviewMachine>,
+			RunReporter | Checkpoint
+	  >
 	| Git
 	| ShipHome;
 
@@ -68,13 +74,6 @@ interface RunActor<C extends KindContext> {
 	readonly send: (event: { readonly type: 'cancel' }) => void;
 }
 
-/** What `cleanup` gets: the run's log, and the env to run git with. */
-interface CleanupInput {
-	readonly runId: RunId;
-	readonly events: ReadonlyArray<RunEvent>;
-	readonly env: Env;
-}
-
 /**
  * A kind of run: `ship run` or `ship review`. The driver picks one by the run's context
  * when it starts or resumes it, and by its log when it cancels a run with no machine.
@@ -83,38 +82,26 @@ interface RunKind<C extends KindContext, S extends Summary> {
 	/** Creates the actor, from its input for a new run or from a stored snapshot. */
 	readonly spawn: (
 		start: { readonly input: C } | { readonly snapshot: ReturnType<typeof restorable> }
-	) => Effect.Effect<RunActor<C>, never, PipelineServices | RunReporter | Scope.Scope>;
+	) => Effect.Effect<
+		RunActor<C>,
+		never,
+		PipelineServices | RunReporter | Checkpoint | Scope.Scope
+	>;
 	/** Throws when `value` names states the machine does not have. */
 	readonly resolve: (value: StateValue, context: C) => void;
 	readonly summarize: (input: SummaryInput) => S;
-	/** Releases what the run held once it finished; must not fail. */
-	readonly cleanup: (input: CleanupInput) => Effect.Effect<void, never, PipelineServices>;
 }
 
 const shipKind: RunKind<RunState, ShipSummary> = {
 	spawn: (start) => createEffectActor(pipelineMachine, start),
 	resolve: (value, context) => void pipelineMachine.resolveState({ value, context }),
-	summarize: buildSummary,
-	cleanup: () => Effect.void
+	summarize: buildSummary
 };
 
 const reviewKind: RunKind<ReviewRunState, ReviewSummary> = {
 	spawn: (start) => createEffectActor(reviewMachine, start),
 	resolve: (value, context) => void reviewMachine.resolveState({ value, context }),
-	summarize: buildReviewSummary,
-	/** Removes the run's worktree from the checkout it was started in. */
-	cleanup: ({ runId, events, env }) =>
-		Effect.gen(function* () {
-			const created = ofTag(events, 'ReviewRunCreated')[0];
-			if (created === undefined) return;
-			const git = yield* Git;
-			const home = yield* ShipHome;
-			yield* git.removeWorktree({ cwd: created.repoDir, env }, home.reviewWorktree(runId));
-		}).pipe(
-			Effect.catchTag('GitError', (error) =>
-				Effect.logWarning('Could not remove the review worktree', error)
-			)
-		)
+	summarize: buildReviewSummary
 };
 
 /** The kind of a run whose log is `events`: a review run's log starts with `ReviewRunCreated`. */
@@ -142,7 +129,15 @@ interface SnapshotItem {
 	readonly end: RunEnd | null;
 }
 
-type Item = { readonly _tag: 'Event'; readonly event: AppendableEvent } | SnapshotItem;
+/** A checkpoint to save once the events before it are; `saved` completes when it is. */
+interface CheckpointItem {
+	readonly _tag: 'Checkpoint';
+	readonly checkpoint: StoredCheckpoint;
+	readonly saved: Deferred.Deferred<void>;
+}
+
+type Item =
+	{ readonly _tag: 'Event'; readonly event: AppendableEvent } | SnapshotItem | CheckpointItem;
 
 const FINAL: Readonly<Record<string, TerminalRunStatus>> = {
 	done: 'done',
@@ -166,34 +161,28 @@ const readLog = Effect.fnUntraced(function* (runId: RunId) {
 });
 
 /** What finishing a run from its log uses of its kind, whatever its machine's context. */
-type LogFinisher<S extends Summary> = Pick<RunKind<KindContext, S>, 'summarize' | 'cleanup'>;
+type LogFinisher<S extends Summary> = Pick<RunKind<KindContext, S>, 'summarize'>;
 
-/**
- * Builds the summary from the run's event log, releases what the run held (`env` is what
- * git runs with for that) and finishes the run with the summary.
- */
+/** Builds the summary from the run's event log and finishes the run with it. */
 const finishFromLog = Effect.fnUntraced(function* <S extends Summary>(
 	kind: LogFinisher<S>,
 	runId: RunId,
-	end: RunEnd,
-	env: Env
+	end: RunEnd
 ) {
 	const journal = yield* RunJournal;
 	const events = yield* readLog(runId);
 	const summary = kind.summarize({ runId, status: end.status, events, error: end.error });
-	yield* kind.cleanup({ runId, events, env });
 	yield* journal.finish(summary);
 	return summary;
 });
 
 /**
  * Finishes a run that has no machine running, such as an `interrupted` one, as
- * `cancelled`. The summary comes from the event log, so no snapshot is needed. `env` is
- * what git runs with to release what the run held; the run's own env is not stored.
+ * `cancelled`. The summary comes from the event log, so no snapshot is needed.
  */
-export const cancelFromLog = Effect.fn('cancelFromLog')(function* (runId: RunId, env: Env) {
+export const cancelFromLog = Effect.fn('cancelFromLog')(function* (runId: RunId) {
 	const kind: LogFinisher<Summary> = kindOfLog(yield* readLog(runId));
-	return yield* finishFromLog(kind, runId, { status: 'cancelled', error: null }, env);
+	return yield* finishFromLog(kind, runId, { status: 'cancelled', error: null });
 });
 
 /**
@@ -212,8 +201,9 @@ export const startReview = Effect.fn('startReview')(function* (state: ReviewRunS
 /**
  * Runs the kind's machine for one run until it ends. Every state change saves the
  * snapshot together with the events since the last save, `StateChanged` last; events
- * reported mid-step are saved as they come. At the end it builds the summary from the
- * event log and finishes the run in the journal.
+ * reported mid-step are saved as they come. A checkpoint is saved in order with the
+ * events, together with the ones before it, and its step waits until it is. At the end
+ * it builds the summary from the event log and finishes the run in the journal.
  *
  * The run lives in the caller's scope: closing it interrupts the run without finishing
  * it, which is how a stopping daemon leaves runs to be marked `interrupted`.
@@ -227,14 +217,31 @@ const runMachine = Effect.fnUntraced(function* <C extends KindContext, S extends
 	const reporter = RunReporter.of({
 		report: (event) => Effect.asVoid(Queue.offer(items, { _tag: 'Event', event }))
 	});
+	const runId = start._tag === 'New' ? start.state.runId : start.snapshot.context.runId;
+	const checkpoint = makeCheckpoint({
+		load: (key) => Effect.orDie(journal.loadCheckpoint(runId, key)),
+		save: (key, value) =>
+			Effect.gen(function* () {
+				const saved = yield* Deferred.make<void>();
+				yield* Queue.offer(items, {
+					_tag: 'Checkpoint',
+					checkpoint: { runId, key, value },
+					saved
+				});
+				yield* Deferred.await(saved);
+			})
+	});
 
 	const actorScope = yield* Scope.fork(yield* Effect.scope);
 	const actor = yield* kind
 		.spawn(
 			start._tag === 'New' ? { input: start.state } : { snapshot: restorable(start.snapshot) }
 		)
-		.pipe(Effect.provideService(RunReporter, reporter), Scope.provide(actorScope));
-	const runId = actor.getSnapshot().context.runId;
+		.pipe(
+			Effect.provideService(RunReporter, reporter),
+			Effect.provideService(Checkpoint, checkpoint),
+			Scope.provide(actorScope)
+		);
 
 	const toItem = (): SnapshotItem => {
 		const snapshot = actor.getSnapshot();
@@ -273,6 +280,12 @@ const runMachine = Effect.fnUntraced(function* <C extends KindContext, S extends
 				pending.push(item.event);
 				continue;
 			}
+			if (item._tag === 'Checkpoint') {
+				yield* journal.saveCheckpoint(item.checkpoint, pending);
+				pending = [];
+				yield* Deferred.succeed(item.saved, undefined);
+				continue;
+			}
 			persisted = item.persisted;
 			end = end ?? item.end;
 			if (item.path !== path) {
@@ -302,7 +315,7 @@ const runMachine = Effect.fnUntraced(function* <C extends KindContext, S extends
 		// Closing the actor's scope waits for the interrupted step to report how it ended.
 		yield* Scope.close(actorScope, Exit.void);
 		yield* process(yield* Queue.clear(items));
-		return yield* finishFromLog(kind, runId, end, actor.getSnapshot().context.env);
+		return yield* finishFromLog(kind, runId, end);
 	}).pipe(
 		// Interrupted without finishing (the daemon stops): keep what the run got to, so it
 		// resumes from its latest state, then the events of the step shutting down. The
@@ -432,7 +445,7 @@ const resumeKind = Effect.fnUntraced(function* <C extends KindContext, S extends
 	if (snapshot['status'] === 'done') {
 		const path = statePath(snapshot.value);
 		yield* journal.markResumed(runId);
-		const summary = yield* finishFromLog(kind, runId, finalEnd(path, context), context.env);
+		const summary = yield* finishFromLog(kind, runId, finalEnd(path, context));
 		return {
 			runId,
 			state: Effect.succeed(path),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest';
-import { DaemonBusy, FindingId, RunId, RunStatus, shipPaths } from '@ship/core';
+import { DaemonBusy, FindingId, RunId, RunStatus, shipPaths, type GitSha } from '@ship/core';
 import { AgentFake, GhFake } from '@ship/core/testing';
 import {
 	addsFeature,
@@ -408,17 +408,18 @@ describe('ship run', () => {
 const PR = 'https://github.com/f-elix/example/pull/1';
 
 /**
- * Adds PR 1 to the GitHub fake and scripts one finding of `severity`, which the verifier
- * confirms.
+ * Adds PR 1, at `headSha`, to the GitHub fake and scripts one finding of `severity`, which
+ * the verifier confirms.
  */
-const scriptReview = (services: Fakes, severity: 'must-fix' | 'nit') =>
+const scriptReview = (services: Fakes, severity: 'must-fix' | 'nit', headSha?: GitSha) =>
 	Effect.gen(function* () {
 		yield* Context.get(services, GhFake).addPr({
 			base: 'main',
 			head: 'feature',
 			title: 'Add the feature',
 			body: 'Adds src/feature.ts.',
-			draft: false
+			draft: false,
+			...(headSha === undefined ? {} : { headSha })
 		});
 		const agent = Context.get(services, AgentFake);
 		yield* agent.script(
@@ -456,9 +457,9 @@ describe('ship review', () => {
 		() =>
 			Effect.gen(function* () {
 				const fx = yield* fixture;
-				const { env } = cloneOfExample(fx);
+				const { head, env } = cloneOfExample(fx);
 				const services = yield* fakes;
-				yield* scriptReview(services, 'must-fix');
+				yield* scriptReview(services, 'must-fix', head);
 				yield* daemon(fx.home, services);
 
 				const result = yield* cli(['review', PR, '--post'], {
@@ -475,11 +476,24 @@ describe('ship review', () => {
 					status: 'done',
 					prUrl: PR,
 					reviewUrl: reviews[0]?.url,
+					reviewId: expect.stringMatching(/-r1$/u),
 					costUsd: 0.75,
 					mustFix: [{ file: 'src/feature.ts', line: 1 }],
 					nits: []
 				});
-				expect(result.stderr.split('\n')[0]).toMatch(/^ship: run \S+ started$/u);
+				const runId = result.stderr
+					.split('\n')[0]
+					?.match(/^ship: run (\S+) started$/u)?.[1];
+				expect(runId).toBeDefined();
+				// The stored review's id is in the event stream, before it is posted.
+				const stderr = result.stderr.split('\n');
+				const stored = stderr.findIndex((line) =>
+					line.endsWith(` review stored as ${runId}-r1`)
+				);
+				expect(stored).toBeGreaterThan(0);
+				expect(
+					stderr.findIndex((line) => line.includes(' review posted '))
+				).toBeGreaterThan(stored);
 			}).pipe(Effect.scoped),
 		TIMEOUT
 	);
@@ -489,9 +503,9 @@ describe('ship review', () => {
 		() =>
 			Effect.gen(function* () {
 				const fx = yield* fixture;
-				const { env } = cloneOfExample(fx);
+				const { head, env } = cloneOfExample(fx);
 				const services = yield* fakes;
-				yield* scriptReview(services, 'nit');
+				yield* scriptReview(services, 'nit', head);
 				yield* daemon(fx.home, services);
 
 				const result = yield* cli(['review', '1'], { home: fx.home, cwd: fx.work, env });

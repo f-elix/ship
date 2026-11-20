@@ -112,6 +112,36 @@ const byName = {
 		yield* sql`ALTER TABLE snapshots_new RENAME TO snapshots`;
 		yield* sql`CREATE INDEX runs_by_updated_at ON runs (updated_at DESC)`;
 		yield* sql`CREATE INDEX runs_by_status ON runs (status)`;
+	}),
+	/**
+	 * Adds primitives' checkpoints and stored reviews. A checkpoint belongs to its run and
+	 * goes with it. A review outlives its run, so it keeps its `run_id` without a foreign
+	 * key; `pr_url` is `null` for a review of a branch with no PR.
+	 */
+	'3_primitives': Effect.gen(function* () {
+		const sql = yield* SqlClient.SqlClient;
+		yield* sql`
+			CREATE TABLE checkpoints (
+				run_id TEXT NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+				key TEXT NOT NULL,
+				value TEXT NOT NULL,
+				PRIMARY KEY (run_id, key)
+			) STRICT, WITHOUT ROWID
+		`;
+		yield* sql`
+			CREATE TABLE reviews (
+				id TEXT PRIMARY KEY,
+				run_id TEXT NOT NULL,
+				project_key TEXT NOT NULL,
+				pr_url TEXT,
+				base_sha TEXT NOT NULL,
+				head_sha TEXT NOT NULL,
+				review TEXT NOT NULL,
+				posted_url TEXT,
+				created_at INTEGER NOT NULL
+			) STRICT
+		`;
+		yield* sql`CREATE INDEX reviews_by_pr_url ON reviews (pr_url, created_at)`;
 	})
 };
 

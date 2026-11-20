@@ -1,15 +1,14 @@
 import { Schema } from 'effect';
-import { ResolvedConfig } from './config.ts';
-import { Finding, VerifiedFinding } from './finding.ts';
+import { VerifiedFinding } from './finding.ts';
+import { primitiveScopeFields } from './primitive-scope.ts';
 import {
 	AbsolutePath,
 	CostUsd,
-	Env,
 	GitSha,
 	Millis,
 	NonNegativeInt,
 	PositiveInt,
-	ProjectKey,
+	ReviewId,
 	RunId,
 	SessionId,
 	Url
@@ -79,26 +78,6 @@ export const UnresolvedFindings = Schema.Struct({
 export interface UnresolvedFindings extends Schema.Schema.Type<typeof UnresolvedFindings> {}
 
 /**
- * The review round in progress, from `route` until `verify` turns it into a
- * {@link ReviewRound}: what `review` runs and what `verify` checks.
- */
-export const ReviewInProgress = Schema.Struct({
-	round: PositiveInt,
-	/** The reviewed range is `fromSha..toSha`: always the whole branch, from `baseSha`. */
-	fromSha: GitSha,
-	toSha: GitSha,
-	/**
-	 * Where the range routing looked at starts: `baseSha` in round 1, then
-	 * `lastReviewedSha`, so routing sees only the fix commits.
-	 */
-	routedFromSha: GitSha,
-	reviewers: Schema.Array(ReviewerName),
-	/** What the reviewers reported; empty until `review` ends. */
-	findings: Schema.Array(Finding)
-});
-export interface ReviewInProgress extends Schema.Schema.Type<typeof ReviewInProgress> {}
-
-/**
  * A session the next call can resume, with the session's running cost total so the next
  * call's own cost can be told apart. Persisted whole as the implementer session.
  */
@@ -121,37 +100,11 @@ export const CommitSubject = Schema.NonEmptyString.check(
 export type CommitSubject = typeof CommitSubject.Type;
 
 /**
- * The fields of a run's context that a review round reads and writes. A `ship run` and a
- * `ship review` run both hold them, so the round's steps and reducers serve both machines.
- */
-export const reviewRoundFields = {
-	runId: RunId,
-	projectKey: ProjectKey,
-	/** Where agents and git run: the user's checkout for `ship run`, a worktree for `ship review`. */
-	cwd: AbsolutePath,
-	env: Env,
-	/** Where the reviewed range starts. */
-	baseSha: GitSha,
-	/** Resolved when the run is created; later config edits do not change it. */
-	config: ResolvedConfig,
-	/** Current review round: a `ship run` is at 0 before its first review, a `ship review` run is at 1 from the start. */
-	round: NonNegativeInt,
-	lastReviewedSha: Schema.NullOr(GitSha),
-	review: Schema.NullOr(ReviewInProgress),
-	reviewRounds: Schema.Array(ReviewRound),
-	unresolved: UnresolvedFindings
-};
-
-/** The slice of a run's context that the review round reads and writes. */
-export const ReviewRoundState = Schema.Struct(reviewRoundFields);
-export interface ReviewRoundState extends Schema.Schema.Type<typeof ReviewRoundState> {}
-
-/**
  * The machine context, persisted in snapshots. Values the run has not produced yet are
  * `null` so the context always has the same keys.
  */
 export const RunState = Schema.Struct({
-	...reviewRoundFields,
+	...primitiveScopeFields,
 	/**
 	 * Tells a `ship run` context from a `ship review` one. Optional so that snapshots saved
 	 * before review runs existed still load: an absent kind is `ship`.
@@ -159,6 +112,16 @@ export const RunState = Schema.Struct({
 	kind: Schema.optionalKey(Schema.Literal('ship')),
 	planDir: AbsolutePath,
 	branch: Schema.NonEmptyString,
+	/** Current review round: 0 before the first review, then the round `review` runs or ran. */
+	round: NonNegativeInt,
+	/** The head of the latest reviewed range; the next round's routing starts there. */
+	lastReviewedSha: Schema.NullOr(GitSha),
+	reviewRounds: Schema.Array(ReviewRound),
+	/**
+	 * What the latest triage left: the must-fix findings and nits `fix` works through, and
+	 * every tradeoff so far, for the PR body.
+	 */
+	unresolved: UnresolvedFindings,
 	/** Set by `implement`; every fix step resumes this session. */
 	implementerSession: Schema.NullOr(AgentSession),
 	/**
@@ -167,8 +130,6 @@ export const RunState = Schema.Struct({
 	 * gave no valid subject, and the commit falls back to `Implement <plan name>`.
 	 */
 	commitSubject: Schema.optionalKey(CommitSubject),
-	/** Check-fix attempts in the current round. */
-	checkFixAttempts: NonNegativeInt,
 	checks: Schema.Array(CheckRound),
 	/**
 	 * Running cost for display while the run is live. The summary sums the `AgentCost`
@@ -194,9 +155,7 @@ export const initialRunState = (start: NewRunState): RunState => ({
 	kind: 'ship',
 	implementerSession: null,
 	round: 0,
-	checkFixAttempts: 0,
 	lastReviewedSha: null,
-	review: null,
 	reviewRounds: [],
 	unresolved: { mustFix: [], tradeoffs: [], nits: [] },
 	checks: [],
@@ -211,7 +170,7 @@ export const initialRunState = (start: NewRunState): RunState => ({
  * Bump it when a change to `RunState` or the machine's states makes older snapshots
  * unsafe to restore; runs saved under another version can no longer be resumed.
  */
-export const SNAPSHOT_VERSION = 3;
+export const SNAPSHOT_VERSION = 4;
 
 /** The JSON `ship run` prints on stdout when the run ends; also kept in the run store. */
 export const ShipSummary = Schema.Struct({
@@ -245,6 +204,11 @@ export const ReviewSummary = Schema.Struct({
 	prUrl: Url,
 	/** The review posted on the PR; `null` without `--post` or when there was nothing to post. */
 	reviewUrl: Schema.NullOr(Url),
+	/**
+	 * The stored review, which later commands take. Absent when the run ended before
+	 * storing it, and in summaries stored before reviews were.
+	 */
+	reviewId: Schema.optionalKey(ReviewId),
 	costUsd: CostUsd,
 	/** The verified findings, by severity. */
 	mustFix: Schema.Array(VerifiedFinding),

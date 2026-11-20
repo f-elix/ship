@@ -1,4 +1,4 @@
-import { Context, Data, type Effect } from 'effect';
+import { Context, Data, type Effect, type Option } from 'effect';
 import type { RunEvent, RunEventEnvelope } from './event.ts';
 import type { Env, RunId } from './primitives.ts';
 import type { ReviewRunState } from './review-run.ts';
@@ -48,6 +48,13 @@ export type SnapshotLoad = Data.TaggedEnum<{
 }>;
 export const SnapshotLoad = Data.taggedEnum<SnapshotLoad>();
 
+/** A checkpoint value as the journal keeps it: the encoded JSON value under its full key. */
+export interface StoredCheckpoint {
+	readonly runId: RunId;
+	readonly key: string;
+	readonly value: unknown;
+}
+
 /** The part of the run store a run driver needs; the store package provides it. */
 export interface RunJournalShape {
 	/**
@@ -63,6 +70,21 @@ export interface RunJournalShape {
 		snapshot: PersistedRunSnapshot,
 		events?: ReadonlyArray<AppendableEvent>
 	) => Effect.Effect<ReadonlyArray<RunEventEnvelope>, RunNotFound | InvalidRunStatus>;
+	/**
+	 * Stores a checkpoint value, replacing any under the same key, and appends `events` in
+	 * the same transaction: the events a step reported before the checkpoint, so a
+	 * restored value never stands for events the log lacks. Fails with `InvalidRunStatus`
+	 * when the run finished.
+	 */
+	readonly saveCheckpoint: (
+		checkpoint: StoredCheckpoint,
+		events?: ReadonlyArray<AppendableEvent>
+	) => Effect.Effect<ReadonlyArray<RunEventEnvelope>, RunNotFound | InvalidRunStatus>;
+	/** The checkpoint value stored under `key` for the run, if any. */
+	readonly loadCheckpoint: (
+		runId: RunId,
+		key: string
+	) => Effect.Effect<Option.Option<unknown>, RunNotFound>;
 	/** Loads the run's snapshot, putting `env` back wherever `saveSnapshot` removed it. */
 	readonly loadSnapshot: (runId: RunId, env: Env) => Effect.Effect<SnapshotLoad, RunNotFound>;
 	/**

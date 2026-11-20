@@ -84,8 +84,6 @@ export interface FakeGitState {
 	readonly remoteRefs: Readonly<Record<string, GitSha>>;
 	/** Every ref fetched, in order. */
 	readonly fetches: ReadonlyArray<string>;
-	/** The worktrees added and not removed yet. */
-	readonly worktrees: ReadonlyArray<{ readonly path: string; readonly sha: GitSha }>;
 	/** Methods that fail, with their error, until removed. */
 	readonly failures: Partial<Record<keyof GitShape, GitError>>;
 }
@@ -129,7 +127,6 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 			excluded: [],
 			remoteRefs: {},
 			fetches: [],
-			worktrees: [],
 			failures: {},
 			...initial
 		});
@@ -216,23 +213,7 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 					yield* Ref.set(state, { ...current, fetches: [...current.fetches, ref] });
 					return current.remoteRefs[ref] ?? current.headSha;
 				}),
-			mergeBase: () => Effect.map(read('mergeBase'), (s) => s.baseSha),
-			addWorktree: (_repo, worktree) =>
-				Effect.flatMap(read('addWorktree'), (current) =>
-					current.worktrees.some((added) => added.path === worktree.path)
-						? Effect.void
-						: Ref.set(state, {
-								...current,
-								worktrees: [...current.worktrees, worktree]
-							})
-				),
-			removeWorktree: (_repo, path) =>
-				Effect.flatMap(read('removeWorktree'), (current) =>
-					Ref.set(state, {
-						...current,
-						worktrees: current.worktrees.filter((added) => added.path !== path)
-					})
-				)
+			mergeBase: () => Effect.map(read('mergeBase'), (s) => s.baseSha)
 		};
 
 		const fake: GitFakeShape = {
@@ -501,6 +482,11 @@ export interface GhFakeShape {
 	readonly reviews: Effect.Effect<ReadonlyArray<FakeReview>>;
 	/** Adds an open PR, as if a previous attempt had opened it. */
 	readonly addPr: (pr: Omit<FakePr, 'url' | 'number'>) => Effect.Effect<FakePr>;
+	/**
+	 * Runs `hook` inside every later `submitReview`, after the review is recorded: a hook
+	 * that never ends stands for a crash after GitHub accepted the review.
+	 */
+	readonly afterSubmit: (hook: Effect.Effect<void>) => Effect.Effect<void>;
 	/** Makes `method` fail with a `GhError` carrying `stderr`, until cleared with `succeed`. */
 	readonly fail: (method: keyof GhShape, stderr: string) => Effect.Effect<void>;
 	readonly succeed: (method: keyof GhShape) => Effect.Effect<void>;
@@ -512,6 +498,7 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 		Effect.gen(function* () {
 			const prs = yield* Ref.make<ReadonlyArray<FakePr>>([]);
 			const reviews = yield* Ref.make<ReadonlyArray<FakeReview>>([]);
+			const submitHook = yield* Ref.make<Effect.Effect<void>>(Effect.void);
 			const failures = yield* Ref.make<Partial<Record<keyof GhShape, GhError>>>({});
 
 			const guard = (method: keyof GhShape) =>
@@ -589,13 +576,25 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 						Ref.modify(reviews, (current): [string, ReadonlyArray<FakeReview>] => {
 							const url = `${input.prUrl}#pullrequestreview-${current.length + 1}`;
 							return [url, [...current, { ...input, url }]];
-						})
+						}).pipe(Effect.tap(() => Effect.flatten(Ref.get(submitHook))))
+					),
+				findReview: (_repo, { prUrl, marker }) =>
+					Effect.andThen(guard('findReview'), () =>
+						Effect.map(
+							Ref.get(reviews),
+							(current) =>
+								current.find(
+									(review) =>
+										review.prUrl === prUrl && review.body.includes(marker)
+								)?.url ?? null
+						)
 					)
 			};
 			const fake: GhFakeShape = {
 				prs: Ref.get(prs),
 				reviews: Ref.get(reviews),
 				addPr: (pr) => add(pr),
+				afterSubmit: (hook) => Ref.set(submitHook, hook),
 				fail: (method, stderr) =>
 					Ref.update(failures, (current) => ({
 						...current,

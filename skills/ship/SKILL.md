@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Hand a planned change to ship, which implements it, runs the checks, reviews, fixes and opens the PR unattended. Use when the user wants to ship planned work (`ship run`).
+description: Hand a planned change to ship, which implements it, runs the checks, reviews, fixes and opens the PR unattended, or have ship review a pull request. Use when the user wants to ship planned work (`ship run`) or review a PR with ship (`ship review`).
 ---
 
 # ship
@@ -20,3 +20,11 @@ ship runs the whole loop in its daemon: baseline checks → implement → checks
     - **2, escalated**: a draft PR is up. Give the `escalationReason` and every unresolved must-fix finding and nit, then offer to fix them (`ship resume` does not apply; the run is over).
     - **1, failed**: a precondition message, a failing baseline (show the failing checks' `outputTail`: ship spent no tokens), or the run's `error`. A failed baseline means the branch is red before any change; offer to fix it first. An interrupted run (the daemon stopped) prints a resume hint: offer `ship resume <id>`.
     - **130, detached**: give the run id and `ship logs <id> --follow` / `ship status <id>`.
+
+## Reviewing a pull request
+
+`ship review <pr> [--post]` runs one round of ship's reviewers and verifier over a PR, in the checkout you call it from. ship never creates a worktree or checks anything out itself.
+
+1. **Check the PR out** in your worktree first: `gh pr checkout <n>`. ship refuses to start unless the tree is clean and `HEAD` is the PR's head commit (`dirty-tree` or `pr-not-checked-out`); fix that and start again rather than working around it. Do not move `HEAD` until the run ends: with `--post`, ship refuses to post once `HEAD` has moved.
+2. **Run** `ship review <pr>` from the repo root, adding `--post` only when the user asked for the findings on GitHub. Wait for it like `ship run`.
+3. **Report**: exit 0 means no verified must-fix, 2 means at least one; give the findings by severity, the `reviewUrl` when posted, and the `reviewId` the review is stored under. Exit 1 and 130 read as for `ship run`.

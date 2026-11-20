@@ -12,7 +12,6 @@ import {
 	PreconditionFailed,
 	resumeRun,
 	RunJournal,
-	ShipHome,
 	ShipRpcs,
 	startReview,
 	startRun,
@@ -21,7 +20,6 @@ import {
 	type CheckEvent,
 	type CheckSpawnError,
 	type CheckTimeout,
-	type Env,
 	type RunId,
 	type RunInfo,
 	type RunNotFound,
@@ -43,11 +41,6 @@ export class DaemonControl extends Context.Service<
 	DaemonControl,
 	{
 		readonly version: string;
-		/**
-		 * The daemon's own env, which git runs with when no caller sent one: cancelling a
-		 * run that no machine runs releases what the run held with it.
-		 */
-		readonly env: Env;
 		/** Completed by `stop`; the daemon then shuts down. */
 		readonly shutdown: Deferred.Deferred<void>;
 	}
@@ -87,10 +80,6 @@ export const handlers = ShipRpcs.toLayer(
 			| Effect.Services<ReturnType<typeof checkPreconditions>>
 			| Effect.Services<ReturnType<typeof checkReviewPreconditions>>
 		>();
-		// What finishing a run from its log uses to release what it held.
-		const cleanupServices =
-			yield* Effect.context<Effect.Services<ReturnType<typeof cancelFromLog>>>();
-		const home = yield* ShipHome;
 		const git = yield* Git;
 		const checks = yield* Checks;
 		// `runChecks` passes in progress: a non-forced `stop` is refused while any runs.
@@ -130,10 +119,7 @@ export const handlers = ShipRpcs.toLayer(
 						if (isTerminal(info.status)) {
 							return yield* new InvalidRunStatus({ runId, status: info.status });
 						}
-						yield* cancelFromLog(runId, control.env).pipe(
-							Effect.provide(cleanupServices),
-							Effect.provideService(RunJournal, store)
-						);
+						yield* cancelFromLog(runId).pipe(Effect.provideService(RunJournal, store));
 					})
 				);
 				if (claimed) return;
@@ -213,12 +199,11 @@ export const handlers = ShipRpcs.toLayer(
 						const state = initialReviewRunState({
 							runId,
 							projectKey: start.projectKey,
-							cwd: home.reviewWorktree(runId),
+							cwd: request.cwd,
 							env: request.env,
 							config: start.config,
 							pr: start.pr,
-							post: request.post,
-							repoDir: request.cwd
+							post: request.post
 						});
 						yield* host
 							.launch(runId, startReview(state))

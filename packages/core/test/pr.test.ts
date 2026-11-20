@@ -349,6 +349,81 @@ esac
 		}).pipe(Effect.scoped, Effect.provide(GhLive))
 	);
 
+	/**
+	 * A stub `gh` that logs its argv and prints `output` as `gh api --paginate --jq` would:
+	 * one JSON value per line, every page's lines one after the other.
+	 */
+	const listingGh = (output: string) =>
+		Effect.gen(function* () {
+			const dir = yield* tempDir;
+			writeFileSync(`${dir}/reviews.out`, output);
+			writeFileSync(
+				`${dir}/gh`,
+				`#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/argv.log"\ncat "${dir}/reviews.out"\n`
+			);
+			chmodSync(`${dir}/gh`, 0o755);
+			const repo = { cwd: dir, env: { PATH: `${dir}:/usr/bin:/bin` } };
+			return { repo, argv: () => readFileSync(`${dir}/argv.log`, 'utf8').trim() };
+		});
+
+	const MARKER = '<!-- ship-review: 20261120-100000-abcdef-r1 -->';
+	const listed = (id: number, body: string | null) =>
+		JSON.stringify({ html_url: `https://github.com/o/r/pull/7#pullrequestreview-${id}`, body });
+
+	it.effect('finds the first review whose body holds the marker, across every page', () =>
+		Effect.gen(function* () {
+			const { repo, argv } = yield* listingGh(
+				[
+					// Page 1: a review without a body, and one by someone else.
+					listed(1, null),
+					listed(2, 'Looks good.'),
+					// Page 2: ship's review, then a later one quoting it.
+					listed(3, `Findings.\n\n${MARKER}`),
+					listed(4, `> ${MARKER}`),
+					''
+				].join('\n')
+			);
+			const gh = yield* Gh;
+
+			const url = yield* gh.findReview(repo, {
+				prUrl: 'https://github.example.com/o/r/pull/7',
+				marker: MARKER
+			});
+
+			expect(url).toBe('https://github.com/o/r/pull/7#pullrequestreview-3');
+			expect(argv()).toBe(
+				'api --hostname github.example.com --paginate repos/o/r/pulls/7/reviews --jq .[] | {html_url, body}'
+			);
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('finds no review when none holds the marker or the PR has no reviews', () =>
+		Effect.gen(function* () {
+			const gh = yield* Gh;
+			const input = { prUrl: 'https://github.com/o/r/pull/7', marker: MARKER };
+			const unmarked = yield* listingGh(`${listed(1, 'Looks good.')}\n${listed(2, null)}\n`);
+			const none = yield* listingGh('');
+
+			expect(yield* gh.findReview(unmarked.repo, input)).toBeNull();
+			expect(yield* gh.findReview(none.repo, input)).toBeNull();
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('fails with GhError when a listed review is not one, rather than missing it', () =>
+		Effect.gen(function* () {
+			const { repo } = yield* listingGh(`${listed(1, 'Looks good.')}\nnot json\n`);
+			const gh = yield* Gh;
+
+			const failed = yield* Effect.flip(
+				gh.findReview(repo, { prUrl: 'https://github.com/o/r/pull/7', marker: MARKER })
+			);
+
+			// Taking a garbled listing for "not posted" would post a second review.
+			expect(failed).toMatchObject({ _tag: 'GhError', exitCode: 0 });
+			expect(failed.stderr).toMatch(/^Unexpected output/u);
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
 	it.effect('fails with GhError when gh pr view prints something other than a PR', () =>
 		Effect.gen(function* () {
 			const dir = yield* tempDir;

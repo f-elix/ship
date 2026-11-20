@@ -71,6 +71,8 @@ export const makeEventFormatter = () => {
 				return `commit ${shortSha(event.sha)} ${firstLine(event.message)}`;
 			case 'PrOpened':
 				return `${event.draft ? 'draft ' : ''}PR opened: ${event.url}`;
+			case 'ReviewStored':
+				return `review stored as ${event.reviewId}`;
 			case 'PrReviewPosted':
 				return `review posted (${event.event === 'REQUEST_CHANGES' ? 'changes requested' : 'comment'}, ${plural(event.inline, 'inline comment')}, ${event.inBody} in the body): ${event.url}`;
 			case 'RunFinished': {

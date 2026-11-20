@@ -114,6 +114,14 @@ export interface GhShape {
 		repo: GitRepo,
 		input: SubmitReviewInput
 	) => Effect.Effect<string, GhError>;
+	/**
+	 * The URL of the PR's first review whose body contains `marker`, or `null`. It is how
+	 * a resumed run finds a review it posted before it could record posting it.
+	 */
+	readonly findReview: (
+		repo: GitRepo,
+		input: { readonly prUrl: string; readonly marker: string }
+	) => Effect.Effect<string | null, GhError>;
 }
 
 const PrList = Schema.fromJsonString(
@@ -139,6 +147,11 @@ const PrView = Schema.fromJsonString(
 );
 
 const PostedReview = Schema.fromJsonString(Schema.Struct({ html_url: Url }));
+
+/** One line of `findReview`'s `--jq` output: a review's URL and body. */
+const ListedReview = Schema.fromJsonString(
+	Schema.Struct({ html_url: Url, body: Schema.NullOr(Schema.String) })
+);
 
 const make = Effect.gen(function* () {
 	const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -299,7 +312,36 @@ const make = Effect.gen(function* () {
 		return posted.html_url;
 	});
 
-	return Gh.of({ findPr, createPr, editPr, markDraft, viewPr, submitReview });
+	const findReview = Effect.fn('Gh.findReview')(function* (
+		repo: GitRepo,
+		input: { readonly prUrl: string; readonly marker: string }
+	) {
+		const pr = parsePrUrl(input.prUrl);
+		if (pr === null)
+			return yield* Effect.die(new Error(`Not a pull request URL: ${input.prUrl}`));
+		// `--jq` prints one review per line, across every page `--paginate` fetches.
+		const args = [
+			'api',
+			'--hostname',
+			pr.host,
+			'--paginate',
+			`repos/${pr.owner}/${pr.name}/pulls/${pr.number}/reviews`,
+			'--jq',
+			'.[] | {html_url, body}'
+		];
+		const stdout = yield* run(repo, args);
+		const lines = stdout.split('\n').filter((line) => line.trim() !== '');
+		const reviews = yield* Effect.forEach(lines, (line) =>
+			Schema.decodeUnknownEffect(ListedReview)(line).pipe(
+				Effect.mapError(unexpected(repo, args))
+			)
+		);
+		return (
+			reviews.find((review) => review.body?.includes(input.marker) ?? false)?.html_url ?? null
+		);
+	});
+
+	return Gh.of({ findPr, createPr, editPr, markDraft, viewPr, submitReview, findReview });
 });
 
 /** Runs the real `gh` CLI in the caller's repo, with the caller's env. */

@@ -2,6 +2,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Schema } from 'effect';
 import {
 	Finding,
+	ReviewId,
 	RunEvent,
 	RunEventEnvelope,
 	RunState,
@@ -101,6 +102,7 @@ const events: ReadonlyArray<RunEventType> = [
 	}),
 	RunEvent.cases.CommitCreated.make({ at, sha: headSha, message: 'ship: checks pass' }),
 	RunEvent.cases.PrOpened.make({ at, url: 'https://github.com/f-elix/ship/pull/7', draft: true }),
+	RunEvent.cases.ReviewStored.make({ at, reviewId: ReviewId.make(`${runId}-r1`) }),
 	RunEvent.cases.PrReviewPosted.make({
 		at,
 		url: 'https://github.com/f-elix/ship/pull/7#pullrequestreview-1',
@@ -117,6 +119,7 @@ const events: ReadonlyArray<RunEventType> = [
 			status: 'done',
 			prUrl: 'https://github.com/f-elix/ship/pull/7',
 			reviewUrl: null,
+			reviewId: ReviewId.make(`${runId}-r1`),
 			costUsd: 0.12,
 			mustFix: [verifiedFinding],
 			tradeoffs: [],
@@ -185,16 +188,7 @@ describe('run domain', () => {
 			config: resolvedConfig,
 			implementerSession: { sessionId, cumulativeCostUsd: 0.5 },
 			round: 2,
-			checkFixAttempts: 1,
 			lastReviewedSha: headSha,
-			review: {
-				round: 2,
-				fromSha: baseSha,
-				toSha: headSha,
-				routedFromSha: headSha,
-				reviewers: ['comments'],
-				findings: [finding]
-			},
 			reviewRounds: [
 				{
 					round: 1,

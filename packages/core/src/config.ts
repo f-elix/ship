@@ -61,9 +61,9 @@ export interface Check extends Schema.Schema.Type<typeof Check> {}
 // Each group has field schemas without defaults (reused for project overrides)
 // and a global struct that fills every field.
 
-// `fixChecks` resumes the implementer session with the `fix` model; `escalate` writes
-// its PR body with the `pr` model. `baseline`, `checks`, `route` and `triage` run no
-// agent: `route` asks Cloudflare Clef.
+// `checks` runs its agent calls through `fixChecks`, which resumes the implementer
+// session with the `fix` model; `escalate` writes its PR body with the `pr` model.
+// `baseline`, `route` and `triage` run no agent: `route` asks Cloudflare Clef.
 const modelFields = {
 	implement: ModelId,
 	fix: ModelId,
@@ -134,8 +134,10 @@ export const Timeout = Schema.String.check(
 );
 
 // Every step has a timeout except the deterministic `triage` and `route`, whose Clef call
-// has a fixed one (`CLEF_TIMEOUT`), and `ship review`'s `prepare` and `post`, which only
-// run git and gh.
+// has a fixed one (`CLEF_TIMEOUT`), and `post`, which only runs git and gh.
+// `prepare` has none: no run reports it, and it stays a step only so that old logs decode.
+// `fixChecks` and `verify` limit the agent calls inside `checks` and `review`; `review`
+// limits each reviewer call.
 const timeoutFields = {
 	baseline: Timeout,
 	implement: Timeout,

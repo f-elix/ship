@@ -29,7 +29,9 @@ export const PreconditionReason = Schema.Literals([
 	'unknown-project-config',
 	'invalid-config',
 	'pr-not-found',
-	'pr-other-repo'
+	'pr-other-repo',
+	'pr-not-checked-out',
+	'base-fetch-failed'
 ]);
 export type PreconditionReason = typeof PreconditionReason.Type;
 
@@ -38,7 +40,9 @@ export class PreconditionFailed extends Schema.TaggedError<PreconditionFailed>()
 	{
 		reason: PreconditionReason,
 		/** Human-readable specifics, e.g. which plan files are missing. */
-		detail: Schema.String
+		detail: Schema.String,
+		/** The error the check failed with, when it failed on one, e.g. a failed fetch. */
+		cause: Schema.optionalKey(Schema.Defect())
 	}
 ) {}
 
@@ -90,8 +94,7 @@ const runInfoFields = {
 	runId: RunId,
 	projectKey: ProjectKey,
 	/**
-	 * The directory the run was started from: where a `ship run` works, and the checkout a
-	 * `ship review` run adds its worktree to.
+	 * The directory the run was started from, and the checkout it works in.
 	 */
 	cwd: AbsolutePath,
 	status: RunStatus,
