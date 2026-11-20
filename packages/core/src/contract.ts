@@ -3,6 +3,7 @@
  * pipeline, the Agent SDK or process code, for clients that only talk to the daemon.
  */
 export * from './event.ts';
+export * from './findings-source.ts';
 export * from './primitives.ts';
 export * from './rpc.ts';
 export * from './run.ts';

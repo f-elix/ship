@@ -68,6 +68,10 @@ export const Step = Schema.Literals([
 	'escalate',
 	'pr',
 	'prepare',
-	'post'
+	'post',
+	'recheck',
+	'resolve',
+	'commit',
+	'push'
 ]);
 export type Step = typeof Step.Type;

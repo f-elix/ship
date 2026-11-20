@@ -219,6 +219,59 @@ export const ReviewSummary = Schema.Struct({
 });
 export interface ReviewSummary extends Schema.Schema.Type<typeof ReviewSummary> {}
 
-/** What a run of either kind ends with. A summary without `kind` is a `ship run` one. */
-export const Summary = Schema.Union([ReviewSummary, ShipSummary]);
+/** What `recheck` found of one earlier finding. */
+export const RecheckedFinding = Schema.Struct({
+	finding: VerifiedFinding,
+	status: Schema.Literals(['fixed', 'unfixed']),
+	/** The verifier's evidence for `status`. */
+	evidence: Schema.String
+});
+export interface RecheckedFinding extends Schema.Schema.Type<typeof RecheckedFinding> {}
+
+/** The JSON `ship fix` prints on stdout when the run ends; also kept in the run store. */
+export const FixSummary = Schema.Struct({
+	kind: Schema.Literal('fix'),
+	runId: RunId,
+	/** `done`, `failed` or `cancelled`: a fix run never escalates. */
+	status: TerminalRunStatus,
+	/** The PR whose findings were fixed. */
+	prUrl: Url,
+	/** The must-fix findings and nits the fix agent was given. */
+	findings: Schema.Array(VerifiedFinding),
+	/** The open review threads left out because their author may not push to the repository. */
+	ignoredThreads: Schema.Array(Url),
+	/** The commits the run made, oldest first. */
+	commits: Schema.Array(GitSha),
+	/** Whether the commits were pushed to the PR's branch. */
+	pushed: Schema.Boolean,
+	/** Every check pass; empty with `--no-checks`. */
+	checks: Schema.Array(CheckRound),
+	costUsd: CostUsd,
+	/** Why the run failed, when `status` is `failed`. */
+	error: Schema.NullOr(Schema.String)
+});
+export interface FixSummary extends Schema.Schema.Type<typeof FixSummary> {}
+
+/** The JSON `ship recheck` prints on stdout when the run ends; also kept in the run store. */
+export const RecheckSummary = Schema.Struct({
+	kind: Schema.Literal('recheck'),
+	runId: RunId,
+	/** `done`, `failed` or `cancelled`: a recheck run never escalates. */
+	status: TerminalRunStatus,
+	/** The PR whose findings were rechecked. */
+	prUrl: Url,
+	/** Each finding with its status and the verifier's evidence; empty before `recheck` ends. */
+	findings: Schema.Array(RecheckedFinding),
+	/** The review threads the run resolved on GitHub. */
+	resolvedThreads: Schema.Array(Schema.String),
+	/** The open review threads left out because their author may not push to the repository. */
+	ignoredThreads: Schema.Array(Url),
+	costUsd: CostUsd,
+	/** Why the run failed, when `status` is `failed`. */
+	error: Schema.NullOr(Schema.String)
+});
+export interface RecheckSummary extends Schema.Schema.Type<typeof RecheckSummary> {}
+
+/** What a run of any kind ends with. A summary without `kind` is a `ship run` one. */
+export const Summary = Schema.Union([ReviewSummary, FixSummary, RecheckSummary, ShipSummary]);
 export type Summary = typeof Summary.Type;

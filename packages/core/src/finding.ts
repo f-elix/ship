@@ -17,6 +17,19 @@ export const Finding = Schema.Struct({
 });
 export interface Finding extends Schema.Schema.Type<typeof Finding> {}
 
+/**
+ * The GitHub login of a PR comment's author, as `github:<login>`: the reviewer of a
+ * finding read from a PR thread rather than reported by one of ship's reviewers.
+ */
+export const GithubAuthor = Schema.String.check(
+	Schema.isPattern(/^github:[A-Za-z0-9-]+(?:\[bot\])?$/u, {
+		expected: 'a GitHub author, as github:<login>'
+	})
+);
+
+/** Who reported a verified finding: one of ship's reviewers, or a PR comment's author. */
+export const FindingAuthor = Schema.Union([ReviewerName, GithubAuthor]);
+
 /** Stable id of a verified finding within a run, assigned when the verifier accepts it. */
 export const FindingId = Schema.NonEmptyString.pipe(Schema.brand('FindingId'));
 export type FindingId = typeof FindingId.Type;
@@ -24,10 +37,12 @@ export type FindingId = typeof FindingId.Type;
 /**
  * A finding the verifier kept: deduplicated, checked against the code, and matched
  * against earlier rounds. `repeats` set means the same problem was already reported in
- * a previous round, which is how a stall is detected.
+ * a previous round, which is how a stall is detected. A finding read from a PR thread is
+ * a verified finding too, whose reviewer is the thread's author.
  */
 export const VerifiedFinding = Schema.Struct({
 	...Finding.fields,
+	reviewer: FindingAuthor,
 	id: FindingId,
 	/** Review round that reported it. */
 	round: PositiveInt,

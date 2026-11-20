@@ -1,9 +1,13 @@
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import {
 	endsFollow,
+	FixRunInfo,
+	FixRunState,
 	InvalidRunStatus,
 	NonNegativeInt,
 	ProjectKey,
+	RecheckRunInfo,
+	RecheckRunState,
 	ReviewNotFound,
 	ReviewRunInfo,
 	ReviewRunState,
@@ -58,6 +62,9 @@ export type NewRun = Omit<typeof RunEvent.cases.RunCreated.Type, '_tag' | 'at'>;
 /** What a new review run starts from: its `ReviewRunCreated` event without the timestamp. */
 export type NewReviewRun = Omit<typeof RunEvent.cases.ReviewRunCreated.Type, '_tag' | 'at'>;
 
+/** What a new fix or recheck run starts from: its `PrRunCreated` event without the timestamp. */
+export type NewPrRun = Omit<typeof RunEvent.cases.PrRunCreated.Type, '_tag' | 'at'>;
+
 /** Statuses the store records; `waiting` is derived by the daemon from the live machine. */
 export type StoredRunStatus = Exclude<RunStatus, 'waiting'>;
 
@@ -82,6 +89,11 @@ export interface RunStoreShape extends RunJournalShape {
 	 * event (seq 1).
 	 */
 	readonly createReview: (run: NewReviewRun) => Effect.Effect<ReviewRunInfo>;
+	/**
+	 * Creates a `ship fix` or `ship recheck` run, by `run.kind`, with status `running` and
+	 * appends its `PrRunCreated` event (seq 1).
+	 */
+	readonly createPrRun: (run: NewPrRun) => Effect.Effect<FixRunInfo | RecheckRunInfo>;
 	/** Appends an event with the run's next seq. Fails with `InvalidRunStatus` once the run finished. */
 	readonly append: (
 		runId: RunId,
@@ -117,18 +129,18 @@ export interface RunStoreShape extends RunJournalShape {
 
 const RunRow = Schema.Struct({
 	id: RunId,
-	kind: Schema.Literals(['ship', 'review']),
+	kind: Schema.Literals(['ship', 'review', 'fix', 'recheck']),
 	project_key: ProjectKey,
 	cwd: Schema.String,
-	/** A `ship run`'s plan dir and branch; `null` for a review run. */
+	/** A `ship run`'s plan dir and branch; `null` for the other kinds. */
 	plan_dir: Schema.NullOr(Schema.String),
 	branch: Schema.NullOr(Schema.String),
-	/** A review run's PR URL; `null` for a `ship run`. */
+	/** The PR a review, fix or recheck run works on; `null` for a `ship run`. */
 	subject: Schema.NullOr(Schema.String),
 	status: RunStatus,
 	state: Schema.String,
 	round: NonNegativeInt,
-	/** The PR a `ship run` opened, or the review a review run posted. */
+	/** The PR a `ship run` opened, or the review a review run posted; `null` for the other kinds. */
 	pr_url: Schema.NullOr(Schema.String),
 	created_at: Schema.Number,
 	updated_at: Schema.Number,
@@ -141,6 +153,7 @@ const decodeRunRow = Schema.decodeUnknownEffect(RunRow);
 const decodeRunInfo = Schema.decodeUnknownEffect(RunInfo);
 const decodeShipRunInfo = Schema.decodeUnknownEffect(ShipRunInfo);
 const decodeReviewRunInfo = Schema.decodeUnknownEffect(ReviewRunInfo);
+const decodePrRunInfo = Schema.decodeUnknownEffect(Schema.Union([FixRunInfo, RecheckRunInfo]));
 
 /** A row as `RunInfo`, still to be decoded; its fields depend on the run's kind. */
 const runInfoFields = (row: RunRow) => {
@@ -156,9 +169,33 @@ const runInfoFields = (row: RunRow) => {
 		updatedAt: DateTime.formatIso(DateTime.makeUnsafe(row.updated_at)),
 		summary: row.summary === null ? null : JSON.parse(row.summary)
 	};
-	return row.kind === 'review'
-		? { ...common, prUrl: row.subject, reviewUrl: row.pr_url }
-		: { ...common, planDir: row.plan_dir, branch: row.branch, prUrl: row.pr_url };
+	switch (row.kind) {
+		case 'review':
+			return { ...common, prUrl: row.subject, reviewUrl: row.pr_url };
+		case 'fix':
+		case 'recheck':
+			return { ...common, prUrl: row.subject };
+		case 'ship':
+			return { ...common, planDir: row.plan_dir, branch: row.branch, prUrl: row.pr_url };
+	}
+};
+
+/**
+ * The run columns a snapshot sets: the round, and the URL `pr_url` holds. A review run
+ * reviews once, as round 1, and fix and recheck runs work on that round's findings.
+ */
+const snapshotColumns = (
+	context: PersistedRunSnapshot['context']
+): Pick<RunRow, 'round' | 'pr_url'> => {
+	switch (context.kind) {
+		case 'review':
+			return { round: 1, pr_url: context.reviewUrl };
+		case 'fix':
+		case 'recheck':
+			return { round: 1, pr_url: null };
+		default:
+			return { round: context.round, pr_url: context.prUrl };
+	}
 };
 
 const toRunInfo = (row: RunRow) => decodeRunInfo(runInfoFields(row));
@@ -172,7 +209,9 @@ const decodeEnvPaths = Schema.decodeUnknownEffect(
 const decodeSnapshotObject = Schema.decodeUnknownEffect(
 	Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 );
-const decodeRunState = Schema.decodeUnknownEffect(Schema.Union([ReviewRunState, RunState]));
+const decodeRunState = Schema.decodeUnknownEffect(
+	Schema.Union([ReviewRunState, FixRunState, RecheckRunState, RunState])
+);
 const encodeReview = Schema.encodeEffect(Schema.fromJsonString(StoredReview));
 const decodeReview = Schema.decodeUnknownEffect(Schema.fromJsonString(StoredReview));
 
@@ -349,6 +388,21 @@ const make = Effect.gen(function* () {
 		return yield* decodeReviewRunInfo(runInfoFields(row));
 	}, orDieStorage);
 
+	const createPrRun = Effect.fn('RunStore.createPrRun')(function* (run: NewPrRun) {
+		const row = yield* insertRun(
+			{
+				kind: run.kind,
+				project_key: run.projectKey,
+				cwd: run.repoDir,
+				plan_dir: null,
+				branch: null,
+				subject: run.prUrl
+			},
+			(_runId, at) => RunEvent.cases.PrRunCreated.make({ ...run, at })
+		);
+		return yield* decodePrRunInfo(runInfoFields(row));
+	}, orDieStorage);
+
 	const append = Effect.fn('RunStore.append')(function* (runId: RunId, event: AppendableEvent) {
 		const write = Effect.gen(function* () {
 			yield* updateRun(runId, isUnfinished, {});
@@ -397,9 +451,7 @@ const make = Effect.gen(function* () {
 			const touched = yield* sql`
 				UPDATE runs SET ${sql.update({
 					state: statePath(snapshot.value),
-					// A review run reviews once, as round 1.
-					round: context.kind === 'review' ? 1 : context.round,
-					pr_url: context.kind === 'review' ? context.reviewUrl : context.prUrl,
+					...snapshotColumns(context),
 					updated_at: now
 				})} WHERE id = ${runId} RETURNING id
 			`;
@@ -633,6 +685,7 @@ const make = Effect.gen(function* () {
 	const store: RunStoreShape = {
 		create,
 		createReview,
+		createPrRun,
 		append,
 		events,
 		follow,

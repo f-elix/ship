@@ -5,6 +5,8 @@ import {
 	ChecksAborted,
 	DaemonBusy,
 	Git,
+	initialFixRunState,
+	initialRecheckRunState,
 	initialReviewRunState,
 	initialRunState,
 	InvalidRunStatus,
@@ -13,6 +15,8 @@ import {
 	resumeRun,
 	RunJournal,
 	ShipRpcs,
+	startFix,
+	startRecheck,
 	startReview,
 	startRun,
 	TerminalRunStatus,
@@ -30,7 +34,9 @@ import { RunStore, type StoredRunStatus } from '@ship/store';
 import { Context, Deferred, Effect, Queue, Ref, Schema, Stream } from 'effect';
 import type { Rpc, RpcGroup } from 'effect/rpc';
 import {
+	checkFixPreconditions,
 	checkPreconditions,
+	checkRecheckPreconditions,
 	checkReviewPreconditions,
 	loadProjectConfig
 } from './preconditions.ts';
@@ -74,11 +80,13 @@ export const handlers = ShipRpcs.toLayer(
 		const control = yield* DaemonControl;
 		const store = yield* RunStore;
 		const host = yield* RunHost;
-		// The services the preconditions use, captured once for every `run`, `review` and
-		// `runChecks` call.
+		// The services the preconditions use, captured once for every `run`, `review`, `fix`,
+		// `recheck` and `runChecks` call.
 		const preconditions = yield* Effect.context<
 			| Effect.Services<ReturnType<typeof checkPreconditions>>
 			| Effect.Services<ReturnType<typeof checkReviewPreconditions>>
+			| Effect.Services<ReturnType<typeof checkFixPreconditions>>
+			| Effect.Services<ReturnType<typeof checkRecheckPreconditions>>
 		>();
 		const git = yield* Git;
 		const checks = yield* Checks;
@@ -207,6 +215,88 @@ export const handlers = ShipRpcs.toLayer(
 						});
 						yield* host
 							.launch(runId, startReview(state))
+							.pipe(Effect.catchTag('InvalidRunStatus', Effect.die));
+						return runId;
+					})
+				);
+				return { runId };
+			}),
+
+			fix: Effect.fn('Daemon.fix')(function* (request) {
+				const start = yield* checkFixPreconditions(request).pipe(
+					Effect.provide(preconditions)
+				);
+				if (!(yield* host.accepting)) return yield* Effect.interrupt;
+				// Created and launched as one step, like `run`.
+				const runId = yield* Effect.uninterruptible(
+					Effect.gen(function* () {
+						const { runId } = yield* store.createPrRun({
+							kind: 'fix',
+							projectKey: start.projectKey,
+							repoDir: request.cwd,
+							prUrl: start.pr.url,
+							prNumber: start.pr.number,
+							baseSha: start.pr.headSha,
+							headSha: start.pr.headSha,
+							source: request.source,
+							findings: start.loaded.findings,
+							ignoredThreads: start.loaded.ignoredThreads
+						});
+						const state = initialFixRunState({
+							runId,
+							projectKey: start.projectKey,
+							cwd: request.cwd,
+							env: request.env,
+							config: start.config,
+							pr: start.pr,
+							findings: start.loaded.findings,
+							push: start.push,
+							runChecks: request.checks
+						});
+						yield* host
+							.launch(runId, startFix(state))
+							.pipe(Effect.catchTag('InvalidRunStatus', Effect.die));
+						return runId;
+					})
+				);
+				return { runId };
+			}),
+
+			recheck: Effect.fn('Daemon.recheck')(function* (request) {
+				const start = yield* checkRecheckPreconditions(request).pipe(
+					Effect.provide(preconditions)
+				);
+				if (!(yield* host.accepting)) return yield* Effect.interrupt;
+				// Created and launched as one step, like `run`.
+				const runId = yield* Effect.uninterruptible(
+					Effect.gen(function* () {
+						const { runId } = yield* store.createPrRun({
+							kind: 'recheck',
+							projectKey: start.projectKey,
+							repoDir: request.cwd,
+							prUrl: start.pr.url,
+							prNumber: start.pr.number,
+							baseSha: start.baseSha,
+							headSha: start.pr.headSha,
+							source: request.source,
+							findings: start.loaded.findings,
+							ignoredThreads: start.loaded.ignoredThreads
+						});
+						const state = initialRecheckRunState({
+							runId,
+							projectKey: start.projectKey,
+							cwd: request.cwd,
+							env: request.env,
+							config: start.config,
+							baseSha: start.baseSha,
+							pr: start.pr,
+							intent: start.loaded.intent,
+							findings: start.loaded.findings,
+							threads: start.loaded.threads,
+							resolve: !request.local
+						});
+						yield* host
+							.launch(runId, startRecheck(state))
 							.pipe(Effect.catchTag('InvalidRunStatus', Effect.die));
 						return runId;
 					})

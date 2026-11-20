@@ -5,6 +5,7 @@
 import { Effect, Schema } from 'effect';
 import { Checkpoint } from './checkpoint.ts';
 import type { VerifiedFinding } from './finding.ts';
+import { findingMarker } from './findings-source.ts';
 import { Gh, type ReviewComment, type ReviewEvent } from './gh.ts';
 import { diffTargetPath, Git } from './git.ts';
 import { primitiveScopeFields } from './primitive-scope.ts';
@@ -72,12 +73,14 @@ const describe = (finding: VerifiedFinding): string =>
 const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
 
 /**
- * The review `post` sends for `findings` over `diff`. A finding on a line in the diff
- * becomes an inline comment; the rest are listed in the body as `file:line`, or `file`
+ * The review `post` sends for review `reviewId`'s `findings` over `diff`. A finding on a
+ * line in the diff becomes an inline comment, which carries its {@link findingMarker} so a
+ * later `fix` or `recheck` finds the finding's thread; the rest are listed in the body as `file:line`, or `file`
  * when the finding has no line. Verified must-fix findings request changes; anything else
  * only comments, and ship never approves.
  */
 export const reviewToPost = (
+	reviewId: ReviewId,
 	findings: ReadonlyArray<VerifiedFinding>,
 	diff: string
 ): ReviewToPost => {
@@ -110,7 +113,7 @@ export const reviewToPost = (
 		comments: inline.map((finding) => ({
 			path: finding.file,
 			line: finding.line,
-			body: describe(finding)
+			body: `${describe(finding)}\n\n${findingMarker(reviewId, finding.id)}`
 		})),
 		inBody: rest.length
 	};
@@ -167,7 +170,7 @@ export const postPrimitive = {
 				});
 			}
 			const diff = yield* git.diff(input, { from: subject.baseSha, to: subject.headSha });
-			const toPost = reviewToPost(stored.findings, diff);
+			const toPost = reviewToPost(stored.id, stored.findings, diff);
 			const marker = reviewMarker(stored.id);
 			const url = yield* checkpoint.once(
 				'post',

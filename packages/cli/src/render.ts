@@ -1,4 +1,6 @@
 import type {
+	FixSummary,
+	RecheckSummary,
 	ReviewSummary,
 	RunEvent,
 	RunInfo,
@@ -15,6 +17,11 @@ const shortSha = (sha: string) => sha.slice(0, 7);
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
 /** Keeps event lines to one line; `ship logs --json` has the full text. */
 const firstLine = (text: string) => text.split('\n', 1)[0] ?? '';
+/** Notes the review threads a fix or recheck left out, written by someone who may not push. */
+const ignoredNote = (urls: ReadonlyArray<string>) =>
+	urls.length === 0
+		? ''
+		: `; ignored ${plural(urls.length, 'thread')} by authors who may not push`;
 const clock = (at: DateTime.Utc) => DateTime.formatIso(at).slice(11, 19);
 
 /**
@@ -30,6 +37,8 @@ export const makeEventFormatter = () => {
 				return `run created on ${event.branch} at ${shortSha(event.baseSha)}`;
 			case 'ReviewRunCreated':
 				return `review of ${event.prUrl} created for ${shortSha(event.baseSha)}..${shortSha(event.headSha)}`;
+			case 'PrRunCreated':
+				return `${event.kind} of ${plural(event.findings.length, 'finding')} on ${event.prUrl} created at ${shortSha(event.headSha)}${ignoredNote(event.ignoredThreads)}`;
 			case 'StateChanged':
 				return `state ${event.from} -> ${event.to}`;
 			case 'StepStarted':
@@ -75,6 +84,14 @@ export const makeEventFormatter = () => {
 				return `review stored as ${event.reviewId}`;
 			case 'PrReviewPosted':
 				return `review posted (${event.event === 'REQUEST_CHANGES' ? 'changes requested' : 'comment'}, ${plural(event.inline, 'inline comment')}, ${event.inBody} in the body): ${event.url}`;
+			case 'FindingsRechecked': {
+				const fixed = event.findings.filter((finding) => finding.status === 'fixed');
+				return `rechecked ${plural(event.findings.length, 'finding')}: ${fixed.length} fixed, ${event.findings.length - fixed.length} unfixed`;
+			}
+			case 'ThreadResolved':
+				return `resolved the thread of ${event.findingId}`;
+			case 'BranchPushed':
+				return `pushed ${shortSha(event.sha)} to ${event.ref}`;
 			case 'RunFinished': {
 				const url =
 					event.summary.kind === 'review' ? event.summary.reviewUrl : event.summary.prUrl;
@@ -118,11 +135,24 @@ export const table = (rows: ReadonlyArray<ReadonlyArray<string>>): string => {
 
 const when = (at: DateTime.Utc) => DateTime.formatIso(at).slice(0, 19).replace('T', ' ');
 
-/** What a run works on: a `ship run`'s branch, or the PR a review run reviews. */
-const subject = (run: RunInfo): string => (run.kind === 'review' ? run.prUrl : run.branch);
+/** What a run works on: a `ship run`'s branch, or the PR any other run is about. */
+const subject = (run: RunInfo): string => (run.kind === 'ship' ? run.branch : run.prUrl);
 
-/** What a run produced: the PR a `ship run` opened, or the review a review run posted. */
-const output = (run: RunInfo): string | null => (run.kind === 'review' ? run.reviewUrl : run.prUrl);
+/**
+ * What a run produced: the PR a `ship run` opened, or the review a review run posted.
+ * Fix and recheck runs work on a PR that already exists, so they have nothing to show.
+ */
+const output = (run: RunInfo): string | null => {
+	switch (run.kind) {
+		case 'ship':
+			return run.prUrl;
+		case 'review':
+			return run.reviewUrl;
+		case 'fix':
+		case 'recheck':
+			return null;
+	}
+};
 
 /** One row per run, most recent first, as the daemon lists them. */
 export const runTable = (runs: ReadonlyArray<RunInfo>): string =>
@@ -140,7 +170,7 @@ export const runTable = (runs: ReadonlyArray<RunInfo>): string =>
 	]);
 
 /** `label:` and one line per finding; nothing when there are none. */
-const findingLines = (label: string, list: Summary['nits']): Array<string> =>
+const findingLines = (label: string, list: ShipSummary['nits']): Array<string> =>
 	list.length === 0
 		? []
 		: [
@@ -169,6 +199,67 @@ const reviewSummaryLines = (summary: ReviewSummary): Array<string> => [
 	...findingLines('nits', summary.nits)
 ];
 
+/** The threads left out as written by someone who may not push to the repository. */
+const ignoredLines = (urls: ReadonlyArray<string>): Array<string> =>
+	urls.length === 0
+		? []
+		: ['ignored threads (author may not push):', ...urls.map((url) => `  ${url}`)];
+
+const fixSummaryLines = (summary: FixSummary): Array<string> => [
+	`cost: ${usd(summary.costUsd)}`,
+	...(summary.error === null ? [] : [`error: ${summary.error}`]),
+	`commits: ${summary.commits.length === 0 ? '-' : summary.commits.map(shortSha).join(', ')}`,
+	`pushed: ${summary.pushed ? 'yes' : 'no'}`,
+	...findingLines('findings', summary.findings),
+	...ignoredLines(summary.ignoredThreads)
+];
+
+const recheckSummaryLines = (summary: RecheckSummary): Array<string> => {
+	const withStatus = (status: 'fixed' | 'unfixed') =>
+		summary.findings
+			.filter((finding) => finding.status === status)
+			.map((finding) => finding.finding);
+	return [
+		`cost: ${usd(summary.costUsd)}`,
+		...(summary.error === null ? [] : [`error: ${summary.error}`]),
+		`resolved threads: ${summary.resolvedThreads.length}`,
+		...findingLines('fixed', withStatus('fixed')),
+		...findingLines('unfixed', withStatus('unfixed')),
+		...ignoredLines(summary.ignoredThreads)
+	];
+};
+
+const summaryLines = (summary: Summary): Array<string> => {
+	switch (summary.kind) {
+		case 'review':
+			return reviewSummaryLines(summary);
+		case 'fix':
+			return fixSummaryLines(summary);
+		case 'recheck':
+			return recheckSummaryLines(summary);
+		default:
+			return shipSummaryLines(summary);
+	}
+};
+
+/** The lines that tell a run of one kind from another in `ship status <id>`. */
+const kindLines = (run: RunInfo): Array<string> => {
+	switch (run.kind) {
+		case 'review':
+			return [`pr: ${run.prUrl}`, `review: ${run.reviewUrl ?? '-'}`];
+		case 'fix':
+		case 'recheck':
+			return [`pr: ${run.prUrl}`];
+		case 'ship':
+			return [
+				`branch: ${run.branch}`,
+				`plan: ${run.planDir}`,
+				`round: ${run.round}`,
+				`pr: ${run.prUrl ?? '-'}`
+			];
+	}
+};
+
 /** A run's details for `ship status <id>`. */
 export const runDetails = (run: RunInfo): string =>
 	[
@@ -178,21 +269,10 @@ export const runDetails = (run: RunInfo): string =>
 		`state: ${run.state}`,
 		`project: ${run.projectKey}`,
 		`cwd: ${run.cwd}`,
-		...(run.kind === 'review'
-			? [`pr: ${run.prUrl}`, `review: ${run.reviewUrl ?? '-'}`]
-			: [
-					`branch: ${run.branch}`,
-					`plan: ${run.planDir}`,
-					`round: ${run.round}`,
-					`pr: ${run.prUrl ?? '-'}`
-				]),
+		...kindLines(run),
 		`created: ${when(run.createdAt)}`,
 		`updated: ${when(run.updatedAt)}`,
-		...(run.summary === null
-			? []
-			: run.summary.kind === 'review'
-				? reviewSummaryLines(run.summary)
-				: shipSummaryLines(run.summary))
+		...(run.summary === null ? [] : summaryLines(run.summary))
 	].join('\n');
 
 /**
@@ -218,19 +298,25 @@ export const exitCodeFor = (status: RunStatus): number => {
 
 /**
  * The exit code for the summary a run ended with. A `ship review` run that is done exits 2
- * when it verified must-fix findings and 0 otherwise; anything else exits with the code
+ * when it verified must-fix findings, and a `ship recheck` run that is done exits 2 when
+ * a finding is still unfixed; both exit 0 otherwise. Anything else exits with the code
  * {@link exitCodeFor} gives its status.
  */
-export const exitCodeForSummary = (summary: Summary): number =>
-	summary.kind === 'review' && summary.status === 'done'
-		? summary.mustFix.length > 0
-			? 2
-			: 0
-		: exitCodeFor(summary.status);
+export const exitCodeForSummary = (summary: Summary): number => {
+	if (summary.status !== 'done') return exitCodeFor(summary.status);
+	switch (summary.kind) {
+		case 'review':
+			return summary.mustFix.length > 0 ? 2 : 0;
+		case 'recheck':
+			return summary.findings.some((finding) => finding.status === 'unfixed') ? 2 : 0;
+		default:
+			return exitCodeFor(summary.status);
+	}
+};
 
 /**
  * Exit code when Ctrl-C (or SIGTERM) ends a command: 130, the shell convention for a command
- * ended by SIGINT, distinct from the run outcomes 0, 1 and 2. `ship run`, `ship review`
- * and `ship resume` detach from a run that already started, so it keeps going.
+ * ended by SIGINT, distinct from the run outcomes 0, 1 and 2. `ship run`, `ship review`,
+ * `ship fix`, `ship recheck` and `ship resume` detach from a run that already started, so it keeps going.
  */
 export const DETACHED_EXIT_CODE = 130;

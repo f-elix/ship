@@ -47,7 +47,7 @@ interface PassInProgress {
  * complete passes. A complete pass is listed even when its step failed afterwards, e.g.
  * on the commit: the log records what ran, so its checks did pass.
  */
-const checkRounds = (events: ReadonlyArray<RunEvent>): ReadonlyArray<CheckRound> => {
+export const checkRounds = (events: ReadonlyArray<RunEvent>): ReadonlyArray<CheckRound> => {
 	const passes = new Map<string, PassInProgress>();
 	events
 		.filter(

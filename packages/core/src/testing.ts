@@ -34,10 +34,9 @@ import {
 import {
 	Gh,
 	GhError,
-	parsePrUrl,
-	prRepoKey,
 	type CreatePrInput,
 	type GhShape,
+	type ReviewThread,
 	type SubmitReviewInput
 } from './gh.ts';
 import {
@@ -49,6 +48,7 @@ import {
 	type GitShape
 } from './git.ts';
 import type { Locks } from './locks.ts';
+import { parsePrUrl, prRepoKey } from './pr-url.ts';
 import { GitSha, ProjectKey, SessionId, type Step } from './primitives.ts';
 import { projectKeyOf } from './project-key.ts';
 
@@ -79,6 +79,12 @@ export interface FakeGitState {
 	/** What `addedLines` returns, for any range. */
 	readonly addedLines: Readonly<Record<string, ReadonlyArray<string>>>;
 	readonly pushes: ReadonlyArray<string>;
+	/** Every `pushHead`, in order, with the HEAD it pushed. */
+	readonly headPushes: ReadonlyArray<{
+		readonly remote: string;
+		readonly ref: string;
+		readonly sha: GitSha;
+	}>;
 	readonly excluded: ReadonlyArray<string>;
 	/** What `fetchRef` resolves each ref to; an unlisted ref resolves to `headSha`. */
 	readonly remoteRefs: Readonly<Record<string, GitSha>>;
@@ -95,6 +101,11 @@ export interface GitFakeShape {
 	readonly edit: (files: ReadonlyArray<ChangedFile>) => Effect.Effect<void>;
 	/** Makes `method` fail with a `GitError` carrying `stderr`, until cleared with `update`. */
 	readonly fail: (method: keyof GitShape, stderr: string) => Effect.Effect<void>;
+	/**
+	 * Runs `hook` inside every later `pushHead`, after the push is recorded: a hook that
+	 * never ends stands for a crash after the remote took the push.
+	 */
+	readonly afterPushHead: (hook: Effect.Effect<void>) => Effect.Effect<void>;
 }
 
 export class GitFake extends Context.Service<GitFake, GitFakeShape>()('@ship/core/GitFake') {
@@ -124,12 +135,14 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 			trackedFiles: [],
 			addedLines: {},
 			pushes: [],
+			headPushes: [],
 			excluded: [],
 			remoteRefs: {},
 			fetches: [],
 			failures: {},
 			...initial
 		});
+		const pushHook = yield* Ref.make<Effect.Effect<void>>(Effect.void);
 		const counter = yield* Ref.make(0);
 		const nextSha = Effect.map(
 			Ref.updateAndGet(counter, (n) => n + 1),
@@ -200,6 +213,22 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 				Effect.flatMap(read('push'), (current) =>
 					Ref.set(state, { ...current, pushes: [...current.pushes, branch] })
 				),
+			pushHead: (_repo, { remote, ref }) =>
+				Effect.flatMap(read('pushHead'), (current) =>
+					Ref.set(state, {
+						...current,
+						headPushes: [...current.headPushes, { remote, ref, sha: current.headSha }]
+					}).pipe(Effect.andThen(Effect.flatten(Ref.get(pushHook))))
+				),
+			// History is `baseSha` then `commits`, in order; any other sha is unrelated.
+			isAncestor: (_repo, ancestor, descendant) =>
+				Effect.map(read('isAncestor'), (current) => {
+					const chain = [current.baseSha, ...current.commits.map((commit) => commit.sha)];
+					const at = chain.indexOf(ancestor);
+					return (
+						ancestor === descendant || (at !== -1 && chain.indexOf(descendant) >= at)
+					);
+				}),
 			excludePath: (_repo, path) =>
 				Effect.gen(function* () {
 					const current = yield* read('excludePath');
@@ -219,6 +248,7 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 		const fake: GitFakeShape = {
 			state: Ref.get(state),
 			update: (f) => Ref.update(state, f),
+			afterPushHead: (hook) => Ref.set(pushHook, hook),
 			edit: (files) =>
 				Ref.update(state, (current) => ({
 					...current,
@@ -468,6 +498,20 @@ export interface FakePr extends CreatePrInput {
 	readonly number: number;
 	/** The head `viewPr` reports; `GitFake`'s default base sha when absent. */
 	readonly headSha?: GitSha;
+	/** The PR comes from a fork; `false` when absent. */
+	readonly isCrossRepository?: boolean;
+	/** Maintainers may push to the fork's branch; `false` when absent. */
+	readonly maintainerCanModify?: boolean;
+	/** The repository of the PR's branch; the PR's own repository when absent. */
+	readonly headRepository?: { readonly owner: string; readonly name: string } | null;
+}
+
+/** A review thread in the fake GitHub, resolved or not. */
+export interface FakeThread extends ReviewThread {
+	readonly prUrl: string;
+	readonly resolved: boolean;
+	/** An outdated thread is on a line the PR's diff no longer has. */
+	readonly outdated: boolean;
 }
 
 /** A review posted through the fake, with the URL it got. */
@@ -487,6 +531,23 @@ export interface GhFakeShape {
 	 * that never ends stands for a crash after GitHub accepted the review.
 	 */
 	readonly afterSubmit: (hook: Effect.Effect<void>) => Effect.Effect<void>;
+	/** Every review thread, oldest first; posting a review opens one per inline comment. */
+	readonly threads: Effect.Effect<ReadonlyArray<FakeThread>>;
+	/**
+	 * Opens a review thread on a PR, as a reviewer commenting on GitHub would; one who may
+	 * push to the repository unless `authorCanWrite` says otherwise.
+	 */
+	readonly addThread: (
+		thread: Omit<FakeThread, 'id' | 'url' | 'resolved' | 'outdated' | 'authorCanWrite'> &
+			Partial<Pick<FakeThread, 'resolved' | 'outdated' | 'authorCanWrite'>>
+	) => Effect.Effect<FakeThread>;
+	/**
+	 * Runs `hook` inside every later `resolveThread`, after the thread is resolved: a hook
+	 * that never ends stands for a crash after GitHub resolved the thread.
+	 */
+	readonly afterResolve: (hook: Effect.Effect<void>) => Effect.Effect<void>;
+	/** Every `resolveThread` call's thread id, in order, including repeats. */
+	readonly resolveCalls: Effect.Effect<ReadonlyArray<string>>;
 	/** Makes `method` fail with a `GhError` carrying `stderr`, until cleared with `succeed`. */
 	readonly fail: (method: keyof GhShape, stderr: string) => Effect.Effect<void>;
 	readonly succeed: (method: keyof GhShape) => Effect.Effect<void>;
@@ -499,6 +560,23 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 			const prs = yield* Ref.make<ReadonlyArray<FakePr>>([]);
 			const reviews = yield* Ref.make<ReadonlyArray<FakeReview>>([]);
 			const submitHook = yield* Ref.make<Effect.Effect<void>>(Effect.void);
+			const threads = yield* Ref.make<ReadonlyArray<FakeThread>>([]);
+			const resolveHook = yield* Ref.make<Effect.Effect<void>>(Effect.void);
+			const resolveCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+
+			const addThread: GhFakeShape['addThread'] = (thread) =>
+				Ref.modify(threads, (current): [FakeThread, ReadonlyArray<FakeThread>] => {
+					const n = current.length + 1;
+					const created: FakeThread = {
+						resolved: false,
+						outdated: false,
+						authorCanWrite: true,
+						...thread,
+						id: `PRRT_${n}`,
+						url: `${thread.prUrl}#discussion_r${n}`
+					};
+					return [created, [...current, created]];
+				});
 			const failures = yield* Ref.make<Partial<Record<keyof GhShape, GhError>>>({});
 
 			const guard = (method: keyof GhShape) =>
@@ -567,7 +645,14 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 										title: pr.title,
 										body: pr.body,
 										baseRef: pr.base,
-										headSha: pr.headSha ?? DEFAULT_BASE
+										headSha: pr.headSha ?? DEFAULT_BASE,
+										headRef: pr.head,
+										headRepository:
+											pr.headRepository === undefined
+												? { owner: 'f-elix', name: 'example' }
+												: pr.headRepository,
+										isCrossRepository: pr.isCrossRepository ?? false,
+										maintainerCanModify: pr.maintainerCanModify ?? false
 									});
 						})
 					),
@@ -576,7 +661,47 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 						Ref.modify(reviews, (current): [string, ReadonlyArray<FakeReview>] => {
 							const url = `${input.prUrl}#pullrequestreview-${current.length + 1}`;
 							return [url, [...current, { ...input, url }]];
-						}).pipe(Effect.tap(() => Effect.flatten(Ref.get(submitHook))))
+						}).pipe(
+							Effect.tap(() =>
+								Effect.forEach(input.comments, (comment) =>
+									addThread({
+										prUrl: input.prUrl,
+										path: comment.path,
+										line: comment.line,
+										author: 'ship-bot',
+										body: comment.body
+									})
+								)
+							),
+							Effect.tap(() => Effect.flatten(Ref.get(submitHook)))
+						)
+					),
+				reviewThreads: (_repo, prUrl) =>
+					Effect.andThen(guard('reviewThreads'), () =>
+						Effect.map(Ref.get(threads), (current) =>
+							current
+								.filter(
+									(thread) =>
+										thread.prUrl === prUrl &&
+										!thread.resolved &&
+										!thread.outdated
+								)
+								.map((thread): ReviewThread =>
+									Struct.omit(thread, ['prUrl', 'resolved', 'outdated'])
+								)
+						)
+					),
+				resolveThread: (_repo, { threadId }) =>
+					Effect.andThen(guard('resolveThread'), () =>
+						Effect.gen(function* () {
+							yield* Ref.update(resolveCalls, (current) => [...current, threadId]);
+							yield* Ref.update(threads, (current) =>
+								current.map((thread) =>
+									thread.id === threadId ? { ...thread, resolved: true } : thread
+								)
+							);
+							yield* Effect.flatten(Ref.get(resolveHook));
+						})
 					),
 				findReview: (_repo, { prUrl, marker }) =>
 					Effect.andThen(guard('findReview'), () =>
@@ -595,6 +720,10 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 				reviews: Ref.get(reviews),
 				addPr: (pr) => add(pr),
 				afterSubmit: (hook) => Ref.set(submitHook, hook),
+				threads: Ref.get(threads),
+				addThread,
+				afterResolve: (hook) => Ref.set(resolveHook, hook),
+				resolveCalls: Ref.get(resolveCalls),
 				fail: (method, stderr) =>
 					Ref.update(failures, (current) => ({
 						...current,

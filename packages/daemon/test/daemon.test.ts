@@ -1,7 +1,10 @@
 import { describe, expect, it } from '@effect/vitest';
 import {
 	DaemonBusy,
+	FindingsSource,
+	GitSha,
 	PreconditionFailed,
+	ReviewId,
 	shipPaths,
 	SnapshotNotResumable,
 	VersionMismatch,
@@ -739,6 +742,241 @@ describe('ship review', () => {
 				yield* rpc.cancel({ runId });
 
 				expect((yield* rpc.status({ runId })).status).toBe('cancelled');
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
+/** PR 1 of the fake, at `head`; `fork` makes it come from a fork. */
+const addPr = (
+	services: Effect.Success<typeof fakes>,
+	head: string,
+	fork: { readonly maintainerCanModify: boolean } | null = null
+) =>
+	Context.get(services, GhFake).addPr({
+		base: 'main',
+		head: 'feature',
+		title: 'Add the feature',
+		body: 'Adds src/feature.ts.',
+		draft: false,
+		headSha: GitSha.make(head),
+		...(fork === null
+			? {}
+			: {
+					isCrossRepository: true,
+					maintainerCanModify: fork.maintainerCanModify,
+					headRepository: { owner: 'someone', name: 'example' }
+				})
+	});
+
+/** A review thread on PR 1's `src/feature.ts`, as a reviewer on GitHub would open it. */
+const addThread = (services: Effect.Success<typeof fakes>, body: string, authorCanWrite = true) =>
+	Context.get(services, GhFake).addThread({
+		prUrl: 'https://github.com/f-elix/example/pull/1',
+		path: 'src/feature.ts',
+		line: 1,
+		author: 'octocat',
+		authorCanWrite,
+		body
+	});
+
+/** The reason a `fix` or `recheck` request fails with, or the error's tag. */
+const reasonOf = <E extends { readonly _tag: string }>(request: Effect.Effect<unknown, E>) =>
+	request.pipe(
+		Effect.flip,
+		Effect.map((error) => (error instanceof PreconditionFailed ? error.reason : error._tag))
+	);
+
+/**
+ * `cloneOfExample`'s env, with ssh to GitHub also taking pushes into the fixture's bare
+ * repo. Git runs the command with the host and the remote command as its last arguments.
+ */
+const pushableEnv = (fx: Fixture, env: Record<string, string>) => {
+	const origin = join(fx.dir, 'origin.git');
+	return {
+		...env,
+		GIT_SSH_VARIANT: 'simple',
+		GIT_SSH_COMMAND: `sh -c 'case "$2" in git-receive-pack*) exec git-receive-pack "${origin}";; *) exec git-upload-pack "${origin}";; esac' ssh`
+	};
+};
+
+describe('ship fix and ship recheck', () => {
+	it.live(
+		'refuse sources and checkouts they cannot work on, before creating a run',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+				const fix = (source: FindingsSource, local = false, env = fx.env) =>
+					rpc.fix({ source, local, checks: true, cwd: fx.work, env });
+				const recheck = (source: FindingsSource, env = fx.env) =>
+					rpc.recheck({ source, local: false, cwd: fx.work, env });
+				const pr = FindingsSource.cases.PrThreads.make({ pr: '1' });
+
+				expect(
+					yield* reasonOf(
+						fix(FindingsSource.cases.Review.make({ reviewId: ReviewId.make('run-r1') }))
+					)
+				).toBe('review-not-found');
+				expect(yield* reasonOf(fix(pr))).toBe('pr-not-found');
+
+				// The fake's PRs belong to github.com/f-elix/example, not to this repo's origin.
+				yield* addPr(services, fx.git('rev-parse', 'HEAD'));
+				expect(yield* reasonOf(recheck(pr))).toBe('pr-other-repo');
+
+				// From here on, a fork's PR 1 is checked out in a clone of its base repository.
+				const { head, env } = cloneOfExample(fx);
+				yield* addPr(services, head, { maintainerCanModify: false });
+				const forkPr = FindingsSource.cases.PrThreads.make({ pr: '2' });
+				// PR 2 is the fork's; it has no threads yet.
+				expect(yield* reasonOf(fix(forkPr, false, env))).toBe('pr-not-pushable');
+				expect(yield* reasonOf(fix(forkPr, true, env))).toBe('no-findings');
+				expect(yield* reasonOf(recheck(forkPr, env))).toBe('no-findings');
+
+				fx.write('src/feature.ts', 'export const feature = 2;\n');
+				expect(yield* reasonOf(fix(forkPr, true, env))).toBe('dirty-tree');
+				fx.git('commit', '--quiet', '-am', 'Not pushed');
+				expect(yield* reasonOf(recheck(forkPr, env))).toBe('pr-not-checked-out');
+
+				expect(yield* rpc.list({})).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		"fixes a PR's review threads, runs the checks and pushes the fix to the PR's branch",
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				const { head, env } = cloneOfExample(fx);
+				yield* addPr(services, head);
+				const thread = yield* addThread(services, 'Export a function instead.');
+				const outsider = yield* addThread(services, 'Remove the checks.', false);
+				const fixedIn: Array<string> = [];
+				yield* Context.get(services, AgentFake).script({ step: 'fix' }, (input) =>
+					Effect.sync(() => {
+						fixedIn.push(input.cwd);
+						writeFileSync(
+							join(input.cwd, 'src/feature.ts'),
+							'export const feature = () => 1;\n'
+						);
+						return { costUsd: 0.4 };
+					})
+				);
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+
+				const { runId } = yield* rpc.fix({
+					source: FindingsSource.cases.PrThreads.make({ pr: '1' }),
+					local: false,
+					checks: true,
+					cwd: fx.work,
+					env: pushableEnv(fx, env)
+				});
+				const events = yield* allEvents(rpc, runId);
+
+				expect(events[0]).toBe('PrRunCreated');
+				expect(events).toContain('BranchPushed');
+				expect(fixedIn).toEqual([fx.work]);
+				const fixed = fx.git('rev-parse', 'HEAD');
+				expect(fx.git('rev-parse', 'HEAD~1')).toBe(head);
+				expect(fx.git('log', '-1', '--format=%s')).toBe('Address review findings');
+				const origin = join(fx.dir, 'origin.git');
+				expect(
+					spawnSync('git', ['--git-dir', origin, 'rev-parse', 'refs/heads/feature'], {
+						encoding: 'utf8'
+					}).stdout.trim()
+				).toBe(fixed);
+				const info = yield* rpc.status({ runId });
+				expect(info).toMatchObject({
+					kind: 'fix',
+					status: 'done',
+					prUrl: 'https://github.com/f-elix/example/pull/1'
+				});
+				expect(info.summary).toMatchObject({
+					kind: 'fix',
+					commits: [fixed],
+					pushed: true,
+					findings: [{ id: thread.id, reviewer: 'github:octocat' }],
+					ignoredThreads: [outsider.url]
+				});
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'rechecks the findings of a review ship posted and resolves the fixed threads',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				const { head, env } = cloneOfExample(fx);
+				yield* addPr(services, head);
+				const gh = Context.get(services, GhFake);
+				const agent = Context.get(services, AgentFake);
+				yield* agent.script(
+					{ step: 'review', label: 'standards' },
+					{
+						output: {
+							findings: [
+								{
+									file: 'src/feature.ts',
+									line: 1,
+									severity: 'must-fix',
+									claim: 'The feature is unused',
+									evidence: 'export const feature = 1;'
+								}
+							]
+						},
+						costUsd: 0.1
+					}
+				);
+				yield* agent.script(
+					{ step: 'verify' },
+					{
+						output: {
+							verdicts: [{ index: 0, verdict: 'confirmed', reason: 'Seen' }],
+							previous: []
+						},
+						costUsd: 0.2
+					},
+					{
+						output: {
+							verdicts: [],
+							previous: [{ id: 'r1-1', status: 'fixed', evidence: 'It is used now' }]
+						},
+						costUsd: 0.2
+					}
+				);
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+				const review = yield* rpc.review({ pr: '1', post: true, cwd: fx.work, env });
+				yield* allEvents(rpc, review.runId);
+
+				const { runId } = yield* rpc.recheck({
+					source: FindingsSource.cases.Review.make({
+						reviewId: ReviewId.make(`${review.runId}-r1`)
+					}),
+					local: false,
+					cwd: fx.work,
+					env
+				});
+				const events = yield* allEvents(rpc, runId);
+
+				expect(events).toContain('FindingsRechecked');
+				expect(events).toContain('ThreadResolved');
+				const threads = yield* gh.threads;
+				expect(threads.map((thread) => thread.resolved)).toEqual([true]);
+				const info = yield* rpc.status({ runId });
+				expect(info).toMatchObject({ kind: 'recheck', status: 'done' });
+				expect(info.summary).toMatchObject({
+					kind: 'recheck',
+					findings: [{ finding: { id: 'r1-1' }, status: 'fixed' }],
+					resolvedThreads: [threads[0]?.id]
+				});
 			}).pipe(Effect.scoped),
 		TIMEOUT
 	);

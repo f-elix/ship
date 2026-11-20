@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { DaemonBusy, FindingId, RunId, RunStatus, shipPaths, type GitSha } from '@ship/core';
-import { AgentFake, GhFake } from '@ship/core/testing';
+import { AgentFake, GhFake, type AgentScript } from '@ship/core/testing';
 import {
 	addsFeature,
 	client,
@@ -19,7 +19,7 @@ import {
 	type Fixture
 } from '@ship/daemon/testing';
 import { ConfigProvider, Context, Duration, Effect, Exit, Fiber, Scope } from 'effect';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { busyMessage } from '../src/connection.ts';
 import { Invocation } from '../src/invocation.ts';
@@ -40,6 +40,13 @@ const hangingDaemon = (fx: Fixture) =>
 	});
 
 const parseSummary = (stdout: string) => JSON.parse(stdout) as Record<string, unknown>;
+
+/** A fix call that rewrites `src/feature.ts`, as a real agent would. */
+const addsFeatureFix: AgentScript = (input) =>
+	Effect.sync(() => {
+		writeFileSync(join(input.cwd, 'src/feature.ts'), 'export const feature = () => 1;\n');
+		return { costUsd: 0.4 };
+	});
 
 describe('exit codes', () => {
 	it('maps how a run ended to 0 done, 2 escalated, 1 otherwise', () => {
@@ -91,6 +98,59 @@ describe('exit codes', () => {
 		expect(review('done', [mustFix])).toBe(2);
 		expect(review('failed', [mustFix])).toBe(1);
 		expect(review('cancelled', [])).toBe(1);
+	});
+
+	const runId = RunId.make('20261120-120000-abcdef');
+	const prUrl = 'https://github.com/f-elix/example/pull/1';
+	const finding = {
+		id: FindingId.make('t1'),
+		round: 1,
+		alsoReportedBy: [],
+		reviewer: 'github:octocat',
+		file: 'src/a.ts',
+		severity: 'must-fix' as const,
+		claim: 'Broken',
+		evidence: `${prUrl}#discussion_r1`
+	};
+
+	it('exits a finished recheck 2 while a finding is unfixed and 0 once all are fixed', () => {
+		const recheck = (status: 'done' | 'failed', statuses: ReadonlyArray<'fixed' | 'unfixed'>) =>
+			exitCodeForSummary({
+				kind: 'recheck',
+				runId,
+				status,
+				prUrl,
+				findings: statuses.map((found) => ({ finding, status: found, evidence: 'Seen' })),
+				resolvedThreads: [],
+				ignoredThreads: [],
+				costUsd: 0,
+				error: null
+			});
+
+		expect(recheck('done', ['fixed', 'fixed'])).toBe(0);
+		expect(recheck('done', ['fixed', 'unfixed'])).toBe(2);
+		expect(recheck('failed', ['fixed'])).toBe(1);
+		// A recheck that failed before it found anything is a failure, not a pass.
+		expect(recheck('failed', [])).toBe(1);
+	});
+
+	it('exits a fix like a run: 0 done, 1 failed or cancelled', () => {
+		const fix = (status: 'done' | 'failed' | 'cancelled') =>
+			exitCodeForSummary({
+				kind: 'fix',
+				runId,
+				status,
+				prUrl,
+				findings: [finding],
+				ignoredThreads: [],
+				commits: [],
+				pushed: false,
+				checks: [],
+				costUsd: 0,
+				error: null
+			});
+
+		expect([fix('done'), fix('failed'), fix('cancelled')]).toEqual([0, 1, 1]);
 	});
 });
 
@@ -144,6 +204,8 @@ describe('command parsing', () => {
 			for (const command of [
 				'run',
 				'review',
+				'fix',
+				'recheck',
 				'resume',
 				'cancel',
 				'status',
@@ -171,6 +233,9 @@ describe('command parsing', () => {
 			for (const args of [
 				['bogus'],
 				['run'],
+				['fix'],
+				['recheck'],
+				['fix', '1', '--bogus'],
 				['resume'],
 				['list', '--limit', '0'],
 				['list', '--limit', 'many'],
@@ -539,6 +604,132 @@ describe('ship review', () => {
 				expect(result.stdout).toBe('');
 				expect(result.stderr).toMatch(
 					/^ship: cannot start the run \(pr-other-repo\): https:\/\/github\.com\/f-elix\/example\/pull\/1 belongs to /u
+				);
+				expect(JSON.parse((yield* shipIn(fx, ['list', '--json'])).stdout)).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
+describe('ship fix and ship recheck', () => {
+	it.live(
+		"fixes a PR's threads with --local --no-checks, keeping the commit local, and exits 0",
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const { head, env } = cloneOfExample(fx);
+				const services = yield* fakes;
+				const gh = Context.get(services, GhFake);
+				yield* gh.addPr({
+					base: 'main',
+					head: 'feature',
+					title: 'Add the feature',
+					body: '',
+					draft: false,
+					headSha: head
+				});
+				yield* gh.addThread({
+					prUrl: PR,
+					path: 'src/feature.ts',
+					line: 1,
+					author: 'octocat',
+					body: 'Export a function.'
+				});
+				yield* Context.get(services, AgentFake).script({ step: 'fix' }, addsFeatureFix);
+				yield* daemon(fx.home, services);
+
+				const result = yield* cli(['fix', '1', '--local', '--no-checks'], {
+					home: fx.home,
+					cwd: fx.work,
+					env
+				});
+
+				expect(result.code).toBe(0);
+				const fixed = fx.git('rev-parse', 'HEAD');
+				expect(parseSummary(result.stdout)).toMatchObject({
+					kind: 'fix',
+					status: 'done',
+					prUrl: PR,
+					commits: [fixed],
+					pushed: false,
+					checks: []
+				});
+				expect(result.stderr).toContain('fix of 1 finding on');
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'rechecks with --local, resolving nothing, and exits 2 while a finding is unfixed',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const { head, env } = cloneOfExample(fx);
+				const services = yield* fakes;
+				const gh = Context.get(services, GhFake);
+				yield* gh.addPr({
+					base: 'main',
+					head: 'feature',
+					title: 'Add the feature',
+					body: '',
+					draft: false,
+					headSha: head
+				});
+				yield* gh.addThread({
+					prUrl: PR,
+					path: 'src/feature.ts',
+					line: 1,
+					author: 'octocat',
+					body: 'Export a function.'
+				});
+				yield* Context.get(services, AgentFake).script(
+					{ step: 'verify' },
+					{
+						output: {
+							verdicts: [],
+							previous: [
+								{ id: 'PRRT_1', status: 'unfixed', evidence: 'Still a const' }
+							]
+						},
+						costUsd: 0.2
+					}
+				);
+				yield* daemon(fx.home, services);
+
+				const result = yield* cli(['recheck', PR, '--local'], {
+					home: fx.home,
+					cwd: fx.work,
+					env
+				});
+
+				expect(result.code).toBe(2);
+				expect(parseSummary(result.stdout)).toMatchObject({
+					kind: 'recheck',
+					status: 'done',
+					findings: [
+						{ finding: { id: 'PRRT_1' }, status: 'unfixed', evidence: 'Still a const' }
+					],
+					resolvedThreads: []
+				});
+				expect(yield* gh.resolveCalls).toEqual([]);
+				expect(result.stderr).toContain('rechecked 1 finding: 0 fixed, 1 unfixed');
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'reports a refused source, exits 1 and starts nothing',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				yield* daemon(fx.home, yield* fakes);
+
+				const result = yield* shipIn(fx, ['recheck', 'no-such-review']);
+
+				expect(result.code).toBe(1);
+				expect(result.stdout).toBe('');
+				expect(result.stderr).toMatch(
+					/^ship: cannot start the run \(review-not-found\): /u
 				);
 				expect(JSON.parse((yield* shipIn(fx, ['list', '--json'])).stdout)).toEqual([]);
 			}).pipe(Effect.scoped),

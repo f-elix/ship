@@ -1,5 +1,6 @@
 import { Context, Data, type Effect, type Option } from 'effect';
 import type { RunEvent, RunEventEnvelope } from './event.ts';
+import type { FixRunState, RecheckRunState } from './pr-run.ts';
 import type { Env, RunId } from './primitives.ts';
 import type { ReviewRunState } from './review-run.ts';
 import type { InvalidRunStatus, RunNotFound } from './rpc.ts';
@@ -7,14 +8,15 @@ import type { RunState, Summary } from './run.ts';
 
 /**
  * A persisted machine snapshot, as XState's `getPersistedSnapshot()` returns it, around a
- * `RunState` context, or a `ReviewRunState` one for a `ship review` run. Keys other than `value` and `context` are stored as they are.
+ * `RunState` context, or the context of another kind of run: `ReviewRunState`,
+ * `FixRunState` or `RecheckRunState`. Keys other than `value` and `context` are stored as they are.
  *
  * The caller's env is recognized by its key: anything that carries it, such as an invoked
  * actor's input, must hold it in a property named `env`, never spread or renamed.
  */
 export type PersistedRunSnapshot = {
 	readonly value: unknown;
-	readonly context: RunState | ReviewRunState;
+	readonly context: RunState | ReviewRunState | FixRunState | RecheckRunState;
 	readonly [key: string]: unknown;
 };
 
@@ -29,6 +31,7 @@ export type AppendableEvent = Exclude<
 		readonly _tag:
 			| 'RunCreated'
 			| 'ReviewRunCreated'
+			| 'PrRunCreated'
 			| 'RunFinished'
 			| 'RunCancelled'
 			| 'RunInterrupted'
@@ -43,7 +46,7 @@ export type SnapshotLoad = Data.TaggedEnum<{
 	Missing: {};
 	/** Saved under another `SNAPSHOT_VERSION`; restoring it is unsafe. */
 	IncompatibleVersion: { readonly storedVersion: number; readonly currentVersion: number };
-	/** The stored snapshot does not parse or its context is not a valid `RunState` or `ReviewRunState`. */
+	/** The stored snapshot does not parse or its context is not a valid run state of any kind. */
 	Corrupt: { readonly error: string };
 }>;
 export const SnapshotLoad = Data.taggedEnum<SnapshotLoad>();

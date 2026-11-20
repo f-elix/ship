@@ -1,9 +1,9 @@
 import { Context, Effect, Layer, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import type { GitRepo } from './git.ts';
+import { parsePrUrl, PR_URL } from './pr-url.ts';
 import { GitSha, Url } from './primitives.ts';
 import { exec } from './process.ts';
-import { normalizeRemoteUrl } from './project-key.ts';
 
 /** An open pull request. */
 export interface PullRequest {
@@ -30,6 +30,40 @@ export interface PrDetails {
 	/** The branch the PR merges into. */
 	readonly baseRef: string;
 	readonly headSha: GitSha;
+	/** The PR's branch, on its head repository. */
+	readonly headRef: string;
+	/**
+	 * The repository the PR's branch lives on, or `null` when it was deleted. It is the
+	 * base repository unless `isCrossRepository`.
+	 */
+	readonly headRepository: { readonly owner: string; readonly name: string } | null;
+	/** The PR comes from a fork. */
+	readonly isCrossRepository: boolean;
+	/** The base repository's maintainers may push to the PR's branch on the fork. */
+	readonly maintainerCanModify: boolean;
+}
+
+/**
+ * An unresolved review thread on a PR's current diff, as its first comment opened it.
+ * Replies are left out: the first comment says what to fix.
+ */
+export interface ReviewThread {
+	/** The thread's GraphQL node id, which `resolveThread` takes. */
+	readonly id: string;
+	/** Repo-relative path the thread is on. */
+	readonly path: string;
+	/** The line on the diff's new side, or `null` for a thread on the whole file. */
+	readonly line: number | null;
+	/** The first comment's author's login, or `null` when the account was deleted. */
+	readonly author: string | null;
+	/**
+	 * The first comment's author owns the repository or may push to it: GitHub's
+	 * `authorAssociation` is `OWNER`, `MEMBER` or `COLLABORATOR`.
+	 */
+	readonly authorCanWrite: boolean;
+	readonly body: string;
+	/** The first comment's URL. */
+	readonly url: string;
 }
 
 /** What a posted review says about the PR; GitHub never gets an `APPROVE` from ship. */
@@ -53,35 +87,6 @@ export interface SubmitReviewInput {
 	readonly comments: ReadonlyArray<ReviewComment>;
 }
 
-const PR_URL = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/u;
-
-/** The parts of a pull request URL, or `null` when `url` is not one. */
-export const parsePrUrl = (
-	url: string
-): {
-	readonly host: string;
-	readonly owner: string;
-	readonly name: string;
-	readonly number: number;
-} | null => {
-	const match = PR_URL.exec(url.trim());
-	if (match === null) return null;
-	const [, host = '', owner = '', name = '', number = ''] = match;
-	return { host: host.toLowerCase(), owner, name, number: Number(number) };
-};
-
-/**
- * The repository of a pull request URL, normalized like a remote URL so it compares with
- * a project key: `https://github.com/f-elix/ship/pull/3` gives `github.com/f-elix/ship`.
- * `null` when `url` is not a pull request URL.
- */
-export const prRepoKey = (url: string): string | null => {
-	const parts = parsePrUrl(url);
-	return parts === null
-		? null
-		: normalizeRemoteUrl(`https://${parts.host}/${parts.owner}/${parts.name}`);
-};
-
 /** A `gh` command failed. `exitCode` is `null` when `gh` could not be started at all. */
 export class GhError extends Schema.TaggedError<GhError>()('GhError', {
 	args: Schema.Array(Schema.String),
@@ -95,7 +100,10 @@ export class GhError extends Schema.TaggedError<GhError>()('GhError', {
 	}
 }
 
-/** The few `gh` commands the PR step needs. Bodies go through stdin, never argv. */
+/**
+ * The few `gh` commands ship needs: opening and reading PRs, posting reviews, and reading
+ * and resolving review threads. Bodies go through stdin, never argv.
+ */
 export interface GhShape {
 	/** The open PR whose head is `branch`, or `null`. */
 	readonly findPr: (repo: GitRepo, branch: string) => Effect.Effect<PullRequest | null, GhError>;
@@ -122,6 +130,19 @@ export interface GhShape {
 		repo: GitRepo,
 		input: { readonly prUrl: string; readonly marker: string }
 	) => Effect.Effect<string | null, GhError>;
+	/**
+	 * The PR's review threads that are neither resolved nor outdated, oldest first: the
+	 * comments that still ask for something on the PR's current diff.
+	 */
+	readonly reviewThreads: (
+		repo: GitRepo,
+		prUrl: string
+	) => Effect.Effect<ReadonlyArray<ReviewThread>, GhError>;
+	/** Marks one review thread of the PR resolved; resolving a resolved thread is a no-op. */
+	readonly resolveThread: (
+		repo: GitRepo,
+		input: { readonly prUrl: string; readonly threadId: string }
+	) => Effect.Effect<void, GhError>;
 }
 
 const PrList = Schema.fromJsonString(
@@ -142,7 +163,76 @@ const PrView = Schema.fromJsonString(
 		title: Schema.String,
 		body: Schema.String,
 		baseRefName: Schema.String,
-		headRefOid: GitSha
+		headRefOid: GitSha,
+		headRefName: Schema.String,
+		headRepository: Schema.NullOr(Schema.Struct({ name: Schema.String })),
+		headRepositoryOwner: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+		isCrossRepository: Schema.Boolean,
+		maintainerCanModify: Schema.Boolean
+	})
+);
+
+const PR_VIEW_FIELDS = [
+	'number',
+	'url',
+	'title',
+	'body',
+	'baseRefName',
+	'headRefOid',
+	'headRefName',
+	'headRepository',
+	'headRepositoryOwner',
+	'isCrossRepository',
+	'maintainerCanModify'
+].join(',');
+
+/**
+ * A PR's review threads, 100 a page; `gh api graphql --paginate` follows `endCursor`.
+ * Only the first comment of each thread is read.
+ */
+const REVIEW_THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: 1) { nodes { author { login } authorAssociation body url } }
+        }
+      }
+    }
+  }
+}`;
+
+/** The `authorAssociation`s of accounts that own a repository or may push to it. */
+const WRITE_ASSOCIATIONS: ReadonlySet<string> = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
+const RESOLVE_THREAD_MUTATION = `mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) { thread { id } }
+}`;
+
+/** One line of `reviewThreads`' `--jq` output: one thread. */
+const ListedThread = Schema.fromJsonString(
+	Schema.Struct({
+		id: Schema.String,
+		isResolved: Schema.Boolean,
+		isOutdated: Schema.Boolean,
+		path: Schema.String,
+		line: Schema.NullOr(Schema.Int),
+		comments: Schema.Struct({
+			nodes: Schema.Array(
+				Schema.Struct({
+					author: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+					authorAssociation: Schema.String,
+					body: Schema.String,
+					url: Url
+				})
+			)
+		})
 	})
 );
 
@@ -268,7 +358,7 @@ const make = Effect.gen(function* () {
 		});
 
 	const viewPr = Effect.fn('Gh.viewPr')(function* (repo: GitRepo, ref: string) {
-		const args = ['pr', 'view', ref, '--json', 'number,url,title,body,baseRefName,headRefOid'];
+		const args = ['pr', 'view', ref, '--json', PR_VIEW_FIELDS];
 		const view = yield* Schema.decodeUnknownEffect(PrView)(yield* run(repo, args)).pipe(
 			Effect.mapError(unexpected(repo, args))
 		);
@@ -278,7 +368,14 @@ const make = Effect.gen(function* () {
 			title: view.title,
 			body: view.body,
 			baseRef: view.baseRefName,
-			headSha: view.headRefOid
+			headSha: view.headRefOid,
+			headRef: view.headRefName,
+			headRepository:
+				view.headRepository === null || view.headRepositoryOwner === null
+					? null
+					: { owner: view.headRepositoryOwner.login, name: view.headRepository.name },
+			isCrossRepository: view.isCrossRepository,
+			maintainerCanModify: view.maintainerCanModify
 		} satisfies PrDetails;
 	});
 
@@ -341,7 +438,81 @@ const make = Effect.gen(function* () {
 		);
 	});
 
-	return Gh.of({ findPr, createPr, editPr, markDraft, viewPr, submitReview, findReview });
+	const reviewThreads = Effect.fn('Gh.reviewThreads')(function* (repo: GitRepo, prUrl: string) {
+		const pr = parsePrUrl(prUrl);
+		if (pr === null) return yield* Effect.die(new Error(`Not a pull request URL: ${prUrl}`));
+		// `--jq` prints one thread per line, across every page `--paginate` fetches.
+		const args = [
+			'api',
+			'graphql',
+			'--hostname',
+			pr.host,
+			'--paginate',
+			'-f',
+			`query=${REVIEW_THREADS_QUERY}`,
+			'-f',
+			`owner=${pr.owner}`,
+			'-f',
+			`name=${pr.name}`,
+			'-F',
+			`number=${pr.number}`,
+			'--jq',
+			'.data.repository.pullRequest.reviewThreads.nodes[]'
+		];
+		const stdout = yield* run(repo, args);
+		const lines = stdout.split('\n').filter((line) => line.trim() !== '');
+		const threads = yield* Effect.forEach(lines, (line) =>
+			Schema.decodeUnknownEffect(ListedThread)(line).pipe(
+				Effect.mapError(unexpected(repo, args))
+			)
+		);
+		return threads.flatMap((thread): ReadonlyArray<ReviewThread> => {
+			const [first] = thread.comments.nodes;
+			if (thread.isResolved || thread.isOutdated || first === undefined) return [];
+			return [
+				{
+					id: thread.id,
+					path: thread.path,
+					line: thread.line,
+					author: first.author?.login ?? null,
+					authorCanWrite: WRITE_ASSOCIATIONS.has(first.authorAssociation),
+					body: first.body,
+					url: first.url
+				}
+			];
+		});
+	});
+
+	const resolveThread = Effect.fn('Gh.resolveThread')(function* (
+		repo: GitRepo,
+		input: { readonly prUrl: string; readonly threadId: string }
+	) {
+		const pr = parsePrUrl(input.prUrl);
+		if (pr === null)
+			return yield* Effect.die(new Error(`Not a pull request URL: ${input.prUrl}`));
+		yield* run(repo, [
+			'api',
+			'graphql',
+			'--hostname',
+			pr.host,
+			'-f',
+			`query=${RESOLVE_THREAD_MUTATION}`,
+			'-f',
+			`threadId=${input.threadId}`
+		]);
+	});
+
+	return Gh.of({
+		findPr,
+		createPr,
+		editPr,
+		markDraft,
+		viewPr,
+		submitReview,
+		findReview,
+		reviewThreads,
+		resolveThread
+	});
 });
 
 /** Runs the real `gh` CLI in the caller's repo, with the caller's env. */

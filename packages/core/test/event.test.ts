@@ -2,6 +2,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Schema } from 'effect';
 import {
 	Finding,
+	FindingsSource,
 	ReviewId,
 	RunEvent,
 	RunEventEnvelope,
@@ -45,6 +46,19 @@ const events: ReadonlyArray<RunEventType> = [
 		prNumber: 7,
 		baseSha,
 		headSha
+	}),
+	RunEvent.cases.PrRunCreated.make({
+		at,
+		kind: 'fix',
+		projectKey,
+		repoDir: '/repo',
+		prUrl: 'https://github.com/f-elix/ship/pull/7',
+		prNumber: 7,
+		baseSha: headSha,
+		headSha,
+		source: FindingsSource.cases.PrThreads.make({ pr: '7' }),
+		findings: [verifiedFinding],
+		ignoredThreads: ['https://github.com/f-elix/ship/pull/7#discussion_r2']
 	}),
 	RunEvent.cases.StateChanged.make({ at, from: 'checks.running', to: 'checks.waiting' }),
 	RunEvent.cases.StepStarted.make({ at, step: 'implement' }),
@@ -110,6 +124,12 @@ const events: ReadonlyArray<RunEventType> = [
 		inline: 1,
 		inBody: 1
 	}),
+	RunEvent.cases.FindingsRechecked.make({
+		at,
+		findings: [{ finding: verifiedFinding, status: 'unfixed', evidence: 'Still there.' }]
+	}),
+	RunEvent.cases.ThreadResolved.make({ at, findingId: verifiedFinding.id, threadId: 'PRRT_1' }),
+	RunEvent.cases.BranchPushed.make({ at, sha: headSha, remote: 'origin', ref: 'feature' }),
 	RunEvent.cases.RunFinished.make({ at, summary: escalatedSummary }),
 	RunEvent.cases.RunFinished.make({
 		at,

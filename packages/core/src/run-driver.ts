@@ -3,10 +3,18 @@ import { Cause, Data, DateTime, Deferred, Effect, Exit, Predicate, Queue, Scope 
 import type { StateValue } from 'xstate';
 import { Checkpoint, makeCheckpoint } from './checkpoint.ts';
 import type { RunEvent } from './event.ts';
+import { fixMachine, type FixMachine } from './fix-pipeline.ts';
 import type { Git } from './git.ts';
 import { describeDefect, stepInput } from './machine-kit.ts';
 import { pipelineMachine, type PipelineMachine } from './pipeline.ts';
+import {
+	buildFixSummary,
+	buildRecheckSummary,
+	type FixRunState,
+	type RecheckRunState
+} from './pr-run.ts';
 import type { Env, RunId } from './primitives.ts';
+import { recheckMachine, type RecheckMachine } from './recheck-pipeline.ts';
 import { reviewMachine, type ReviewMachine } from './review-pipeline.ts';
 import { buildReviewSummary, type ReviewRunState } from './review-run.ts';
 import { SnapshotNotResumable, type InvalidRunStatus, type RunNotFound } from './rpc.ts';
@@ -19,7 +27,15 @@ import {
 } from './run-journal.ts';
 import { RunReporter } from './run-step.ts';
 import { buildSummary, type SummaryInput } from './run-summary.ts';
-import type { ReviewSummary, RunState, ShipSummary, Summary, TerminalRunStatus } from './run.ts';
+import type {
+	FixSummary,
+	RecheckSummary,
+	ReviewSummary,
+	RunState,
+	ShipSummary,
+	Summary,
+	TerminalRunStatus
+} from './run.ts';
 import type { ShipHome } from './ship-paths.ts';
 import { statePath } from './state-path.ts';
 
@@ -39,12 +55,15 @@ export interface RunHandle<S extends Summary = Summary> {
 }
 
 /**
- * The services both machines' steps use; the driver adds `RunReporter` and `Checkpoint`
+ * The services every machine's steps use; the driver adds `RunReporter` and `Checkpoint`
  * itself, per run.
  */
 export type PipelineServices =
 	| Exclude<
-			RequirementsFrom<PipelineMachine> | RequirementsFrom<ReviewMachine>,
+			| RequirementsFrom<PipelineMachine>
+			| RequirementsFrom<ReviewMachine>
+			| RequirementsFrom<FixMachine>
+			| RequirementsFrom<RecheckMachine>,
 			RunReporter | Checkpoint
 	  >
 	| Git
@@ -52,7 +71,7 @@ export type PipelineServices =
 
 // --- Run kinds ---
 
-/** A machine's context: a `ship run` one or a `ship review` one. */
+/** A machine's context: a `ship run`, `ship review`, `ship fix` or `ship recheck` one. */
 type KindContext = PersistedRunSnapshot['context'];
 
 /**
@@ -75,7 +94,7 @@ interface RunActor<C extends KindContext> {
 }
 
 /**
- * A kind of run: `ship run` or `ship review`. The driver picks one by the run's context
+ * A kind of run: `ship run`, `ship review`, `ship fix` or `ship recheck`. The driver picks one by the run's context
  * when it starts or resumes it, and by its log when it cancels a run with no machine.
  */
 interface RunKind<C extends KindContext, S extends Summary> {
@@ -104,9 +123,29 @@ const reviewKind: RunKind<ReviewRunState, ReviewSummary> = {
 	summarize: buildReviewSummary
 };
 
-/** The kind of a run whose log is `events`: a review run's log starts with `ReviewRunCreated`. */
-const kindOfLog = (events: ReadonlyArray<RunEvent>) =>
-	events.some((event) => event._tag === 'ReviewRunCreated') ? reviewKind : shipKind;
+const fixKind: RunKind<FixRunState, FixSummary> = {
+	spawn: (start) => createEffectActor(fixMachine, start),
+	resolve: (value, context) => void fixMachine.resolveState({ value, context }),
+	summarize: buildFixSummary
+};
+
+const recheckKind: RunKind<RecheckRunState, RecheckSummary> = {
+	spawn: (start) => createEffectActor(recheckMachine, start),
+	resolve: (value, context) => void recheckMachine.resolveState({ value, context }),
+	summarize: buildRecheckSummary
+};
+
+/**
+ * The kind of a run whose log is `events`, by its creation event: `ReviewRunCreated`, or
+ * `PrRunCreated` with its kind; any other log is a `ship run`'s.
+ */
+const kindOfLog = (events: ReadonlyArray<RunEvent>): LogFinisher<Summary> => {
+	for (const event of events) {
+		if (event._tag === 'ReviewRunCreated') return reviewKind;
+		if (event._tag === 'PrRunCreated') return event.kind === 'fix' ? fixKind : recheckKind;
+	}
+	return shipKind;
+};
 
 // --- Driver ---
 
@@ -196,6 +235,16 @@ export const startRun = Effect.fn('startRun')(function* (state: RunState) {
 /** Starts a new `ship review` run from its initial state, like {@link startRun}. */
 export const startReview = Effect.fn('startReview')(function* (state: ReviewRunState) {
 	return yield* runMachine(reviewKind, { _tag: 'New', state });
+});
+
+/** Starts a new `ship fix` run from its initial state, like {@link startRun}. */
+export const startFix = Effect.fn('startFix')(function* (state: FixRunState) {
+	return yield* runMachine(fixKind, { _tag: 'New', state });
+});
+
+/** Starts a new `ship recheck` run from its initial state, like {@link startRun}. */
+export const startRecheck = Effect.fn('startRecheck')(function* (state: RecheckRunState) {
+	return yield* runMachine(recheckKind, { _tag: 'New', state });
 });
 
 /**
@@ -415,10 +464,20 @@ export const resumeRun = Effect.fn('resumeRun')(function* (runId: RunId, env: En
 	}
 	const { snapshot } = load;
 	const { context } = snapshot;
-	const handle: RunHandle =
-		context.kind === 'review'
-			? yield* resumeKind(reviewKind, snapshot, context)
-			: yield* resumeKind(shipKind, snapshot, context);
+	let handle: RunHandle;
+	switch (context.kind) {
+		case 'review':
+			handle = yield* resumeKind(reviewKind, snapshot, context);
+			break;
+		case 'fix':
+			handle = yield* resumeKind(fixKind, snapshot, context);
+			break;
+		case 'recheck':
+			handle = yield* resumeKind(recheckKind, snapshot, context);
+			break;
+		default:
+			handle = yield* resumeKind(shipKind, snapshot, context);
+	}
 	return handle;
 });
 

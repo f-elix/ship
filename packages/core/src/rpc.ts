@@ -1,6 +1,7 @@
 import { Schema } from 'effect';
 import { Rpc, RpcGroup } from 'effect/rpc';
 import { CheckEvent, RunEventEnvelope } from './event.ts';
+import { FindingsSource } from './findings-source.ts';
 import {
 	AbsolutePath,
 	Env,
@@ -11,7 +12,7 @@ import {
 	Timestamp,
 	Url
 } from './primitives.ts';
-import { ReviewSummary, RunStatus, ShipSummary } from './run.ts';
+import { FixSummary, RecheckSummary, ReviewSummary, RunStatus, ShipSummary } from './run.ts';
 
 // --- Errors ---
 
@@ -31,7 +32,12 @@ export const PreconditionReason = Schema.Literals([
 	'pr-not-found',
 	'pr-other-repo',
 	'pr-not-checked-out',
-	'base-fetch-failed'
+	'base-fetch-failed',
+	'review-not-found',
+	'review-without-pr',
+	'pr-not-pushable',
+	'no-findings',
+	'github-failed'
 ]);
 export type PreconditionReason = typeof PreconditionReason.Type;
 
@@ -131,8 +137,30 @@ export const ReviewRunInfo = Schema.Struct({
 });
 export interface ReviewRunInfo extends Schema.Schema.Type<typeof ReviewRunInfo> {}
 
+/** A `ship fix` run: it fixes a PR's findings and pushes the fix to the PR's branch. */
+export const FixRunInfo = Schema.Struct({
+	...runInfoFields,
+	kind: Schema.Literal('fix'),
+	/** The PR whose findings the run fixes. */
+	prUrl: Url,
+	/** `null` until the run reaches a terminal status. */
+	summary: Schema.NullOr(FixSummary)
+});
+export interface FixRunInfo extends Schema.Schema.Type<typeof FixRunInfo> {}
+
+/** A `ship recheck` run: it rechecks a PR's findings and resolves the fixed ones' threads. */
+export const RecheckRunInfo = Schema.Struct({
+	...runInfoFields,
+	kind: Schema.Literal('recheck'),
+	/** The PR whose findings the run rechecks. */
+	prUrl: Url,
+	/** `null` until the run reaches a terminal status. */
+	summary: Schema.NullOr(RecheckSummary)
+});
+export interface RecheckRunInfo extends Schema.Schema.Type<typeof RecheckRunInfo> {}
+
 /** A run as `status` and `list` report it, by its kind. */
-export const RunInfo = Schema.Union([ShipRunInfo, ReviewRunInfo]);
+export const RunInfo = Schema.Union([ShipRunInfo, ReviewRunInfo, FixRunInfo, RecheckRunInfo]);
 export type RunInfo = typeof RunInfo.Type;
 
 const runIdPayload = { runId: RunId };
@@ -161,6 +189,38 @@ export class ShipRpcs extends RpcGroup.make(
 		payload: {
 			pr: Schema.NonEmptyString,
 			post: Schema.Boolean,
+			cwd: AbsolutePath,
+			env: Env
+		},
+		success: Schema.Struct({ runId: RunId }),
+		error: PreconditionFailed
+	}),
+	/**
+	 * Starts a `ship fix` run from `cwd`, the caller's checkout of the PR at its head: the
+	 * fix agent works through the findings of `source`, then the checks run unless
+	 * `checks` is `false`, and the commits are pushed to the PR's branch unless `local`.
+	 * The source is loaded and the checkout checked before the run is created.
+	 */
+	Rpc.make('fix', {
+		payload: {
+			source: FindingsSource,
+			local: Schema.Boolean,
+			checks: Schema.Boolean,
+			cwd: AbsolutePath,
+			env: Env
+		},
+		success: Schema.Struct({ runId: RunId }),
+		error: PreconditionFailed
+	}),
+	/**
+	 * Starts a `ship recheck` run from `cwd`, the caller's checkout of the PR at its head:
+	 * the verifier checks whether each finding of `source` is fixed, and the threads of the
+	 * fixed ones are resolved on GitHub unless `local`.
+	 */
+	Rpc.make('recheck', {
+		payload: {
+			source: FindingsSource,
+			local: Schema.Boolean,
 			cwd: AbsolutePath,
 			env: Env
 		},

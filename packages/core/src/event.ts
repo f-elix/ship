@@ -1,6 +1,7 @@
 import { Schema } from 'effect';
 import { LockResource } from './config.ts';
 import { DisprovedFinding, Finding, FindingId, VerifiedFinding } from './finding.ts';
+import { FindingsSource } from './findings-source.ts';
 import {
 	AbsolutePath,
 	CostUsd,
@@ -18,7 +19,7 @@ import {
 	Url
 } from './primitives.ts';
 import { ReviewerName } from './reviewer.ts';
-import { EscalationReason, Summary } from './run.ts';
+import { EscalationReason, RecheckedFinding, Summary } from './run.ts';
 
 const at = { at: Timestamp };
 
@@ -63,6 +64,26 @@ export const RunEvent = Schema.TaggedUnion({
 		prNumber: PositiveInt,
 		baseSha: GitSha,
 		headSha: GitSha
+	},
+	/**
+	 * A `ship fix` or `ship recheck` run was created for a pull request's findings, read
+	 * from `source`. `repoDir` is the caller's checkout, at `headSha`, the PR's head pinned
+	 * at creation; `baseSha` is where the run's range starts.
+	 */
+	PrRunCreated: {
+		...at,
+		kind: Schema.Literals(['fix', 'recheck']),
+		projectKey: ProjectKey,
+		repoDir: AbsolutePath,
+		prUrl: Url,
+		prNumber: PositiveInt,
+		baseSha: GitSha,
+		headSha: GitSha,
+		source: FindingsSource,
+		/** The must-fix findings and nits the run fixes or rechecks. */
+		findings: Schema.Array(VerifiedFinding),
+		/** The open review threads left out because their author may not push to the repository. */
+		ignoredThreads: Schema.Array(Url)
 	},
 	/** Machine state values as dotted paths, e.g. `checks.waiting`. */
 	StateChanged: { ...at, from: Schema.String, to: Schema.String },
@@ -143,6 +164,12 @@ export const RunEvent = Schema.TaggedUnion({
 		inline: NonNegativeInt,
 		inBody: NonNegativeInt
 	},
+	/** `recheck` checked earlier findings against the code: each one's status and evidence. */
+	FindingsRechecked: { ...at, findings: Schema.Array(RecheckedFinding) },
+	/** A fixed finding's review thread was resolved on GitHub. */
+	ThreadResolved: { ...at, findingId: FindingId, threadId: Schema.String },
+	/** HEAD was pushed to branch `ref` of `remote`, a remote name or URL. */
+	BranchPushed: { ...at, sha: GitSha, remote: Schema.String, ref: Schema.String },
 	RunFinished: { ...at, summary: Summary },
 	/** The daemon stopped while the run was active; `ship resume` continues it. */
 	RunInterrupted: { ...at },
