@@ -59,7 +59,7 @@ const Routed = Schema.Struct({ toSha: GitSha, reviewers: Schema.Array(ReviewerNa
 interface Routed extends Schema.Schema.Type<typeof Routed> {}
 
 /** What reviewers and the verifier see of `range`, with the conventions that apply to it. */
-const reviewSubject = Effect.fnUntraced(function* (
+export const reviewSubject = Effect.fnUntraced(function* (
 	scope: PrimitiveScope,
 	intent: ChangeIntent,
 	range: CommitRange

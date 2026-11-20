@@ -1,5 +1,6 @@
 import {
 	endsFollow,
+	parseFindingsSource,
 	RunEventEnvelope,
 	RunId,
 	RunInfo,
@@ -47,7 +48,7 @@ const runNotFound = (error: RunNotFound) => cliError(`no run ${error.runId}`);
 const invalidStatus = (action: string) => (error: InvalidRunStatus) =>
 	cliError(`cannot ${action} run ${error.runId}: it is ${error.status}`);
 
-/** A precondition `ship run` or `ship review` checks failed: nothing was started. */
+/** A precondition the daemon checks before it starts a run failed: nothing was started. */
 export const preconditionMessage = (error: PreconditionFailed) =>
 	`cannot start the run (${error.reason}): ${error.detail}`;
 
@@ -142,7 +143,10 @@ const follow = (
  * Starts a run with `create` and follows it like {@link follow}. A failed precondition
  * fails the command: nothing was started.
  */
-const startAndFollow = (connection: Connection, create: ReturnType<Rpc['run' | 'review']>) =>
+const startAndFollow = (
+	connection: Connection,
+	create: ReturnType<Rpc['run' | 'review' | 'fix' | 'recheck']>
+) =>
 	Effect.gen(function* () {
 		const { runId } = yield* create.pipe(
 			Effect.catchTag('PreconditionFailed', (error) =>
@@ -210,6 +214,87 @@ const review = Command.make(
 	)
 );
 
+/** A review id, a PR number or a PR URL, as `ship fix` and `ship recheck` take it. */
+const sourceArgument = Argument.String('source').pipe(
+	Argument.withDescription(
+		'The findings: a review id, as `ship review` prints it, for its stored findings, or a PR number or URL for its unresolved review threads'
+	),
+	Argument.withSchema(Schema.NonEmptyString)
+);
+
+/** The findings source `argument` names; a blank one fails the command. */
+const findingsSource = (argument: string) => {
+	const source = parseFindingsSource(argument);
+	return source === null
+		? Effect.fail(cliError('the findings source is blank'))
+		: Effect.succeed(source);
+};
+
+const fix = Command.make(
+	'fix',
+	{
+		source: sourceArgument,
+		local: Flag.Boolean('local').pipe(
+			Flag.withDescription(
+				"Keep the commits local instead of pushing them to the PR's branch"
+			),
+			Flag.withDefault(false)
+		),
+		noChecks: Flag.Boolean('no-checks').pipe(
+			Flag.withDescription('Commit the fix without running the checks'),
+			Flag.withDefault(false)
+		)
+	},
+	Effect.fn('ship.fix')(function* ({ source, local, noChecks }) {
+		const invocation = yield* Invocation;
+		const findings = yield* findingsSource(source);
+		const connection = yield* connectDaemon();
+		yield* startAndFollow(
+			connection,
+			connection.rpc.fix({
+				source: findings,
+				local,
+				checks: !noChecks,
+				cwd: invocation.cwd,
+				env: invocation.env
+			})
+		);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		"Fix the must-fix findings and nits of a stored review or of a PR's review threads, run the checks, commit the fix and push it to the PR's branch. Run it in a clean checkout of the PR's head (`gh pr checkout <n>`). Events stream to stderr; the summary JSON goes to stdout. Exit code 0 done, 1 failed, cancelled or interrupted, 130 interrupted by Ctrl-C (a started run keeps going)."
+	)
+);
+
+const recheck = Command.make(
+	'recheck',
+	{
+		source: sourceArgument,
+		local: Flag.Boolean('local').pipe(
+			Flag.withDescription('Resolve no review thread on GitHub'),
+			Flag.withDefault(false)
+		)
+	},
+	Effect.fn('ship.recheck')(function* ({ source, local }) {
+		const invocation = yield* Invocation;
+		const findings = yield* findingsSource(source);
+		const connection = yield* connectDaemon();
+		yield* startAndFollow(
+			connection,
+			connection.rpc.recheck({
+				source: findings,
+				local,
+				cwd: invocation.cwd,
+				env: invocation.env
+			})
+		);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		"Check whether the findings of a stored review or of a PR's review threads are fixed in the PR's head, and resolve the threads of the fixed ones. Run it in a clean checkout of the PR's head (`gh pr checkout <n>`). Events stream to stderr; the summary JSON goes to stdout. Exit code 0 every finding fixed, 2 some unfixed, 1 failed, cancelled or interrupted, 130 interrupted by Ctrl-C (a started run keeps going)."
+	)
+);
+
 const resume = Command.make(
 	'resume',
 	{ id: runIdArgument },
@@ -240,7 +325,7 @@ const resume = Command.make(
 	}, Effect.scoped)
 ).pipe(
 	Command.withDescription(
-		'Continue an interrupted run with the current env, streaming and exiting like the command that started it: `ship run` or `ship review`.'
+		'Continue an interrupted run with the current env, streaming and exiting like the command that started it: `ship run`, `ship review`, `ship fix` or `ship recheck`.'
 	)
 );
 
@@ -388,5 +473,18 @@ export const ship = Command.make('ship').pipe(
 	Command.withDescription(
 		'Run the scripted part of a coding-agent workflow: implement, checks, review, fix, PR.'
 	),
-	Command.withSubcommands([run, review, resume, cancel, status, list, logs, daemon, init, auth])
+	Command.withSubcommands([
+		run,
+		review,
+		fix,
+		recheck,
+		resume,
+		cancel,
+		status,
+		list,
+		logs,
+		daemon,
+		init,
+		auth
+	])
 );

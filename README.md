@@ -59,21 +59,23 @@ Events stream to stderr as one line each: state changes, check results, lock wai
 
 Ctrl-C detaches instead of cancelling, and prints how to follow, check or cancel the run.
 
-| Command                              | What it does                                                                                         |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `ship run <plan-dir>`                | Start a run in the current directory with the current env                                            |
-| `ship review <pr> [--post]`          | Review a pull request of the current repository; see [Reviewing a PR](#reviewing-a-pr)               |
-| `ship resume <id>`                   | Continue an interrupted run with the current env; streams and exits like the command that started it |
-| `ship cancel <id>`                   | Stop a run; it ends as `cancelled`                                                                   |
-| `ship status [id] [--json]`          | A run's details and summary, or the active runs                                                      |
-| `ship list [--limit n] [--json]`     | Recent runs, most recently updated first (20 by default)                                             |
-| `ship logs <id> [--follow] [--json]` | A run's event log; `--follow` keeps printing until the run ends                                      |
-| `ship daemon status`                 | The daemon's version, pid, socket, log and active runs; starts it if it is not running               |
-| `ship daemon stop [--force]`         | Stop the daemon                                                                                      |
-| `ship daemon restart [--force]`      | Restart it, e.g. after upgrading ship or editing lock permits                                        |
-| `ship init --detect`                 | Print a draft project config for the current directory                                               |
-| `ship init --write <file> [--force]` | Validate and save the project config, then run every check once                                      |
-| `ship auth cloudflare`               | Save the Cloudflare credentials reviewer routing uses, after checking them                           |
+| Command                                     | What it does                                                                                                                                      |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ship run <plan-dir>`                       | Start a run in the current directory with the current env                                                                                         |
+| `ship review <pr> [--post]`                 | Review a pull request of the current repository; see [Reviewing a PR](#reviewing-a-pr)                                                            |
+| `ship fix <source> [--local] [--no-checks]` | Fix the findings of a PR's review threads or of a stored review, then push; see [Fixing and rechecking findings](#fixing-and-rechecking-findings) |
+| `ship recheck <source> [--local]`           | Check which findings of a PR are fixed and resolve their threads; see [Fixing and rechecking findings](#fixing-and-rechecking-findings)           |
+| `ship resume <id>`                          | Continue an interrupted run with the current env; streams and exits like the command that started it                                              |
+| `ship cancel <id>`                          | Stop a run; it ends as `cancelled`                                                                                                                |
+| `ship status [id] [--json]`                 | A run's details and summary, or the active runs                                                                                                   |
+| `ship list [--limit n] [--json]`            | Recent runs, most recently updated first (20 by default)                                                                                          |
+| `ship logs <id> [--follow] [--json]`        | A run's event log; `--follow` keeps printing until the run ends                                                                                   |
+| `ship daemon status`                        | The daemon's version, pid, socket, log and active runs; starts it if it is not running                                                            |
+| `ship daemon stop [--force]`                | Stop the daemon                                                                                                                                   |
+| `ship daemon restart [--force]`             | Restart it, e.g. after upgrading ship or editing lock permits                                                                                     |
+| `ship init --detect`                        | Print a draft project config for the current directory                                                                                            |
+| `ship init --write <file> [--force]`        | Validate and save the project config, then run every check once                                                                                   |
+| `ship auth cloudflare`                      | Save the Cloudflare credentials reviewer routing uses, after checking them                                                                        |
 
 Runs are hosted by a background daemon, which the commands that need it start when it is not running (`ship daemon stop` does not); its output goes to `daemon.log` in ship's home. The CLI and the daemon must be the same version: after an upgrade, commands ask for `ship daemon restart`. Stopping or restarting the daemon is refused while runs are active; `--force` interrupts them, and `ship resume <id>` continues them later.
 
@@ -88,6 +90,17 @@ The review is stored in ship's database under a review id, which the summary giv
 With `--post`, the verified findings are posted as one GitHub review on that head, unless `HEAD` has moved since the run started, which fails the run: a finding on a line of the diff becomes an inline comment, the others are listed in the review's body as `file:line`. The review requests changes when there are must-fix findings and only comments otherwise; ship never approves, and posts nothing when there are no findings.
 
 Events and the summary JSON go to stderr and stdout like `ship run`; the summary has `"kind": "review"` and the findings by severity. It exits 0 when there are no must-fix findings, 2 when there are, 1 when the review failed, was cancelled or did not start, and 130 on Ctrl-C.
+
+### Fixing and rechecking findings
+
+`ship fix <source>` and `ship recheck <source>` work on findings left on a pull request, in the checkout you run them from, with the same rules as `ship review`: check the PR out first with `gh pr checkout <n>`, and ship refuses to start unless the tree is clean and `HEAD` is the PR's head commit. `<source>` is one of:
+
+- a PR number or URL: the PR's open, unresolved review threads. A thread ship posted carries a hidden marker, `<!-- ship-finding: <reviewId>/<findingId> -->`, and becomes that finding again (its stored copy when this machine has the review, its severity otherwise; tradeoffs are left out). Any other thread is a must-fix finding by its author.
+- a review id, the `reviewId` of a `ship review` summary: that review's must-fix findings and nits, with the threads it posted when it was posted.
+
+`ship fix` gives the must-fix findings and nits to the fix agent, runs the checks (fixing failing ones like `ship run`) and commits; with `--no-checks` it commits the work without running them. It then pushes `HEAD` to the PR's branch, to `origin` for a branch of the same repository and to the fork when the PR allows maintainer edits; ship refuses to start when it cannot push, unless you pass `--local`, which keeps the commits in the checkout. It never pushes a `HEAD` that does not descend from the head it started from. It needs the project config. The summary has `"kind": "fix"`, the commits and whether they were pushed; it exits 0 when done and 1 when the run failed, was cancelled or did not start.
+
+`ship recheck` asks the verifier, over the diff from the merge base to the head, whether each finding is fixed, and resolves the threads of the fixed ones on GitHub unless you pass `--local`; it fails, resolving nothing, when `HEAD` has moved since the run started. It uses the project config when there is one and the defaults otherwise. The summary has `"kind": "recheck"`, each finding with its status and evidence, and the resolved threads; it exits 0 when every finding is fixed, 2 when some are not, and 1 when the run failed, was cancelled or did not start. Both exit 130 on Ctrl-C, and `ship resume` continues either without redoing a push or a resolved thread.
 
 ## Reviewer routing
 

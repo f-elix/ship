@@ -4,6 +4,8 @@ import {
 	buildReviewSummary,
 	commentableLines,
 	FindingId,
+	parseFindingMarker,
+	ReviewId,
 	reviewToPost,
 	RunEvent,
 	type VerifiedFinding
@@ -103,18 +105,25 @@ describe('commentableLines', () => {
 });
 
 describe('reviewToPost', () => {
+	const storedId = ReviewId.make('run-1-r1');
+
 	it('comments inline on lines in the diff and lists the rest in the body', () => {
 		const inline = findingAt('src/a.ts', 11, 'tradeoff');
 		const outside = findingAt('src/a.ts', 30, 'nit');
 		const deleted = findingAt('src/b.ts', 5, 'nit');
 		const lineless = findingAt('README.md', undefined, 'nit');
 
-		const review = reviewToPost([inline, outside, deleted, lineless], diff);
+		const review = reviewToPost(storedId, [inline, outside, deleted, lineless], diff);
 
 		expect(review.event).toBe('COMMENT');
 		expect(review.comments).toEqual([
 			{ path: 'src/a.ts', line: 11, body: expect.stringContaining(inline.claim) }
 		]);
+		// The marker ties the thread the comment opens to its stored finding.
+		expect(parseFindingMarker(review.comments[0]?.body ?? '')).toEqual({
+			reviewId: storedId,
+			findingId: inline.id
+		});
 		expect(review.inBody).toBe(3);
 		expect(review.body).toContain('0 must-fix findings, 1 tradeoff and 3 nits.');
 		expect(review.body).toContain('- `src/a.ts:30`: **Nit**');
@@ -124,7 +133,7 @@ describe('reviewToPost', () => {
 	});
 
 	it('requests changes when a must-fix finding was verified, wherever it is', () => {
-		const review = reviewToPost([findingAt('src/z.ts', 3, 'must-fix'), nit], diff);
+		const review = reviewToPost(storedId, [findingAt('src/z.ts', 3, 'must-fix'), nit], diff);
 
 		expect(review.event).toBe('REQUEST_CHANGES');
 		expect(review.comments).toEqual([]);
@@ -132,7 +141,7 @@ describe('reviewToPost', () => {
 	});
 
 	it('leaves the body a one-line count when every finding is inline', () => {
-		const review = reviewToPost([findingAt('src/a.ts', 41, 'must-fix')], diff);
+		const review = reviewToPost(storedId, [findingAt('src/a.ts', 41, 'must-fix')], diff);
 
 		expect(review.body).toBe('ship review found 1 must-fix finding, 0 tradeoffs and 0 nits.');
 		expect(review.comments).toHaveLength(1);

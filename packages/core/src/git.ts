@@ -106,6 +106,20 @@ export interface GitShape {
 	/** `git push -u origin <branch>`. */
 	readonly push: (repo: GitRepo, branch: string) => Effect.Effect<void, GitError>;
 	/**
+	 * Pushes HEAD to branch `ref` of `remote`, a remote name or URL, without force and
+	 * without setting an upstream. Pushing a HEAD the branch already has is a no-op.
+	 */
+	readonly pushHead: (
+		repo: GitRepo,
+		target: { readonly remote: string; readonly ref: string }
+	) => Effect.Effect<void, GitError>;
+	/** Whether commit `ancestor` is `descendant` or one of its ancestors. */
+	readonly isAncestor: (
+		repo: GitRepo,
+		ancestor: GitSha,
+		descendant: GitSha
+	) => Effect.Effect<boolean, GitError>;
+	/**
 	 * Adds `path` (absolute) to `.git/info/exclude` so it is never committed. Returns `false`
 	 * when it was already listed or lies outside the repo.
 	 */
@@ -472,6 +486,27 @@ const make = Effect.gen(function* () {
 		yield* run(repo, ['push', '--quiet', '--set-upstream', 'origin', branch]);
 	});
 
+	const pushHead = Effect.fn('Git.pushHead')(function* (
+		repo: GitRepo,
+		target: { readonly remote: string; readonly ref: string }
+	) {
+		yield* run(repo, [
+			'push',
+			'--quiet',
+			'--end-of-options',
+			target.remote,
+			`HEAD:refs/heads/${target.ref}`
+		]);
+	});
+
+	const isAncestor = Effect.fn('Git.isAncestor')(function* (
+		repo: GitRepo,
+		ancestor: GitSha,
+		descendant: GitSha
+	) {
+		return yield* succeeds(repo, ['merge-base', '--is-ancestor', ancestor, descendant]);
+	});
+
 	const fsError = (repo: GitRepo, args: ReadonlyArray<string>) => (error: { message: string }) =>
 		new GitError({ args, cwd: repo.cwd, exitCode: null, stderr: error.message });
 
@@ -540,6 +575,8 @@ const make = Effect.gen(function* () {
 		commit,
 		squash,
 		push,
+		pushHead,
+		isAncestor,
 		excludePath
 	});
 });

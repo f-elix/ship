@@ -535,7 +535,17 @@ describe('Reviewers.verify', () => {
 				expect(result.disproved).toEqual([
 					{ finding: found('tests', 'Untested.'), reason: 'The code checks it.' }
 				]);
-				expect(result.fixed).toEqual(['r1-2']);
+				// r1-1 is repeated this round, so it is unfixed whatever the verifier said.
+				expect(result.previous).toEqual([
+					{ id: 'r1-1', status: 'unfixed', evidence: 'Looks fixed.' },
+					{ id: 'r1-2', status: 'fixed', evidence: 'Guard added.' },
+					{ id: 'r1-3', status: 'unfixed', evidence: 'Still unguarded.' },
+					{
+						id: 'r1-4',
+						status: 'unfixed',
+						evidence: expect.stringContaining('no status')
+					}
+				]);
 				expect(result.cost).toEqual({
 					step: 'verify',
 					model: 'opus',
@@ -772,7 +782,7 @@ describe('Reviewers.verify', () => {
 					findings: [],
 					previous: []
 				});
-				expect(result).toEqual({ verified: [], disproved: [], fixed: [], cost: null });
+				expect(result).toEqual({ verified: [], disproved: [], previous: [], cost: null });
 				expect(yield* (yield* AgentFake).calls).toEqual([]);
 			})
 		)

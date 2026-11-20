@@ -134,7 +134,8 @@ export const Timeout = Schema.String.check(
 );
 
 // Every step has a timeout except the deterministic `triage` and `route`, whose Clef call
-// has a fixed one (`CLEF_TIMEOUT`), and `post`, which only runs git and gh.
+// has a fixed one (`CLEF_TIMEOUT`), and `post`, `resolve`, `commit` and `push`, which only
+// run git and gh. `recheck` is one verifier call, which `verify` limits.
 // `prepare` has none: no run reports it, and it stays a step only so that old logs decode.
 // `fixChecks` and `verify` limit the agent calls inside `checks` and `review`; `review`
 // limits each reviewer call.
@@ -148,7 +149,13 @@ const timeoutFields = {
 	fix: Timeout,
 	escalate: Timeout,
 	pr: Timeout
-} satisfies Record<Exclude<Step, 'triage' | 'route' | 'prepare' | 'post'>, typeof Timeout>;
+} satisfies Record<
+	Exclude<
+		Step,
+		'triage' | 'route' | 'prepare' | 'post' | 'recheck' | 'resolve' | 'commit' | 'push'
+	>,
+	typeof Timeout
+>;
 
 export const Timeouts = Schema.Struct(
 	Struct.evolve(timeoutFields, {

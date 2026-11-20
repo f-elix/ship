@@ -146,11 +146,23 @@ export interface VerifyInput extends ReviewSubject {
 	readonly context: AgentContext;
 }
 
+/** What the verifier found of one previous finding. */
+export interface PreviousStatus {
+	readonly id: FindingId;
+	readonly status: 'fixed' | 'unfixed';
+	/** The verifier's evidence; a fallback note when it gave the finding no status. */
+	readonly evidence: string;
+}
+
 export interface VerifyResult {
 	readonly verified: ReadonlyArray<VerifiedFinding>;
 	readonly disproved: ReadonlyArray<DisprovedFinding>;
-	/** Previous findings the verifier found fixed. */
-	readonly fixed: ReadonlyArray<FindingId>;
+	/**
+	 * One entry per previous finding, in input order: whether it is fixed, with the
+	 * verifier's evidence. A previous finding this round repeats is unfixed, whatever the
+	 * verifier said of it.
+	 */
+	readonly previous: ReadonlyArray<PreviousStatus>;
 	/** `null` when there was nothing to verify and no agent ran. */
 	readonly cost: AgentCallCost | null;
 }
@@ -543,14 +555,16 @@ export const assembleVerified = (
 
 		const statuses = new Map(output.previous.map((entry) => [entry.id, entry]));
 		const repeated = new Set(verified.flatMap((finding) => finding.repeats ?? []));
-		const fixed: Array<FindingId> = [];
+		const previousStatuses: Array<PreviousStatus> = [];
 		for (const previous of input.previous) {
 			const status = statuses.get(previous.id);
-			if (status?.status === 'fixed' && !repeated.has(previous.id)) {
-				fixed.push(previous.id);
-				continue;
-			}
-			if (repeated.has(previous.id)) continue;
+			const fixed = status?.status === 'fixed' && !repeated.has(previous.id);
+			previousStatuses.push({
+				id: previous.id,
+				status: fixed ? 'fixed' : 'unfixed',
+				evidence: status?.evidence ?? NO_STATUS
+			});
+			if (fixed || repeated.has(previous.id)) continue;
 			const finding = Struct.omit(previous, ['id', 'round', 'repeats', 'alsoReportedBy']);
 			verified.push({
 				...finding,
@@ -564,8 +578,11 @@ export const assembleVerified = (
 				repeats: previous.id
 			});
 		}
-		return { verified, disproved, fixed };
+		return { verified, disproved, previous: previousStatuses };
 	});
+
+/** The evidence of a previous finding the verifier gave no status. */
+const NO_STATUS = 'The verifier gave no status for this finding, so it counts as unfixed.';
 
 // --- Implementation ---
 
@@ -685,7 +702,7 @@ const make = (briefsDir: string) =>
 				return {
 					verified: [],
 					disproved: [],
-					fixed: [],
+					previous: [],
 					cost: null
 				} satisfies VerifyResult;
 			}

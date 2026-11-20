@@ -72,12 +72,16 @@ interface Save {
 	readonly events: ReadonlyArray<AppendableEvent>;
 }
 
-/** `value`, which must come from a `ship run` rather than a `ship review` run. */
-const shipRun = <T extends { readonly kind?: 'ship' | 'review' }>(
+type OtherKind = { readonly kind: 'review' | 'fix' | 'recheck' };
+
+/** `value`, which must come from a `ship run` rather than a run of another kind. */
+const shipRun = <T extends { readonly kind?: 'ship' | OtherKind['kind'] }>(
 	value: T | undefined
-): Exclude<T, { readonly kind: 'review' }> | undefined => {
-	if (value?.kind === 'review') throw new Error('Expected a ship run, got a review run');
-	return value as Exclude<T, { readonly kind: 'review' }> | undefined;
+): Exclude<T, OtherKind> | undefined => {
+	if (value?.kind !== undefined && value.kind !== 'ship') {
+		throw new Error(`Expected a ship run, got a ${value.kind} run`);
+	}
+	return value as Exclude<T, OtherKind> | undefined;
 };
 
 /** Records what the driver hands the journal, then passes it on to the real store. */

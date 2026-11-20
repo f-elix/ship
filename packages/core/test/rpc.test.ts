@@ -10,6 +10,8 @@ const notUsed = () => Effect.die('not used in this test');
 const Handlers = ShipRpcs.toLayer({
 	handshake: notUsed,
 	review: notUsed,
+	fix: notUsed,
+	recheck: notUsed,
 	run: () => Effect.fail(new PreconditionFailed({ reason: 'on-default-branch', detail: 'main' })),
 	resume: notUsed,
 	cancel: notUsed,

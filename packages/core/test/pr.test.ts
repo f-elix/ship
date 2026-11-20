@@ -260,7 +260,7 @@ case "$1 $2" in
   "pr create") cat > "${dir}/stdin.log"; echo "Creating pull request"; echo "https://github.com/o/r/pull/8" ;;
   "pr edit") cat > "${dir}/stdin.log" ;;
   "pr ready") ;;
-  "pr view") echo '{"baseRefName":"main","body":"Adds a.","headRefOid":"${HEAD_SHA}","number":7,"title":"Add a","url":"https://github.com/o/r/pull/7"}' ;;
+  "pr view") echo '{"baseRefName":"main","body":"Adds a.","headRefOid":"${HEAD_SHA}","headRefName":"feature","headRepository":{"id":"R_1","name":"r"},"headRepositoryOwner":{"id":"U_1","login":"fork-owner"},"isCrossRepository":true,"maintainerCanModify":true,"number":7,"title":"Add a","url":"https://github.com/o/r/pull/7"}' ;;
   "api --hostname") cat > "${dir}/stdin.log"; echo '{"id":80,"node_id":"PRR_kwDOAbc","user":{"login":"octocat","id":1},"body":"Body.","state":"CHANGES_REQUESTED","html_url":"https://github.com/o/r/pull/7#pullrequestreview-80","pull_request_url":"https://api.github.com/repos/o/r/pulls/7","author_association":"OWNER","_links":{"html":{"href":"https://github.com/o/r/pull/7#pullrequestreview-80"}},"submitted_at":"2026-11-19T12:00:00Z","commit_id":"${HEAD_SHA}"}' ;;
   *) echo "unknown" >&2; exit 1 ;;
 esac
@@ -314,13 +314,19 @@ esac
 				title: 'Add a',
 				body: 'Adds a.',
 				baseRef: 'main',
-				headSha: HEAD_SHA
+				headSha: HEAD_SHA,
+				headRef: 'feature',
+				headRepository: { owner: 'fork-owner', name: 'r' },
+				isCrossRepository: true,
+				maintainerCanModify: true
 			};
 			expect(yield* gh.viewPr(repo, '7')).toEqual(expected);
 			expect(yield* gh.viewPr(repo, 'https://github.com/o/r/pull/7')).toEqual(expected);
+			const fields =
+				'number,url,title,body,baseRefName,headRefOid,headRefName,headRepository,headRepositoryOwner,isCrossRepository,maintainerCanModify';
 			expect(read('argv.log').trim().split('\n')).toEqual([
-				'pr view 7 --json number,url,title,body,baseRefName,headRefOid',
-				'pr view https://github.com/o/r/pull/7 --json number,url,title,body,baseRefName,headRefOid'
+				`pr view 7 --json ${fields}`,
+				`pr view https://github.com/o/r/pull/7 --json ${fields}`
 			]);
 		}).pipe(Effect.scoped, Effect.provide(GhLive))
 	);
@@ -365,6 +371,113 @@ esac
 			const repo = { cwd: dir, env: { PATH: `${dir}:/usr/bin:/bin` } };
 			return { repo, argv: () => readFileSync(`${dir}/argv.log`, 'utf8').trim() };
 		});
+
+	/** One thread as `reviewThreads`' `--jq` prints it. */
+	const thread = (
+		id: string,
+		state: { readonly isResolved?: boolean; readonly isOutdated?: boolean } = {},
+		comments: ReadonlyArray<{ readonly login: string | null; readonly body: string }> = [
+			{ login: 'octocat', body: `Fix ${id}.` }
+		]
+	) =>
+		JSON.stringify({
+			id,
+			isResolved: state.isResolved ?? false,
+			isOutdated: state.isOutdated ?? false,
+			path: 'src/a.ts',
+			line: id === 'PRRT_file' ? null : 3,
+			comments: {
+				nodes: comments.map((comment, index) => ({
+					author: comment.login === null ? null : { login: comment.login },
+					body: comment.body,
+					url: `https://github.com/o/r/pull/7#discussion_r${id}${index}`
+				}))
+			}
+		});
+
+	it.effect(
+		"lists a PR's open, current threads across every page, as their first comments opened them",
+		() =>
+			Effect.gen(function* () {
+				const { repo, argv } = yield* listingGh(
+					[
+						thread('PRRT_open', {}, [
+							{ login: 'octocat', body: 'Fix this.' },
+							{ login: 'author', body: 'Done.' }
+						]),
+						thread('PRRT_resolved', { isResolved: true }),
+						thread('PRRT_outdated', { isOutdated: true }),
+						// Page 2.
+						thread('PRRT_file', {}, [{ login: null, body: 'Split this file.' }]),
+						thread('PRRT_empty', {}, []),
+						''
+					].join('\n')
+				);
+				const gh = yield* Gh;
+
+				const threads = yield* gh.reviewThreads(
+					repo,
+					'https://github.example.com/o/r/pull/7'
+				);
+
+				expect(threads).toEqual([
+					{
+						id: 'PRRT_open',
+						path: 'src/a.ts',
+						line: 3,
+						author: 'octocat',
+						body: 'Fix this.',
+						url: 'https://github.com/o/r/pull/7#discussion_rPRRT_open0'
+					},
+					{
+						id: 'PRRT_file',
+						path: 'src/a.ts',
+						line: null,
+						author: null,
+						body: 'Split this file.',
+						url: 'https://github.com/o/r/pull/7#discussion_rPRRT_file0'
+					}
+				]);
+				const call = argv();
+				expect(call).toMatch(
+					/^api graphql --hostname github\.example\.com --paginate -f query=/u
+				);
+				expect(call).toContain('reviewThreads(first: 100, after: $endCursor)');
+				expect(call).toContain(
+					'-f owner=o -f name=r -F number=7 --jq .data.repository.pullRequest.reviewThreads.nodes[]'
+				);
+			}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('fails with GhError when a listed thread is not one, rather than missing it', () =>
+		Effect.gen(function* () {
+			const { repo } = yield* listingGh(`${thread('PRRT_open')}\n{"id":"PRRT_bad"}\n`);
+			const gh = yield* Gh;
+
+			const failed = yield* Effect.flip(
+				gh.reviewThreads(repo, 'https://github.com/o/r/pull/7')
+			);
+
+			expect(failed._tag).toBe('GhError');
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('resolves a thread through the GraphQL API of the PR host', () =>
+		Effect.gen(function* () {
+			const { repo, argv } = yield* listingGh('{"data":{}}\n');
+			const gh = yield* Gh;
+
+			yield* gh.resolveThread(repo, {
+				prUrl: 'https://github.example.com/o/r/pull/7',
+				threadId: 'PRRT_open'
+			});
+
+			const call = argv();
+			expect(call).toMatch(/^api graphql --hostname github\.example\.com -f query=mutation/u);
+			expect(call).toContain('resolveReviewThread(input: { threadId: $threadId })');
+			expect(call).toMatch(/-f threadId=PRRT_open$/u);
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
 
 	const MARKER = '<!-- ship-review: 20261120-100000-abcdef-r1 -->';
 	const listed = (id: number, body: string | null) =>
