@@ -19,10 +19,10 @@ cd packages/cli && pnpm pack && npm i -g ./f-elix-ship-*.tgz
 
 ### Agent skills
 
-`skills/` holds three skills: `plan-out` designs a change with you and writes the plan dir (`spec.md` and `implementation-plan.md`), `ship` hands that plan to `ship run` and reports the result, and `ship-init` sets up a project. Link them into your agent's skills folder so they follow the checkout:
+`skills/` holds four skills: `plan-out` designs a change with you and writes the plan dir (`spec.md` and `implementation-plan.md`), `ship` hands that plan to `ship run` and reports the result, `ship-init` sets up a project, and `ship-conventions` loads ship's design conventions to discuss code without planning a change. Link them into your agent's skills folder so they follow the checkout:
 
 ```sh
-ln -s "$PWD/skills/plan-out" "$PWD/skills/ship" "$PWD/skills/ship-init" ~/.agents/skills/
+ln -s "$PWD/skills/plan-out" "$PWD/skills/ship" "$PWD/skills/ship-init" "$PWD/skills/ship-conventions" ~/.agents/skills/
 ```
 
 ## Set up a project
@@ -126,6 +126,8 @@ Each review round picks reviewers with the deterministic triggers in their brief
 ship carries a programming philosophy and its conventions, and applies them to every run, whether or not the repo has its own. They live in `packages/core/src/conventions/` and are bundled with the CLI: one Markdown file per topic (comments, Effect, error handling, testing, TypeScript, Svelte, styling and more), plus the `software-design-philosophy`, `codebase-design` and `testing` references.
 
 A topic applies when the repo uses its stack: a dependency in a git-tracked `package.json` (or a tracked `tsconfig.json` for TypeScript). The implementer gets the base file of every applying topic, the `codebase-design` and `testing` references and the philosophy; each reviewer gets the topics its brief lists, when they apply to the change. A rule quoted from a convention counts as a written project rule, so breaking it can be must-fix. The repo's own written rules (AGENTS.md, CLAUDE.md, its docs) win where they conflict.
+
+`ship conventions` prints the design conventions (the `software-design-philosophy` and `codebase-design` references and the file-organization topic, when it applies) for planning or discussing a change, and lists the other applying topics; `ship conventions <topic>` prints one of them. It runs without the daemon. The `plan-out` and `ship-conventions` skills run it.
 
 See `packages/core/src/conventions/README.md` for the file layout and frontmatter.
 

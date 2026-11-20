@@ -9,9 +9,12 @@ import {
 	BUILTIN_CONVENTIONS_DIR,
 	ChangeIntent,
 	Conventions,
+	DESIGN_CONVENTIONS,
+	designConventionFiles,
 	IMPLEMENTER_REFERENCES,
 	implementerConventionFiles,
 	implementerConventionsSection,
+	otherConventions,
 	packageDependencies,
 	parseConventionMarkdown,
 	REPO_RULES_WIN,
@@ -105,6 +108,12 @@ describe('bundled conventions', () => {
 		for (const name of IMPLEMENTER_REFERENCES) {
 			expect(existsSync(`${DIR}/references/${name}/SKILL.md`), name).toBe(true);
 		}
+	});
+
+	it('ships every design convention', () => {
+		const all: ConventionScope = { dir: DIR, topics };
+		expect(designConventionFiles(all)).toHaveLength(DESIGN_CONVENTIONS.length);
+		for (const file of designConventionFiles(all)) expect(existsSync(file), file).toBe(true);
 	});
 
 	it('leaves no house-rules template in any file', () => {
@@ -305,6 +314,29 @@ describe('reviewerConventionFiles', () => {
 
 	it('gives nothing to a reviewer with no list', () => {
 		expect(reviewerConventionFiles(scope, undefined)).toEqual([]);
+	});
+});
+
+describe('design conventions', () => {
+	const withDesignTopic: ConventionScope = {
+		dir: '/c',
+		topics: [...scope.topics, topic('file-organization', ['typescript'], undefined, true)]
+	};
+
+	it('gives the references, then each design topic that applies, base file only', () => {
+		expect(designConventionFiles(withDesignTopic)).toEqual([
+			'/c/references/software-design-philosophy/SKILL.md',
+			'/c/references/codebase-design/SKILL.md',
+			'/c/file-organization.md'
+		]);
+		expect(designConventionFiles(scope)).toEqual([
+			'/c/references/software-design-philosophy/SKILL.md',
+			'/c/references/codebase-design/SKILL.md'
+		]);
+	});
+
+	it('leaves the design topics out of the other topics', () => {
+		expect(names(otherConventions(withDesignTopic))).toEqual(names(scope.topics));
 	});
 });
 

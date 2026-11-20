@@ -23,6 +23,17 @@ export const BUILTIN_CONVENTIONS_DIR = fileURLToPath(new URL('./conventions', im
  */
 export const IMPLEMENTER_REFERENCES = ['codebase-design', 'testing'] as const;
 
+/**
+ * What a design discussion or a plan reads in full, as a brief's `conventions` list: the
+ * design guides, not the code-level rules. `ship conventions` prints them and lists the
+ * other topics that apply.
+ */
+export const DESIGN_CONVENTIONS = [
+	'references/software-design-philosophy',
+	'references/codebase-design',
+	'file-organization'
+] as const;
+
 // --- Topics ---
 
 /** The frontmatter of a topic's base file, `<topic>.md`. */
@@ -162,17 +173,38 @@ export const reviewerConventionFiles = (
 	list: ReviewerFrontmatter['conventions']
 ): ReadonlyArray<string> => {
 	if (list === undefined) return [];
-	const topicFiles = (topic: Convention) =>
-		topic.details === null ? [topic.base] : [topic.base, topic.details];
-	if (list === '*') return scope.topics.flatMap(topicFiles);
-	return list.flatMap((entry) => {
-		if (entry.startsWith('references/')) {
-			return [referencePath(scope.dir, entry.slice('references/'.length))];
-		}
-		const topic = scope.topics.find((candidate) => candidate.name === entry);
-		return topic === undefined ? [] : topicFiles(topic);
-	});
+	if (list === '*') return scope.topics.flatMap((topic) => topicFiles(topic, true));
+	return list.flatMap((entry) => conventionFiles(scope, entry));
 };
+
+/**
+ * The files of one `conventions` list entry: a reference, or a topic that applies, base
+ * then details. None for a topic that does not apply.
+ */
+export const conventionFiles = (
+	scope: ConventionScope,
+	entry: string,
+	options: { readonly details: boolean } = { details: true }
+): ReadonlyArray<string> => {
+	if (entry.startsWith('references/')) {
+		return [referencePath(scope.dir, entry.slice('references/'.length))];
+	}
+	const topic = scope.topics.find((candidate) => candidate.name === entry);
+	return topic === undefined ? [] : topicFiles(topic, options.details);
+};
+
+/** The design conventions that apply, base files only. */
+export const designConventionFiles = (scope: ConventionScope): ReadonlyArray<string> =>
+	DESIGN_CONVENTIONS.flatMap((entry) => conventionFiles(scope, entry, { details: false }));
+
+/** The topics that apply and are not design conventions, to read when a discussion needs them. */
+export const otherConventions = (scope: ConventionScope): ReadonlyArray<Convention> =>
+	scope.topics.filter(
+		(topic) => !(DESIGN_CONVENTIONS as ReadonlyArray<string>).includes(topic.name)
+	);
+
+const topicFiles = (topic: Convention, details: boolean) =>
+	details && topic.details !== null ? [topic.base, topic.details] : [topic.base];
 
 /** Tells agents given conventions that the repo's own written rules win. */
 export const REPO_RULES_WIN =
