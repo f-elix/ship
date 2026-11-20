@@ -292,9 +292,9 @@ export const PrimitiveSummary = Schema.Struct({
 	commits: Schema.Array(GitSha),
 	/** Every check pass, the baseline included. */
 	checks: Schema.Array(CheckRound),
-	/** The PR `ship pr` opened or updated. */
+	/** The PR `ship pr` opened or updated; `null` for the other kinds. */
 	prUrl: Schema.NullOr(Url),
-	/** The review `ship post` posted; `null` when the review had no findings to post. */
+	/** The review `ship post` posted; `null` for the other kinds, or until it is posted. */
 	reviewUrl: Schema.NullOr(Url),
 	costUsd: CostUsd,
 	/** Why the run failed, when `status` is `failed`. */

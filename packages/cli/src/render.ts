@@ -316,7 +316,9 @@ const kindLines = (run: RunInfo): Array<string> => {
 				...(run.branch === null ? [] : [`branch: ${run.branch}`]),
 				...(run.planDir === null ? [] : [`plan: ${run.planDir}`]),
 				...(run.review === null ? [] : [`review: ${run.review}`]),
-				...(run.url === null ? [] : [`url: ${run.url}`])
+				...(run.url === null
+					? []
+					: [`${run.kind === 'post' ? 'review' : 'pr'} url: ${run.url}`])
 			];
 	}
 };
@@ -377,7 +379,7 @@ export const exitCodeForSummary = (summary: Summary): number => {
 
 /**
  * Exit code when Ctrl-C (or SIGTERM) ends a command: 130, the shell convention for a command
- * ended by SIGINT, distinct from the run outcomes 0, 1 and 2. `ship run`, `ship review`,
- * `ship fix`, `ship recheck`, `ship implement`, `ship checks`, `ship pr`, `ship post` and `ship resume` detach from a run that already started, so it keeps going.
+ * ended by SIGINT, distinct from the run outcomes 0, 1 and 2. Every command that starts or
+ * resumes a run detaches from it instead, so it keeps going.
  */
 export const DETACHED_EXIT_CODE = 130;

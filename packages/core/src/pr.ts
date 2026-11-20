@@ -55,7 +55,8 @@ export interface OpenPrResult {
  */
 export class PrPublishError extends Schema.TaggedError<PrPublishError>()('PrPublishError', {
 	reason: Schema.String,
-	cost: AgentCallCost
+	cost: AgentCallCost,
+	cause: Schema.optionalKey(Schema.Defect())
 }) {
 	override get message(): string {
 		return `The pr agent finished, but ${this.reason}`;
@@ -256,7 +257,8 @@ const make = Effect.gen(function* () {
 			timeoutMs: input.timeoutMs,
 			transcript: input.transcript
 		});
-		const fail = (reason: string) => new PrPublishError({ reason, cost });
+		const fail = (reason: string, cause?: unknown) =>
+			new PrPublishError({ reason, cost, ...(cause === undefined ? {} : { cause }) });
 
 		return yield* Effect.gen(function* () {
 			const opened = yield* gh.findPr(repo, input.branch);
@@ -280,7 +282,7 @@ const make = Effect.gen(function* () {
 				created: existing === null,
 				cost
 			} satisfies OpenPrResult;
-		}).pipe(Effect.catchTag('GhError', (error) => Effect.fail(fail(error.message))));
+		}).pipe(Effect.catchTag('GhError', (error) => Effect.fail(fail(error.message, error))));
 	});
 
 	return Pr.of({ open });
