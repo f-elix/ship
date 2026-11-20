@@ -11,23 +11,23 @@
  */
 import { createEffectEventStreamLogic, createEffectLogic, setupEffect } from '@xstate/effect';
 import { Effect, Schema } from 'effect';
-import { baselinePrimitive, ChecksOutput, checksPrimitive } from './check-primitives.ts';
+import { baselineStep, ChecksOutput, checksStep } from './check-steps.ts';
 import { withCheckpointScope } from './checkpoint.ts';
 import { baselineFailures, failingChecks } from './checks.ts';
-import { implementPrimitive, planName } from './implementer.ts';
+import { implementStep, planName } from './implementer.ts';
 import { addCost, checksEvents, fail, machineKit, stepInput, type Next } from './machine-kit.ts';
-import { postPrimitive } from './post.ts';
-import { commitPrimitive } from './pr-branch.ts';
+import { postStep } from './post.ts';
+import { commitStep } from './pr-branch.ts';
 import { PrimitiveRunState } from './primitive-run.ts';
-import type { PrimitiveScope } from './primitive-scope.ts';
-import { invokePrimitive } from './primitive.ts';
-import { prPrimitive } from './publish.ts';
+import { prStep } from './publish.ts';
 import { stepOutcome, type StepOutcome } from './run-step.ts';
+import type { StepScope } from './step-scope.ts';
+import { invokeStep } from './step.ts';
 
 /** The message of the commit `ship checks` makes of its fixes. */
 export const CHECKS_COMMIT_MESSAGE = 'Fix failing checks';
 
-const scopeOf = (state: PrimitiveRunState): PrimitiveScope => ({
+const scopeOf = (state: PrimitiveRunState): StepScope => ({
 	runId: state.runId,
 	projectKey: state.projectKey,
 	cwd: state.cwd,
@@ -116,13 +116,13 @@ export const primitiveMachine = setupEffect({
 			stream: ({ input }) =>
 				checksEvents(
 					Effect.flatMap(required(input.planDir, 'plan'), (planDir) =>
-						invokePrimitive(baselinePrimitive, { ...scopeOf(input), planDir })
+						invokeStep(baselineStep, { ...scopeOf(input), planDir })
 					)
 				)
 		}),
 		implement: step((state) =>
 			Effect.flatMap(required(state.planDir, 'plan'), (planDir) =>
-				invokePrimitive(implementPrimitive, { ...implementerScope(state), planDir })
+				invokeStep(implementStep, { ...implementerScope(state), planDir })
 			)
 		),
 		checks: createEffectEventStreamLogic({
@@ -130,7 +130,7 @@ export const primitiveMachine = setupEffect({
 			stream: ({ input }) =>
 				checksEvents(
 					withCheckpointScope('checks')(
-						invokePrimitive(checksPrimitive, {
+						invokeStep(checksStep, {
 							...implementerScope(input),
 							round: 0,
 							commitMessage: commitMessage(input),
@@ -142,11 +142,11 @@ export const primitiveMachine = setupEffect({
 				)
 		}),
 		commit: step((state) =>
-			invokePrimitive(commitPrimitive, { ...scopeOf(state), message: commitMessage(state) })
+			invokeStep(commitStep, { ...scopeOf(state), message: commitMessage(state) })
 		),
 		pr: step((state) =>
 			Effect.flatMap(required(state.branch, 'branch'), (branch) =>
-				invokePrimitive(prPrimitive, {
+				invokeStep(prStep, {
 					...scopeOf(state),
 					planDir: state.planDir,
 					branch,
@@ -158,9 +158,7 @@ export const primitiveMachine = setupEffect({
 		),
 		post: step((state) =>
 			Effect.flatMap(required(state.review, 'review'), (review) =>
-				withCheckpointScope('post')(
-					invokePrimitive(postPrimitive, { ...scopeOf(state), review })
-				)
+				withCheckpointScope('post')(invokeStep(postStep, { ...scopeOf(state), review }))
 			)
 		)
 	}

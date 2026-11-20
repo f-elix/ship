@@ -1,5 +1,5 @@
 /**
- * The `post` primitive: posts a stored review as one GitHub review on the PR's pinned
+ * The `post` step: posts a stored review as one GitHub review on the PR's pinned
  * head, and the rules that turn findings into that review.
  */
 import { Effect, Schema } from 'effect';
@@ -8,11 +8,11 @@ import type { VerifiedFinding } from './finding.ts';
 import { findingMarker } from './findings-source.ts';
 import { Gh, type ReviewComment, type ReviewEvent } from './gh.ts';
 import { diffTargetPath, Git } from './git.ts';
-import { primitiveScopeFields } from './primitive-scope.ts';
-import type { Primitive } from './primitive.ts';
-import { ReviewId, Url } from './primitives.ts';
 import { StepNotReady } from './run-step.ts';
+import { stepScopeFields } from './step-scope.ts';
+import type { Step } from './step.ts';
 import { Reviews } from './stored-review.ts';
+import { ReviewId, Url } from './values.ts';
 
 /** What `post` sends GitHub: the review's verdict, its body and its inline comments. */
 export interface ReviewToPost {
@@ -123,7 +123,7 @@ export const reviewToPost = (
 export const reviewMarker = (id: ReviewId): string => `<!-- ship-review: ${id} -->`;
 
 export const PostInput = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	review: ReviewId
 });
 export interface PostInput extends Schema.Schema.Type<typeof PostInput> {}
@@ -137,7 +137,7 @@ export interface PostInput extends Schema.Schema.Type<typeof PostInput> {}
  * is checkpointed (`post`), and the review's body carries {@link reviewMarker}: a resumed
  * `post` that finds its marker on the PR takes that review instead of posting another.
  */
-export const postPrimitive = {
+export const postStep = {
 	name: 'post',
 	input: PostInput,
 	output: Schema.NullOr(Url),
@@ -199,4 +199,4 @@ export const postPrimitive = {
 			yield* reviews.save({ ...stored, postedUrl: url });
 			return url;
 		})
-} satisfies Primitive<PostInput, string | null, unknown>;
+} satisfies Step<PostInput, string | null, unknown>;

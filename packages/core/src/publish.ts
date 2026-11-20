@@ -1,5 +1,5 @@
 /**
- * The publishing primitives: `pr` opens or updates the pull request for the run's branch,
+ * The publishing steps: `pr` opens or updates the pull request for the run's branch,
  * and `escalate` commits unfinished work and publishes it as a draft that says why the
  * run stopped.
  */
@@ -8,14 +8,14 @@ import { agentContext } from './agent-context.ts';
 import { Git } from './git.ts';
 import { planIntent } from './implementer.ts';
 import { Pr } from './pr.ts';
-import { primitiveScopeFields } from './primitive-scope.ts';
-import type { Primitive } from './primitive.ts';
-import { AbsolutePath, Url, type Step } from './primitives.ts';
 import { StepNotReady, type StepKit } from './run-step.ts';
 import { CheckRound, EscalationReason, UnresolvedFindings } from './run.ts';
+import { stepScopeFields } from './step-scope.ts';
+import type { Step } from './step.ts';
+import { AbsolutePath, Url, type StepName } from './values.ts';
 
 export const PrInput = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	/** The plan the change implements, whose spec and plan the PR agent reads; `null` without one. */
 	planDir: Schema.NullOr(AbsolutePath),
 	branch: Schema.NonEmptyString,
@@ -32,7 +32,7 @@ export interface PrInput extends Schema.Schema.Type<typeof PrInput> {}
 
 /** Squashes when configured and allowed, pushes, then opens or updates the PR. Returns its URL. */
 const publish = (
-	step: Extract<Step, 'pr' | 'escalate'>,
+	step: Extract<StepName, 'pr' | 'escalate'>,
 	input: PrInput,
 	kit: StepKit,
 	escalation: EscalationReason | null
@@ -71,13 +71,13 @@ const publish = (
 	});
 
 /** `pr`: squashes when configured, pushes the branch and opens or updates its PR. */
-export const prPrimitive = {
+export const prStep = {
 	name: 'pr',
 	input: PrInput,
 	output: Url,
 	timeoutMs: (config) => config.timeouts.pr,
 	run: (input, kit) => publish('pr', input, kit, null)
-} satisfies Primitive<PrInput, string, unknown>;
+} satisfies Step<PrInput, string, unknown>;
 
 export const EscalateInput = Schema.Struct({
 	...PrInput.fields,
@@ -90,7 +90,7 @@ export interface EscalateInput extends Schema.Schema.Type<typeof EscalateInput> 
  * `escalate`: commits any unfinished work, then publishes a draft PR that says why the run
  * stopped and lists what is unresolved.
  */
-export const escalatePrimitive = {
+export const escalateStep = {
 	name: 'escalate',
 	input: EscalateInput,
 	output: Url,
@@ -108,4 +108,4 @@ export const escalatePrimitive = {
 			if (sha !== null) yield* kit.report({ _tag: 'CommitCreated', sha, message });
 			return yield* publish('escalate', input, kit, reason);
 		})
-} satisfies Primitive<EscalateInput, string, unknown>;
+} satisfies Step<EscalateInput, string, unknown>;

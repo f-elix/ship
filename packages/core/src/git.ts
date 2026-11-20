@@ -1,8 +1,8 @@
 import { Context, Effect, FileSystem, Layer, Schema } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
-import { GitSha, type Env, type ProjectKey } from './primitives.ts';
 import { exec, type ProcessOutput } from './process.ts';
 import { projectKeyOf } from './project-key.ts';
+import { GitSha, type Env, type ProjectKey } from './values.ts';
 
 // --- Public types ---
 

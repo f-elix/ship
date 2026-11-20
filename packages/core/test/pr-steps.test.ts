@@ -2,16 +2,16 @@ import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
 import {
 	ChangeIntent,
-	commitPrimitive,
+	commitStep,
 	FindingId,
-	pushPrimitive,
-	recheckPrimitive,
-	resolvePrimitive,
+	pushStep,
+	recheckStep,
+	resolveStep,
 	type VerifiedFinding
 } from '../src/index.ts';
 import { AgentFake, fakeSha, GhFake, GitFake } from '../src/testing.ts';
 import { baseSha } from './fixtures.ts';
-import { CheckpointValues, recordingKit, scopeWith, withPrimitives } from './primitive-harness.ts';
+import { CheckpointValues, recordingKit, scopeWith, withSteps } from './step-harness.ts';
 
 const PR_URL = 'https://github.com/f-elix/example/pull/1';
 
@@ -44,9 +44,9 @@ const statuses = (
 	costUsd: 0.2
 });
 
-describe('recheckPrimitive', () => {
+describe('recheckStep', () => {
 	it.effect("gives each finding the verifier's status and evidence, unfixed by default", () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
 				yield* agent.script(
@@ -58,7 +58,7 @@ describe('recheckPrimitive', () => {
 				);
 				const recorded = yield* recordingKit;
 
-				const rechecked = yield* recheckPrimitive.run(
+				const rechecked = yield* recheckStep.run(
 					{
 						...scopeWith(),
 						intent,
@@ -86,7 +86,7 @@ describe('recheckPrimitive', () => {
 	);
 
 	it.effect('takes the checkpointed statuses on resume instead of asking again', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
 				yield* agent.script(
@@ -94,9 +94,9 @@ describe('recheckPrimitive', () => {
 					statuses([{ id: 'r1-1', status: 'fixed' }])
 				);
 				const input = { ...scopeWith(), intent, findings: [findingOf(1)] };
-				const first = yield* recheckPrimitive.run(input, (yield* recordingKit).kit);
+				const first = yield* recheckStep.run(input, (yield* recordingKit).kit);
 
-				const again = yield* recheckPrimitive.run(input, (yield* recordingKit).kit);
+				const again = yield* recheckStep.run(input, (yield* recordingKit).kit);
 
 				expect(again).toEqual(first);
 				expect(yield* agent.calls).toHaveLength(1);
@@ -106,7 +106,7 @@ describe('recheckPrimitive', () => {
 	);
 });
 
-describe('resolvePrimitive', () => {
+describe('resolveStep', () => {
 	const openThreads = Effect.gen(function* () {
 		const gh = yield* GhFake;
 		const a = yield* gh.addThread({
@@ -130,12 +130,12 @@ describe('resolvePrimitive', () => {
 	});
 
 	it.effect('resolves every thread on GitHub and reports each', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const threads = yield* openThreads;
 				const recorded = yield* recordingKit;
 
-				const resolved = yield* resolvePrimitive.run(
+				const resolved = yield* resolveStep.run(
 					{ ...scopeWith(), prUrl: PR_URL, headSha: baseSha, threads },
 					recorded.kit
 				);
@@ -149,13 +149,13 @@ describe('resolvePrimitive', () => {
 	);
 
 	it.effect('skips the threads it resolved before a resume', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const threads = yield* openThreads;
 				const [first] = threads;
 				(yield* CheckpointValues).set(`thread/${first?.threadId}`, first?.threadId);
 
-				yield* resolvePrimitive.run(
+				yield* resolveStep.run(
 					{ ...scopeWith(), prUrl: PR_URL, headSha: baseSha, threads },
 					(yield* recordingKit).kit
 				);
@@ -166,12 +166,12 @@ describe('resolvePrimitive', () => {
 	);
 
 	it.effect('refuses, resolving nothing, when HEAD moved from the rechecked head', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const threads = yield* openThreads;
 
 				const error = yield* Effect.flip(
-					resolvePrimitive.run(
+					resolveStep.run(
 						{ ...scopeWith(), prUrl: PR_URL, headSha: fakeSha(9), threads },
 						(yield* recordingKit).kit
 					)
@@ -184,17 +184,17 @@ describe('resolvePrimitive', () => {
 	);
 });
 
-describe('commitPrimitive', () => {
+describe('commitStep', () => {
 	it.effect('commits the work and reports it, or returns null with nothing to commit', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const git = yield* GitFake;
 				yield* git.edit([{ path: 'src/a.ts', status: 'modified' }]);
 				const recorded = yield* recordingKit;
 				const input = { ...scopeWith(), message: 'Address review findings' };
 
-				const sha = yield* commitPrimitive.run(input, recorded.kit);
-				const again = yield* commitPrimitive.run(input, recorded.kit);
+				const sha = yield* commitStep.run(input, recorded.kit);
+				const again = yield* commitStep.run(input, recorded.kit);
 
 				const state = yield* git.state;
 				expect(sha).toBe(state.headSha);
@@ -208,21 +208,21 @@ describe('commitPrimitive', () => {
 	);
 });
 
-describe('pushPrimitive', () => {
+describe('pushStep', () => {
 	const target = { remote: 'origin', ref: 'feature' };
 
 	it.effect("pushes HEAD to the PR's branch when it descends from the pinned head", () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const git = yield* GitFake;
 				yield* git.edit([{ path: 'src/a.ts', status: 'modified' }]);
-				const sha = yield* commitPrimitive.run(
+				const sha = yield* commitStep.run(
 					{ ...scopeWith(), message: 'Fix' },
 					(yield* recordingKit).kit
 				);
 				const recorded = yield* recordingKit;
 
-				const pushed = yield* pushPrimitive.run(
+				const pushed = yield* pushStep.run(
 					{ ...scopeWith(), pinnedSha: baseSha, target },
 					recorded.kit
 				);
@@ -235,9 +235,9 @@ describe('pushPrimitive', () => {
 	);
 
 	it.effect('pushes nothing when HEAD is still the pinned head', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
-				const pushed = yield* pushPrimitive.run(
+				const pushed = yield* pushStep.run(
 					{ ...scopeWith(), pinnedSha: baseSha, target },
 					(yield* recordingKit).kit
 				);
@@ -249,10 +249,10 @@ describe('pushPrimitive', () => {
 	);
 
 	it.effect('refuses when HEAD does not descend from the pinned head', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const error = yield* Effect.flip(
-					pushPrimitive.run(
+					pushStep.run(
 						{ ...scopeWith(), pinnedSha: baseSha, target },
 						(yield* recordingKit).kit
 					)

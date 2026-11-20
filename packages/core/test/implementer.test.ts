@@ -1,15 +1,9 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
-import {
-	AgentSdkError,
-	fixPrimitive,
-	implementPrimitive,
-	invokePrimitive,
-	SessionId
-} from '../src/index.ts';
+import { AgentSdkError, fixStep, implementStep, invokeStep, SessionId } from '../src/index.ts';
 import { AgentFake, ChecksFake, GitFake } from '../src/testing.ts';
 import { nit, verifiedFinding } from './fixtures.ts';
-import { recordingKit, scopeWith, withPrimitives } from './primitive-harness.ts';
+import { recordingKit, scopeWith, withSteps } from './step-harness.ts';
 
 const implementInput = { ...scopeWith(), planDir: '/plans/feature', session: null };
 
@@ -20,9 +14,9 @@ const editing = (reply: { readonly output?: unknown; readonly costUsd: number })
 		return () => Effect.as(git.edit([{ path: 'src/a.ts', status: 'added' }]), reply);
 	});
 
-describe('implementPrimitive', () => {
+describe('implementStep', () => {
 	it.effect('returns the commit subject, records cost and session, and formats', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
 				yield* agent.script(
@@ -31,7 +25,7 @@ describe('implementPrimitive', () => {
 				);
 				const recorded = yield* recordingKit;
 
-				const subject = yield* implementPrimitive.run(implementInput, recorded.kit);
+				const subject = yield* implementStep.run(implementInput, recorded.kit);
 
 				expect(subject).toBe('Add a');
 				expect(yield* recorded.costs).toEqual([0.5]);
@@ -48,7 +42,7 @@ describe('implementPrimitive', () => {
 	);
 
 	it.effect('returns no subject for an invalid one, still billing the call', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* (yield* AgentFake).script(
 					{ step: 'implement' },
@@ -56,7 +50,7 @@ describe('implementPrimitive', () => {
 				);
 				const recorded = yield* recordingKit;
 
-				const subject = yield* implementPrimitive.run(implementInput, recorded.kit);
+				const subject = yield* implementStep.run(implementInput, recorded.kit);
 
 				expect(subject).toBeNull();
 				expect(yield* recorded.costs).toEqual([0.4]);
@@ -66,7 +60,7 @@ describe('implementPrimitive', () => {
 	);
 
 	it.effect('keeps the cost of an agent call that fails', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const sessionId = SessionId.make('failed-session');
 				yield* (yield* AgentFake).script(
@@ -82,7 +76,7 @@ describe('implementPrimitive', () => {
 					})
 				);
 
-				const outcome = yield* invokePrimitive(implementPrimitive, implementInput);
+				const outcome = yield* invokeStep(implementStep, implementInput);
 
 				expect(outcome).toMatchObject({
 					_tag: 'Failed',
@@ -94,9 +88,9 @@ describe('implementPrimitive', () => {
 	);
 });
 
-describe('fixPrimitive', () => {
+describe('fixStep', () => {
 	it.effect('resumes the session with every finding, the nits included', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
 				yield* agent.script({ step: 'fix' }, yield* editing({ costUsd: 0.3 }));
@@ -106,7 +100,7 @@ describe('fixPrimitive', () => {
 					cumulativeCostUsd: 1
 				};
 
-				yield* fixPrimitive.run(
+				yield* fixStep.run(
 					{
 						...scopeWith(),
 						planDir: null,

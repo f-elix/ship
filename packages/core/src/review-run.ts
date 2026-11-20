@@ -1,9 +1,9 @@
 import { Schema } from 'effect';
 import type { FindingId, VerifiedFinding } from './finding.ts';
-import { primitiveScopeFields } from './primitive-scope.ts';
-import { CostUsd, GitSha, PositiveInt, Url } from './primitives.ts';
 import { ofTag, type SummaryInput } from './run-summary.ts';
 import type { ReviewSummary } from './run.ts';
+import { stepScopeFields } from './step-scope.ts';
+import { CostUsd, GitSha, PositiveInt, Url } from './values.ts';
 
 /** The pull request a `ship review` run reviews, as it was when the run was created. */
 export const ReviewedPr = Schema.Struct({
@@ -23,7 +23,7 @@ export interface ReviewedPr extends Schema.Schema.Type<typeof ReviewedPr> {}
  * the caller's checkout, at `pr.headSha` when the run started; `baseSha` is `pr.baseSha`.
  */
 export const ReviewRunState = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	kind: Schema.Literal('review'),
 	pr: ReviewedPr,
 	/** Whether the run posts its findings as a review on the PR. */

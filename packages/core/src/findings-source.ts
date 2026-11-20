@@ -6,7 +6,7 @@
 import { Schema } from 'effect';
 import { FindingId } from './finding.ts';
 import { parsePrUrl } from './pr-url.ts';
-import { ReviewId } from './primitives.ts';
+import { ReviewId } from './values.ts';
 
 /** Where a command's findings come from. */
 export const FindingsSource = Schema.TaggedUnion({

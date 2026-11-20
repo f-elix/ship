@@ -1,6 +1,6 @@
 import { Schema } from 'effect';
-import { PositiveInt } from './primitives.ts';
 import { ReviewerName } from './reviewer.ts';
+import { PositiveInt } from './values.ts';
 
 export const Severity = Schema.Literals(['must-fix', 'tradeoff', 'nit']);
 export type Severity = typeof Severity.Type;

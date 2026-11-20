@@ -1,18 +1,18 @@
 /**
  * What both pipeline machines share: how a step's outcome settles into the next state,
- * how a defect fails the run, and how a check primitive's lock waits reach the machine.
+ * how a defect fails the run, and how a check step's lock waits reach the machine.
  * Each machine passes its own policy for spending and failures.
  */
 import { EffectFailure } from '@xstate/effect';
 import { Cause, Effect, Queue, Stream } from 'effect';
-import type { ChecksOutput } from './check-primitives.ts';
+import type { ChecksOutput } from './check-steps.ts';
 import type { AppendableEvent } from './run-journal.ts';
 import { RunReporter, type StepFailure, type StepOutcome, type StepSpend } from './run-step.ts';
 import type { EscalationReason } from './run.ts';
 
 /**
  * Every step actor gets the run's context as its input, in both machines, and maps it to
- * its primitive's input itself. The driver relies on this when it restarts a step that
+ * its step's input itself. The driver relies on this when it restarts a step that
  * finished before the machine took its result.
  */
 export const stepInput = <C>({ context }: { readonly context: C }): C => context;
@@ -97,16 +97,16 @@ export const machineKit = <C extends KitContext, T extends string>(
 	}): Next<C, 'failed'> => fail(context, describeDefect(event.error))
 });
 
-// --- Check primitives as events ---
+// --- Check steps as events ---
 
-/** What a check primitive's stream actor sends its machine: lock waits, then the outcome. */
+/** What a check step's stream actor sends its machine: lock waits, then the outcome. */
 export type ChecksEvent =
 	| { readonly type: 'lock.waiting' }
 	| { readonly type: 'lock.acquired' }
 	| { readonly type: 'checks.done'; readonly outcome: StepOutcome<ChecksOutput> };
 
 /**
- * Runs a check primitive's invocation as a stream of {@link ChecksEvent}s: every event it
+ * Runs a check step's invocation as a stream of {@link ChecksEvent}s: every event it
  * reports still goes to the run's reporter, and its lock waits also reach the machine, so
  * it can show the run as waiting.
  */

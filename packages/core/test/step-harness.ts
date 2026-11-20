@@ -1,6 +1,6 @@
 /**
- * What the primitive tests share: the fakes and in-memory services a primitive runs on,
- * a step kit that records what the primitive reports, and its input's common fields.
+ * What the step tests share: the fakes and in-memory services a step runs on,
+ * a step kit that records what the step reports, and its input's common fields.
  */
 import { NodeServices } from '@effect/platform-node';
 import { Context, Effect, Layer, Option, Ref, type Scope } from 'effect';
@@ -19,9 +19,9 @@ import {
 	ShipHome,
 	type AppendableEvent,
 	type CheckpointStorage,
-	type PrimitiveScope,
 	type ResolvedConfig,
 	type StepKit,
+	type StepScope,
 	type StoredReview
 } from '../src/index.ts';
 import {
@@ -94,20 +94,20 @@ const harness = (dir: string, git: Partial<FakeGitState>) => {
 		memoryReviews,
 		Layer.succeed(Checkpoint, makeCheckpoint(storage)),
 		Layer.succeed(CheckpointValues, values),
-		// `invokePrimitive` reports through it; tests read events from `recordingKit`.
+		// `invokeStep` reports through it; tests read events from `recordingKit`.
 		Layer.succeed(RunReporter, { report: () => Effect.void })
 	).pipe(Layer.provideMerge(fakes), Layer.provideMerge(NodeServices.layer));
 	return services;
 };
 
-export type PrimitiveHarness = Layer.Success<ReturnType<typeof harness>>;
+export type StepHarness = Layer.Success<ReturnType<typeof harness>>;
 
 /**
  * Runs `body` on fresh fakes, an in-memory checkpoint and two reviewers: `standards` on
  * source changes and `security` on config changes.
  */
-export const withPrimitives = <A, E>(
-	body: Effect.Effect<A, E, PrimitiveHarness | Scope.Scope>,
+export const withSteps = <A, E>(
+	body: Effect.Effect<A, E, StepHarness | Scope.Scope>,
 	git: Partial<FakeGitState> = {}
 ) =>
 	Effect.gen(function* () {
@@ -125,7 +125,7 @@ export const withPrimitives = <A, E>(
 		return yield* body.pipe(Effect.provide(harness(dir, git)));
 	}).pipe(Effect.scoped);
 
-/** A step kit that keeps what the primitive reports, records and resumes. */
+/** A step kit that keeps what the step reports, records and resumes. */
 export const recordingKit = Effect.gen(function* () {
 	const events = yield* Ref.make<ReadonlyArray<{ readonly _tag: string }>>([]);
 	const costs = yield* Ref.make<ReadonlyArray<number>>([]);
@@ -146,8 +146,8 @@ export const recordingKit = Effect.gen(function* () {
 	};
 });
 
-/** The fields every primitive input starts with, on the fake repo at `baseSha`. */
-export const scopeWith = (config: Partial<ResolvedConfig> = {}): PrimitiveScope => ({
+/** The fields every step input starts with, on the fake repo at `baseSha`. */
+export const scopeWith = (config: Partial<ResolvedConfig> = {}): StepScope => ({
 	runId,
 	projectKey,
 	cwd: '/repo',

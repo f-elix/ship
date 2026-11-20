@@ -5,15 +5,15 @@
  */
 import { createEffectEventStreamLogic, createEffectLogic, setupEffect } from '@xstate/effect';
 import { Effect, Schema } from 'effect';
-import { ChecksOutput, checksPrimitive } from './check-primitives.ts';
+import { ChecksOutput, checksStep } from './check-steps.ts';
 import { withCheckpointScope } from './checkpoint.ts';
-import { fixPrimitive } from './implementer.ts';
+import { fixStep } from './implementer.ts';
 import { addCost, checksEvents, fail, machineKit, stepInput, type Next } from './machine-kit.ts';
-import { commitPrimitive, pushPrimitive } from './pr-branch.ts';
+import { commitStep, pushStep } from './pr-branch.ts';
 import { FixRunState } from './pr-run.ts';
-import type { PrimitiveScope } from './primitive-scope.ts';
-import { invokePrimitive } from './primitive.ts';
 import { stepOutcome, type StepOutcome } from './run-step.ts';
+import type { StepScope } from './step-scope.ts';
+import { invokeStep } from './step.ts';
 
 /** The message of the commit a fix run makes. */
 export const FIX_COMMIT_MESSAGE = 'Address review findings';
@@ -21,7 +21,7 @@ export const FIX_COMMIT_MESSAGE = 'Address review findings';
 /** The checks of a fix run belong to the review round its findings came from. */
 const ROUND = 1;
 
-const scopeOf = (state: FixRunState): PrimitiveScope => ({
+const scopeOf = (state: FixRunState): StepScope => ({
 	runId: state.runId,
 	projectKey: state.projectKey,
 	cwd: state.cwd,
@@ -83,7 +83,7 @@ export const fixMachine = setupEffect({
 	},
 	actors: {
 		fix: step((state) =>
-			invokePrimitive(fixPrimitive, {
+			invokeStep(fixStep, {
 				...implementerScope(state),
 				mustFix: state.findings.filter((finding) => finding.severity === 'must-fix'),
 				nits: state.findings.filter((finding) => finding.severity === 'nit')
@@ -94,7 +94,7 @@ export const fixMachine = setupEffect({
 			stream: ({ input }) =>
 				checksEvents(
 					withCheckpointScope('checks')(
-						invokePrimitive(checksPrimitive, {
+						invokeStep(checksStep, {
 							...implementerScope(input),
 							round: ROUND,
 							commitMessage: FIX_COMMIT_MESSAGE,
@@ -105,14 +105,14 @@ export const fixMachine = setupEffect({
 				)
 		}),
 		commit: step((state) =>
-			invokePrimitive(commitPrimitive, { ...scopeOf(state), message: FIX_COMMIT_MESSAGE })
+			invokeStep(commitStep, { ...scopeOf(state), message: FIX_COMMIT_MESSAGE })
 		),
 		push: step((state) =>
 			// The machine enters `push` only when the run pushes.
 			state.push === null
 				? Effect.die(new Error('A --local fix run has nothing to push'))
 				: withCheckpointScope('push')(
-						invokePrimitive(pushPrimitive, {
+						invokeStep(pushStep, {
 							...scopeOf(state),
 							pinnedSha: state.pr.headSha,
 							target: state.push

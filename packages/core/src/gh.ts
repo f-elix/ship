@@ -2,8 +2,8 @@ import { Context, Effect, Layer, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import type { GitRepo } from './git.ts';
 import { parsePrUrl, PR_URL } from './pr-url.ts';
-import { GitSha, Url } from './primitives.ts';
 import { exec } from './process.ts';
+import { GitSha, Url } from './values.ts';
 
 /** An open pull request. */
 export interface PullRequest {

@@ -2,6 +2,8 @@ import { Schema } from 'effect';
 import { LockResource } from './config.ts';
 import { DisprovedFinding, Finding, FindingId, VerifiedFinding } from './finding.ts';
 import { FindingsSource } from './findings-source.ts';
+import { ReviewerName } from './reviewer.ts';
+import { EscalationReason, PrimitiveRunKind, RecheckedFinding, Summary } from './run.ts';
 import {
 	AbsolutePath,
 	CostUsd,
@@ -14,12 +16,10 @@ import {
 	ReviewId,
 	RunId,
 	SessionId,
-	Step,
+	StepName,
 	Timestamp,
 	Url
-} from './primitives.ts';
-import { ReviewerName } from './reviewer.ts';
-import { EscalationReason, PrimitiveRunKind, RecheckedFinding, Summary } from './run.ts';
+} from './values.ts';
 
 const at = { at: Timestamp };
 
@@ -103,10 +103,10 @@ export const RunEvent = Schema.TaggedUnion({
 	},
 	/** Machine state values as dotted paths, e.g. `checks.waiting`. */
 	StateChanged: { ...at, from: Schema.String, to: Schema.String },
-	StepStarted: { ...at, step: Step },
+	StepStarted: { ...at, step: StepName },
 	StepEnded: {
 		...at,
-		step: Step,
+		step: StepName,
 		outcome: Schema.Literals(['ok', 'failed', 'timed-out', 'interrupted']),
 		durationMs: Millis,
 		error: Schema.optionalKey(Schema.String)
@@ -160,7 +160,7 @@ export const RunEvent = Schema.TaggedUnion({
 	/** Cost of one agent call. */
 	AgentCost: {
 		...at,
-		step: Step,
+		step: StepName,
 		model: ModelId,
 		sessionId: SessionId,
 		costUsd: CostUsd

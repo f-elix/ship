@@ -15,7 +15,6 @@ import {
 } from './pr-run.ts';
 import { primitiveMachine, type PrimitiveMachine } from './primitive-pipeline.ts';
 import { buildPrimitiveSummary, type PrimitiveRunState } from './primitive-run.ts';
-import type { Env, RunId } from './primitives.ts';
 import { recheckMachine, type RecheckMachine } from './recheck-pipeline.ts';
 import { reviewMachine, type ReviewMachine } from './review-pipeline.ts';
 import { buildReviewSummary, type ReviewRunState } from './review-run.ts';
@@ -41,6 +40,7 @@ import type {
 } from './run.ts';
 import type { ShipHome } from './ship-paths.ts';
 import { statePath } from './state-path.ts';
+import type { Env, RunId } from './values.ts';
 
 // --- Public types ---
 

@@ -4,8 +4,6 @@
  * checkout.
  */
 import { Schema } from 'effect';
-import { primitiveScopeFields } from './primitive-scope.ts';
-import { AbsolutePath, CostUsd, ReviewId, Url } from './primitives.ts';
 import { checkRounds, ofTag, type SummaryInput } from './run-summary.ts';
 import {
 	AgentSession,
@@ -14,6 +12,8 @@ import {
 	PrimitiveRunKind,
 	type PrimitiveSummary
 } from './run.ts';
+import { stepScopeFields } from './step-scope.ts';
+import { AbsolutePath, CostUsd, ReviewId, Url } from './values.ts';
 
 /**
  * The context of a primitive run, persisted in snapshots like `RunState`. `kind` is the
@@ -22,7 +22,7 @@ import {
  * and the reviewed base for `post`.
  */
 export const PrimitiveRunState = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	kind: PrimitiveRunKind,
 	/** The plan `implement` works through, and `pr` may describe; `null` without one. */
 	planDir: Schema.NullOr(AbsolutePath),

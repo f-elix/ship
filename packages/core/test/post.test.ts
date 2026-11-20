@@ -3,7 +3,7 @@ import { Effect } from 'effect';
 import {
 	ChangeIntent,
 	FindingId,
-	postPrimitive,
+	postStep,
 	ReviewId,
 	reviewMarker,
 	Reviews,
@@ -12,7 +12,7 @@ import {
 } from '../src/index.ts';
 import { fakeSha, GhFake } from '../src/testing.ts';
 import { baseSha, projectKey, runId } from './fixtures.ts';
-import { CheckpointValues, recordingKit, scopeWith, withPrimitives } from './primitive-harness.ts';
+import { CheckpointValues, recordingKit, scopeWith, withSteps } from './step-harness.ts';
 
 const PR_URL = 'https://github.com/f-elix/example/pull/1';
 const reviewId = ReviewId.make('run-1-r1');
@@ -64,13 +64,13 @@ const storeReview = (findings: ReadonlyArray<VerifiedFinding>, prUrl: string | n
 
 const post = Effect.gen(function* () {
 	const recorded = yield* recordingKit;
-	const url = yield* postPrimitive.run({ ...scopeWith(), review: reviewId }, recorded.kit);
+	const url = yield* postStep.run({ ...scopeWith(), review: reviewId }, recorded.kit);
 	return { url, recorded };
 });
 
-describe('postPrimitive', () => {
+describe('postStep', () => {
 	it.effect('comments inline in the diff, lists the rest in the body and requests changes', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* storeReview([findingAt(1, 'must-fix', 3), findingAt(2, 'nit', 40)]);
 
@@ -94,7 +94,7 @@ describe('postPrimitive', () => {
 	);
 
 	it.effect('only comments when there is no must-fix finding', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* storeReview([findingAt(1, 'tradeoff', 2)]);
 
@@ -108,7 +108,7 @@ describe('postPrimitive', () => {
 	);
 
 	it.effect('posts nothing for a review without findings', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* storeReview([]);
 
@@ -122,7 +122,7 @@ describe('postPrimitive', () => {
 	);
 
 	it.effect('takes the review it already posted instead of posting another', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* storeReview([findingAt(1, 'nit', 2)]);
 				const first = yield* post;
@@ -139,7 +139,7 @@ describe('postPrimitive', () => {
 	);
 
 	it.effect('refuses when HEAD moved from the reviewed head', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* storeReview([findingAt(1, 'nit', 2)]);
 
@@ -153,7 +153,7 @@ describe('postPrimitive', () => {
 	);
 
 	it.effect('refuses a review with no PR to post on', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* storeReview([findingAt(1, 'nit', 2)], null);
 

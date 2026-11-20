@@ -7,9 +7,9 @@ import { FindingId, VerifiedFinding, type Severity } from './finding.ts';
 import { FINDING_MARKER, parseFindingMarker, type FindingsSource } from './findings-source.ts';
 import { Gh, type GhError, type PrDetails, type ReviewThread } from './gh.ts';
 import type { GitRepo } from './git.ts';
-import { ReviewId } from './primitives.ts';
 import { ChangeIntent } from './reviewers.ts';
 import { Reviews, type ReviewNotFound, type StoredReview } from './stored-review.ts';
+import { ReviewId } from './values.ts';
 
 /** The severity labels `post` writes, as `**Must-fix** (reviewer): claim`. */
 const LABELS: Readonly<Record<string, Severity>> = {

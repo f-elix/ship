@@ -1,15 +1,15 @@
 /**
  * The `ship run` machine: baseline, implement, checks, review, then fix, checks and review
- * again until triage opens the PR or escalates. Each working state invokes one primitive
- * (triage is the one pure step), so re-running a state on resume repeats only that
- * primitive, and the primitive's checkpoints skip what it already finished.
+ * again until triage opens the PR or escalates. Each working state invokes one step
+ * (triage is the one pure state), so re-running a state on resume repeats only that
+ * step, and the step's checkpoints skip what it already finished.
  */
 import { createEffectEventStreamLogic, createEffectLogic, setupEffect } from '@xstate/effect';
 import { Schema, type Effect } from 'effect';
-import { baselinePrimitive, ChecksOutput, checksPrimitive } from './check-primitives.ts';
+import { baselineStep, ChecksOutput, checksStep } from './check-steps.ts';
 import { withCheckpointScope } from './checkpoint.ts';
 import { baselineFailures } from './checks.ts';
-import { fixPrimitive, implementPrimitive, planIntent, planName } from './implementer.ts';
+import { fixStep, implementStep, planIntent, planName } from './implementer.ts';
 import {
 	addCost,
 	checksEvents,
@@ -19,18 +19,18 @@ import {
 	stepInput,
 	type Next
 } from './machine-kit.ts';
-import type { PrimitiveScope } from './primitive-scope.ts';
-import { invokePrimitive } from './primitive.ts';
-import { escalatePrimitive, prPrimitive, type PrInput } from './publish.ts';
-import { reviewPrimitive } from './review-primitive.ts';
+import { escalateStep, prStep, type PrInput } from './publish.ts';
+import { reviewStep } from './review-step.ts';
 import { stepOutcome, type StepOutcome } from './run-step.ts';
 import { RunState, type ReviewRound } from './run.ts';
+import type { StepScope } from './step-scope.ts';
+import { invokeStep } from './step.ts';
 import { TriageNext, triageStep } from './triage.ts';
 
-// --- Context to primitive inputs ---
+// --- Context to step inputs ---
 
-/** The primitive scope of the run's context. */
-const scopeOf = (state: RunState): PrimitiveScope => ({
+/** The step scope of the run's context. */
+const scopeOf = (state: RunState): StepScope => ({
 	runId: state.runId,
 	projectKey: state.projectKey,
 	cwd: state.cwd,
@@ -82,7 +82,7 @@ const reviewInput = (state: RunState) => ({
 });
 
 /**
- * Wraps a state's primitive invocation so its checkpoints are keyed under the state and the
+ * Wraps a state's step invocation so its checkpoints are keyed under the state and the
  * round: each loop iteration gets its own keys.
  */
 const inState = (state: string, round: number) => withCheckpointScope(`${state}:${round}`);
@@ -156,7 +156,7 @@ const completeRound = (context: RunState, round: ReviewRound): RunState => ({
 
 /**
  * The pipeline. Each working state invokes one step actor, which maps the context to its
- * primitive's input and returns the outcome; the state's `onDone` picks the next state.
+ * step's input and returns the outcome; the state's `onDone` picks the next state.
  *
  * `baseline` and `checks` have `running` and `waiting` substates: `waiting` while a
  * check waits for its lock (see {@link isWaitingState}). A passing check pass commits
@@ -175,15 +175,15 @@ export const pipelineMachine = setupEffect({
 	},
 	actors: {
 		baseline: checksLogic((state) =>
-			invokePrimitive(baselinePrimitive, { ...scopeOf(state), planDir: state.planDir })
+			invokeStep(baselineStep, { ...scopeOf(state), planDir: state.planDir })
 		),
-		implement: step((state) => invokePrimitive(implementPrimitive, implementerScope(state))),
+		implement: step((state) => invokeStep(implementStep, implementerScope(state))),
 		checks: checksLogic((state) =>
 			inState(
 				'checks',
 				state.round
 			)(
-				invokePrimitive(checksPrimitive, {
+				invokeStep(checksStep, {
 					...implementerScope(state),
 					round: state.round,
 					commitMessage: commitMessage(state),
@@ -192,23 +192,23 @@ export const pipelineMachine = setupEffect({
 			)
 		),
 		review: step((state) =>
-			inState('review', state.round)(invokePrimitive(reviewPrimitive, reviewInput(state)))
+			inState('review', state.round)(invokeStep(reviewStep, reviewInput(state)))
 		),
 		triage: step(triageStep),
 		fix: step((state) =>
-			invokePrimitive(fixPrimitive, {
+			invokeStep(fixStep, {
 				...implementerScope(state),
 				mustFix: state.unresolved.mustFix,
 				nits: state.unresolved.nits
 			})
 		),
 		escalate: step((state) =>
-			invokePrimitive(escalatePrimitive, {
+			invokeStep(escalateStep, {
 				...prInput(state),
 				reason: state.escalationReason
 			})
 		),
-		pr: step((state) => invokePrimitive(prPrimitive, prInput(state)))
+		pr: step((state) => invokeStep(prStep, prInput(state)))
 	}
 }).createMachine({
 	id: 'pipeline',

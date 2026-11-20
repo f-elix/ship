@@ -4,8 +4,8 @@
  */
 import { Context, type Effect, Schema } from 'effect';
 import { VerifiedFinding } from './finding.ts';
-import { GitSha, ProjectKey, ReviewId, RunId, Url } from './primitives.ts';
 import { ChangeIntent } from './reviewers.ts';
+import { GitSha, ProjectKey, ReviewId, RunId, Url } from './values.ts';
 
 /** What a stored review reviewed: a project's `baseSha..headSha`, against `intent`. */
 export const ReviewSubjectRef = Schema.Struct({

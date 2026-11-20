@@ -1,5 +1,5 @@
 /**
- * The `resolve` primitive: resolves the GitHub review threads of fixed findings. It posts
+ * The `resolve` step: resolves the GitHub review threads of fixed findings. It posts
  * no replies and no review.
  */
 import { Effect, Schema } from 'effect';
@@ -7,17 +7,17 @@ import { Checkpoint } from './checkpoint.ts';
 import { FindingId } from './finding.ts';
 import { Gh } from './gh.ts';
 import { Git } from './git.ts';
-import { primitiveScopeFields } from './primitive-scope.ts';
-import type { Primitive } from './primitive.ts';
-import { GitSha, Url } from './primitives.ts';
 import { StepNotReady } from './run-step.ts';
+import { stepScopeFields } from './step-scope.ts';
+import type { Step } from './step.ts';
+import { GitSha, Url } from './values.ts';
 
 /** A fixed finding and the review thread it was posted as. */
 export const FindingThread = Schema.Struct({ findingId: FindingId, threadId: Schema.String });
 export interface FindingThread extends Schema.Schema.Type<typeof FindingThread> {}
 
 export const ResolveInput = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	prUrl: Url,
 	/** The PR's head the findings were found fixed at, pinned when the run started. */
 	headSha: GitSha,
@@ -34,7 +34,7 @@ export interface ResolveInput extends Schema.Schema.Type<typeof ResolveInput> {}
  * resolved; one resolved on GitHub just before a crash is resolved again, which GitHub
  * takes as a no-op.
  */
-export const resolvePrimitive = {
+export const resolveStep = {
 	name: 'resolve',
 	input: ResolveInput,
 	output: Schema.Array(Schema.String),
@@ -61,4 +61,4 @@ export const resolvePrimitive = {
 				)
 			);
 		})
-} satisfies Primitive<ResolveInput, ReadonlyArray<string>, unknown>;
+} satisfies Step<ResolveInput, ReadonlyArray<string>, unknown>;

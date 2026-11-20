@@ -1,5 +1,5 @@
 /**
- * The check primitives: `baseline`, the checks on the base commit before any change, and
+ * The check steps: `baseline`, the checks on the base commit before any change, and
  * `checks`, which runs the checks on the change and has the implementer fix failing ones
  * between passes, up to the configured cap.
  */
@@ -8,13 +8,13 @@ import { Checkpoint } from './checkpoint.ts';
 import { baselinePass, Checks, checksPassed, failingChecks, filesForChecks } from './checks.ts';
 import { Git } from './git.ts';
 import { fixChecksCall, implementerFields } from './implementer.ts';
-import { primitiveScopeFields } from './primitive-scope.ts';
-import type { Primitive } from './primitive.ts';
-import { AbsolutePath, NonNegativeInt } from './primitives.ts';
 import { StepNotReady, StepTimeout, type StepKit } from './run-step.ts';
 import { AgentSession, CheckRound } from './run.ts';
+import { stepScopeFields } from './step-scope.ts';
+import type { Step } from './step.ts';
+import { AbsolutePath, NonNegativeInt } from './values.ts';
 
-/** What both check primitives return: every pass they ran, and whether the last passed. */
+/** What both check steps return: every pass they ran, and whether the last passed. */
 export const ChecksOutput = Schema.Struct({
 	passes: Schema.Array(CheckRound),
 	passed: Schema.Boolean
@@ -24,7 +24,7 @@ export interface ChecksOutput extends Schema.Schema.Type<typeof ChecksOutput> {}
 // --- baseline ---
 
 export const BaselineInput = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	/** The run's plan dir, which git is told to ignore so the plan never gets committed. */
 	planDir: AbsolutePath
 });
@@ -34,7 +34,7 @@ export interface BaselineInput extends Schema.Schema.Type<typeof BaselineInput> 
  * `baseline`: checks the run can start in place (plan dir excluded from git, clean tree,
  * `HEAD` still at the base), then runs every check once on the base commit, without fixes.
  */
-export const baselinePrimitive = {
+export const baselineStep = {
 	name: 'baseline',
 	input: BaselineInput,
 	output: ChecksOutput,
@@ -66,7 +66,7 @@ export const baselinePrimitive = {
 			);
 			return { passes: [pass], passed: checksPassed(pass) };
 		})
-} satisfies Primitive<BaselineInput, ChecksOutput, unknown>;
+} satisfies Step<BaselineInput, ChecksOutput, unknown>;
 
 // --- checks ---
 
@@ -128,7 +128,7 @@ const fixFailing = (input: ChecksInput, kit: StepKit, pass: CheckRound) => {
  * Each pass and each fix is checkpointed (`pass/<n>`, `fix/<n>`), so a resumed run keeps
  * its count of fixes and does not redo a finished one.
  */
-export const checksPrimitive = {
+export const checksStep = {
 	name: 'checks',
 	input: ChecksInput,
 	output: ChecksOutput,
@@ -168,4 +168,4 @@ export const checksPrimitive = {
 				yield* kit.recordSession(session);
 			}
 		})
-} satisfies Primitive<ChecksInput, ChecksOutput, unknown>;
+} satisfies Step<ChecksInput, ChecksOutput, unknown>;

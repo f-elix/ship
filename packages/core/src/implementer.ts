@@ -1,5 +1,5 @@
 /**
- * The implementer primitives, `implement` and `fix`, and the implementer call they share
+ * The implementer steps, `implement` and `fix`, and the implementer call they share
  * with `checks`, which runs the implementer between passes to fix failing checks.
  */
 import { Effect, Schema } from 'effect';
@@ -15,13 +15,13 @@ import { Checks, filesForChecks } from './checks.ts';
 import { Conventions, implementerConventionsSection } from './conventions.ts';
 import { VerifiedFinding } from './finding.ts';
 import { Git } from './git.ts';
-import { primitiveScopeFields, type PrimitiveScope } from './primitive-scope.ts';
-import type { Primitive } from './primitive.ts';
-import { AbsolutePath, type Step } from './primitives.ts';
 import { ChangeIntent } from './reviewers.ts';
 import type { StepKit } from './run-step.ts';
 import { AgentSession, CommitSubject } from './run.ts';
 import { PLAN_FILES } from './ship-paths.ts';
+import { stepScopeFields, type StepScope } from './step-scope.ts';
+import type { Step } from './step.ts';
+import { AbsolutePath, type StepName } from './values.ts';
 
 // --- Plans ---
 
@@ -39,7 +39,7 @@ export const planName = (planDir: string): string => planDir.slice(planDir.lastI
 
 /** What every implementer call reads: where it works, and the session it resumes. */
 export const implementerFields = {
-	...primitiveScopeFields,
+	...stepScopeFields,
 	/**
 	 * The plan the work comes from; the implementer may read its dir. `null` for work
 	 * with no plan.
@@ -50,13 +50,13 @@ export const implementerFields = {
 };
 
 /** The input of every implementer call. */
-export interface ImplementerScope extends PrimitiveScope {
+export interface ImplementerScope extends StepScope {
 	readonly planDir: string | null;
 	readonly session: AgentSession | null;
 }
 
 /** Runs the project's format command on the run's changed files, if it has one. */
-const formatChanges = Effect.fnUntraced(function* (scope: PrimitiveScope) {
+const formatChanges = Effect.fnUntraced(function* (scope: StepScope) {
 	if (scope.config.format === null) return;
 	const git = yield* Git;
 	const checks = yield* Checks;
@@ -126,7 +126,7 @@ const askWithSubject: ImplementerAsk<CommitSubject | null> = (agent, input) =>
  * session, which the next implementer call resumes.
  */
 export const implementerCall = <A>(
-	step: Extract<Step, 'implement' | 'fixChecks' | 'fix'>,
+	step: Extract<StepName, 'implement' | 'fixChecks' | 'fix'>,
 	input: ImplementerScope,
 	kit: StepKit,
 	prompt: (conventions: string) => string,
@@ -211,7 +211,7 @@ export interface ImplementInput extends Schema.Schema.Type<typeof ImplementInput
  * subject it wrote, or `null` when it gave no valid one. It leaves the work uncommitted:
  * `checks` commits it once the checks pass.
  */
-export const implementPrimitive = {
+export const implementStep = {
 	name: 'implement',
 	input: ImplementInput,
 	output: Schema.NullOr(CommitSubject),
@@ -243,7 +243,7 @@ export const implementPrimitive = {
 			(reply) => reply.value
 		);
 	}
-} satisfies Primitive<ImplementInput, CommitSubject | null, unknown>;
+} satisfies Step<ImplementInput, CommitSubject | null, unknown>;
 
 // --- fix ---
 
@@ -274,7 +274,7 @@ const findingsSection = (
  * `fix`: the implementer fixes the given must-fix findings and nits, each verified against
  * the code. Like `implement`, it leaves the work for `checks` to commit.
  */
-export const fixPrimitive = {
+export const fixStep = {
 	name: 'fix',
 	input: FixInput,
 	output: Schema.Void,
@@ -298,4 +298,4 @@ export const fixPrimitive = {
 				askPlain
 			)
 		)
-} satisfies Primitive<FixInput, void, unknown>;
+} satisfies Step<FixInput, void, unknown>;

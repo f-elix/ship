@@ -4,9 +4,9 @@ import type { Check, ResolvedConfig } from './config.ts';
 import type { CheckEvent } from './event.ts';
 import type { ChangedFile } from './git.ts';
 import { LockEvent, Locks, type UnknownLockResource } from './locks.ts';
-import type { Env } from './primitives.ts';
 import { DEFAULT_OUTPUT_TAIL, execTail, type OutputTailLimits } from './process.ts';
 import type { CheckResult, CheckRound } from './run.ts';
+import type { Env } from './values.ts';
 
 // --- Public types ---
 

@@ -6,7 +6,7 @@ import {
 	makeCheckpoint,
 	withCheckpointScope
 } from '../src/index.ts';
-import { mapStorage } from './primitive-harness.ts';
+import { mapStorage } from './step-harness.ts';
 
 /** An effect that counts its runs and succeeds with `value`. */
 const counted = <A>(runs: Ref.Ref<number>, value: A) =>
