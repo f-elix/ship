@@ -27,6 +27,7 @@ import {
 	type Connection,
 	type Rpc
 } from './connection.ts';
+import { conventions } from './conventions.ts';
 import { setExitCode } from './exit-code.ts';
 import { init } from './init.ts';
 import { Invocation } from './invocation.ts';
@@ -600,6 +601,7 @@ export const ship = Command.make('ship').pipe(
 		logs,
 		daemon,
 		init,
+		conventions,
 		auth
 	])
 );
