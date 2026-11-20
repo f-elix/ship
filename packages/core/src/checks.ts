@@ -125,6 +125,25 @@ export const expandFiles = (command: string, files: ReadonlyArray<string>): stri
 export const filesForChecks = (changed: ReadonlyArray<ChangedFile>): ReadonlyArray<string> =>
 	changed.filter((file) => file.status !== 'deleted').map((file) => file.path);
 
+/** The names of the checks that failed in `round`, other than those in `preexisting`. */
+export const failingChecks = (
+	round: CheckRound,
+	preexisting: ReadonlyArray<string> = []
+): ReadonlyArray<string> =>
+	round.results
+		.filter((result) => result.exitCode !== 0 && !preexisting.includes(result.name))
+		.map((result) => result.name);
+
+/** Every check passed, or failed already before the change (`preexisting`). */
+export const checksPassed = (round: CheckRound, preexisting: ReadonlyArray<string> = []) =>
+	failingChecks(round, preexisting).length === 0;
+
+/** The checks that failed in the baseline pass among `checks`: they failed before any change. */
+export const baselineFailures = (checks: ReadonlyArray<CheckRound>): ReadonlyArray<string> => {
+	const baseline = checks.find((round) => round.baseline);
+	return baseline === undefined ? [] : failingChecks(baseline);
+};
+
 /**
  * The baseline pass: every check once, before any change, so with no fix commands and no
  * changed files (a check using `{files}` is skipped), each command limited by the baseline

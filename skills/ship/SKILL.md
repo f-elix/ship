@@ -23,7 +23,7 @@ ship runs the whole loop in its daemon: baseline checks → implement → checks
 3. **Report** from the summary and the exit code:
     - **0, done**: the PR URL, the cost, and the tradeoffs listed in the PR body, one line each.
     - **2, escalated**: a draft PR is up. Give the `escalationReason` and every unresolved must-fix finding and nit, then offer to fix them (`ship resume` does not apply; the run is over).
-    - **1, failed**: a precondition message, a failing baseline (show the failing checks' `outputTail`: ship spent no tokens), or the run's `error`. A failed baseline means the branch is red before any change; offer to fix it first. An interrupted run (the daemon stopped) prints a resume hint: offer `ship resume <id>`.
+    - **1, failed**: a precondition message or the run's `error`. An interrupted run (the daemon stopped) prints a resume hint: offer `ship resume <id>`.
     - **130, detached**: give the run id and `ship logs <id> --follow` / `ship status <id>`.
 
 ## Reviewing a pull request

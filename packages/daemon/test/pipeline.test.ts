@@ -444,30 +444,37 @@ describe('pipeline', () => {
 		)
 	);
 
-	it.effect('fails on a failing baseline without calling an agent', () =>
+	it.effect('goes on after a failing baseline, holding the change only to the other checks', () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
-				const checks = yield* ChecksFake;
-				yield* checks.respond(yield* exitCodesByCheck({ test: [1] }));
+				const git = yield* GitFake;
+				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1, 1] }));
+				yield* agent.script(
+					{ step: 'implement' },
+					implementsWith(git, 'feature.ts', { commitSubject: SUBJECT })
+				);
+				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
+				yield* agent.script({ step: 'pr' }, prText);
 				const state = yield* newRun();
 
 				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
 
-				expect(summary.status).toBe('failed');
-				expect(summary.error).toContain('Baseline checks failed');
-				expect(summary.checks).toEqual([
-					{
-						baseline: true,
-						round: 0,
-						attempt: 0,
-						results: [
-							{ name: 'test', exitCode: 1, durationMs: 0, outputTail: 'test failed' }
-						]
-					}
+				expect(summary.status).toBe('done');
+				expect(
+					shipRun(summary)?.checks.map((pass) => [
+						pass.baseline,
+						pass.results.map((result) => result.exitCode)
+					])
+				).toEqual([
+					[true, [1]],
+					[false, [1]]
 				]);
-				expect(yield* agent.calls).toEqual([]);
-				expect(transitions(yield* eventsOf(state.runId))).toEqual(['failed']);
+				// `test` failed before the change, so nobody was asked to fix it.
+				expect((yield* agent.calls).map((call) => call.step)).not.toContain('fixChecks');
+				expect((yield* git.state).commits.map((commit) => commit.message)).toEqual([
+					SUBJECT
+				]);
 			})
 		)
 	);

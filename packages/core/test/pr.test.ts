@@ -194,6 +194,7 @@ describe('renderPrBody', () => {
 	it('indents multi-line evidence under its item and leaves out empty sections', () => {
 		const body = renderPrBody('Body.', {
 			escalation: null,
+			checks: [],
 			unresolved: {
 				mustFix: [],
 				tradeoffs: [
@@ -205,6 +206,27 @@ describe('renderPrBody', () => {
 		expect(body).toBe(
 			'Body.\n\n## Tradeoffs\n\n- `src/a.ts:2` (security): Extra query.\n  line one\n  line two\n'
 		);
+	});
+});
+
+describe('renderPrBody with a failing baseline', () => {
+	it('lists the checks that failed before the change and whether they still fail', () => {
+		const pass = (baseline: boolean, lint: number, test: number) => ({
+			baseline,
+			round: 0,
+			attempt: 0,
+			results: [
+				{ name: 'lint', exitCode: lint, durationMs: 1, outputTail: '' },
+				{ name: 'test', exitCode: test, durationMs: 1, outputTail: '' }
+			]
+		});
+		const body = renderPrBody('Body.', {
+			escalation: null,
+			checks: [pass(true, 1, 1), pass(false, 0, 1)],
+			unresolved: { mustFix: [], tradeoffs: [], nits: [] }
+		});
+		expect(body).toContain('## Checks failing before this change');
+		expect(body).toContain('- lint: passes now\n- test: still fails');
 	});
 });
 

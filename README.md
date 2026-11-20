@@ -48,6 +48,8 @@ Run from a feature branch with a clean working tree, with a plan dir holding `sp
 ship run .plans/my-feature
 ```
 
+The run starts with a baseline: every check once, before any change. A check that fails there does not stop the run, but the change is not held to it: its failures later neither fail a pass nor go to the check-fix agent, and the PR body lists it under "Checks failing before this change".
+
 Events stream to stderr as one line each: state changes, check results, lock waits, findings counts, cost, the PR URL. When the run ends, its summary JSON is printed on stdout and nothing else is, so `ship run <dir> > summary.json` keeps it. The exit code says how the run ended:
 
 | Code | Meaning                                                  |

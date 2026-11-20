@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Schema } from 'effect';
 import { Agent, AgentCallCost, type AgentError, type TranscriptTarget } from './agent.ts';
+import { baselineFailures } from './checks.ts';
 import type { VerifiedFinding } from './finding.ts';
 import { Gh, GhError } from './gh.ts';
 import type { Commit, GitRepo } from './git.ts';
@@ -172,14 +173,34 @@ const findingItem = (finding: VerifiedFinding) => {
 const findingsSection = (title: string, findings: ReadonlyArray<VerifiedFinding>) =>
 	findings.length === 0 ? [] : [`## ${title}`, '', ...findings.map(findingItem), ''];
 
+/** The checks that failed on the base commit, which ship did not hold the change to. */
+const preexistingSection = (checks: ReadonlyArray<CheckRound>) => {
+	const failing = baselineFailures(checks);
+	if (failing.length === 0) return [];
+	const last = checks.at(-1);
+	const status = (name: string) =>
+		last?.results.find((result) => result.name === name)?.exitCode === 0
+			? 'passes now'
+			: 'still fails';
+	return [
+		'## Checks failing before this change',
+		'',
+		'These failed on the base commit, so ship did not hold the change to them.',
+		'',
+		...failing.map((name) => `- ${name}: ${status(name)}`),
+		''
+	];
+};
+
 /**
- * The full body: an escalation notice, the agent's body, then the review findings left
- * for a human, written by ship so none is lost or reworded. A finished run lists only its
- * tradeoffs; an escalated one also lists the must-fix findings and nits it left unresolved.
+ * The full body: an escalation notice, the agent's body, the checks that failed before the
+ * change, then the review findings left for a human, written by ship so none is lost or
+ * reworded. A finished run lists only its tradeoffs; an escalated one also lists the
+ * must-fix findings and nits it left unresolved.
  */
 export const renderPrBody = (
 	agentBody: string,
-	input: Pick<OpenPrInput, 'unresolved' | 'escalation'>
+	input: Pick<OpenPrInput, 'unresolved' | 'escalation' | 'checks'>
 ): string =>
 	[
 		...(input.escalation === null
@@ -191,6 +212,7 @@ export const renderPrBody = (
 				]),
 		agentBody.trim(),
 		'',
+		...preexistingSection(input.checks),
 		...(input.escalation === null
 			? []
 			: [
