@@ -3,6 +3,9 @@
  * holds everything it reads, so a pipeline state, a test or a later command can call it
  * the same way. Pipelines invoke primitives through {@link invokePrimitive}, which reports
  * the step and turns its errors into an outcome the machine settles.
+ *
+ * A primitive that keeps sub-work in `Checkpoint.once` makes that value's schema part of
+ * the stored run format: changing it requires bumping `SNAPSHOT_VERSION`.
  */
 import type { Effect, Schema } from 'effect';
 import type { ResolvedConfig } from './config.ts';

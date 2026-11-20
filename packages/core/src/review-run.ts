@@ -3,7 +3,7 @@ import type { FindingId, VerifiedFinding } from './finding.ts';
 import { primitiveScopeFields } from './primitive-scope.ts';
 import { CostUsd, GitSha, PositiveInt, Url } from './primitives.ts';
 import { ofTag, type SummaryInput } from './run-summary.ts';
-import { ReviewRound, type ReviewSummary } from './run.ts';
+import type { ReviewSummary } from './run.ts';
 
 /** The pull request a `ship review` run reviews, as it was when the run was created. */
 export const ReviewedPr = Schema.Struct({
@@ -28,8 +28,6 @@ export const ReviewRunState = Schema.Struct({
 	pr: ReviewedPr,
 	/** Whether the run posts its findings as a review on the PR. */
 	post: Schema.Boolean,
-	/** The review's round with its verified findings; `null` until `review` ends. */
-	review: Schema.NullOr(ReviewRound),
 	/** Running cost for display while the run is live; the summary sums `AgentCost` events. */
 	costUsd: CostUsd,
 	/** The posted review; `null` until `post` posts one. */
@@ -50,7 +48,6 @@ export const initialReviewRunState = (start: NewReviewRunState): ReviewRunState 
 	...start,
 	kind: 'review',
 	baseSha: start.pr.baseSha,
-	review: null,
 	costUsd: 0,
 	reviewUrl: null,
 	error: null

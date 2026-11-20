@@ -1,5 +1,6 @@
 import { Clock, Context, DateTime, Duration, Effect, Ref, Schema } from 'effect';
 import { agentErrorCost, type AgentCallCost, type AgentError } from './agent.ts';
+import type { CheckpointUnreadable } from './checkpoint.ts';
 import type { CheckSpawnError, CheckTimeout } from './checks.ts';
 import type { GhError } from './gh.ts';
 import { Git, type GitError } from './git.ts';
@@ -59,6 +60,7 @@ export class StepNotReady extends Schema.TaggedError<StepNotReady>()('StepNotRea
 /** Every error a step can fail with; anything else is a defect and fails the run. */
 export type StepError =
 	| AgentError
+	| CheckpointUnreadable
 	| CheckSpawnError
 	| CheckTimeout
 	| GhError
@@ -125,6 +127,7 @@ const TIMED_OUT: Readonly<Record<StepError['_tag'], boolean>> = {
 	CheckTimeout: true,
 	AgentSdkError: false,
 	AgentOutputMismatch: false,
+	CheckpointUnreadable: false,
 	CheckSpawnError: false,
 	GhError: false,
 	GitError: false,
@@ -154,6 +157,7 @@ const failedSpend = (error: StepError): FailedSpend => {
 		case 'AgentOutputMismatch':
 			return { cost: agentErrorCost(error), session: error.spend?.session ?? null };
 		case 'AgentTimeout':
+		case 'CheckpointUnreadable':
 		case 'StepTimeout':
 		case 'CheckTimeout':
 		case 'CheckSpawnError':

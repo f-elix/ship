@@ -1,21 +1,12 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Option, Ref, Schema } from 'effect';
+import { Effect, Ref, Schema } from 'effect';
 import {
 	Checkpoint,
+	CheckpointUnreadable,
 	makeCheckpoint,
-	withCheckpointScope,
-	type CheckpointStorage
+	withCheckpointScope
 } from '../src/index.ts';
-
-/** Storage over a plain map, so tests can read and plant raw values. */
-const mapStorage = () => {
-	const values = new Map<string, unknown>();
-	const storage: CheckpointStorage = {
-		load: (key) => Effect.sync(() => Option.fromUndefinedOr(values.get(key))),
-		save: (key, value) => Effect.sync(() => void values.set(key, value))
-	};
-	return { values, storage };
-};
+import { mapStorage } from './primitive-harness.ts';
 
 /** An effect that counts its runs and succeeds with `value`. */
 const counted = <A>(runs: Ref.Ref<number>, value: A) =>
@@ -71,18 +62,21 @@ describe('Checkpoint', () => {
 		})
 	);
 
-	it.effect('runs the work again when the stored value no longer decodes', () =>
+	it.effect('fails without running the work when the stored value does not decode', () =>
 		Effect.gen(function* () {
 			const { values, storage } = mapStorage();
 			// Written by an older ship whose value had another shape.
-			values.set('k', { old: true });
+			values.set('review:1/k', { old: true });
 			const runs = yield* Ref.make(0);
 
-			const value = yield* makeCheckpoint(storage).once('k', Schema.Number, counted(runs, 4));
+			const error = yield* Effect.flip(
+				makeCheckpoint(storage, 'review:1').once('k', Schema.Number, counted(runs, 4))
+			);
 
-			expect(value).toBe(4);
-			expect(yield* Ref.get(runs)).toBe(1);
-			expect(values.get('k')).toBe(4);
+			expect(error).toBeInstanceOf(CheckpointUnreadable);
+			expect(error).toMatchObject({ key: 'review:1/k' });
+			expect(yield* Ref.get(runs)).toBe(0);
+			expect(values.get('review:1/k')).toEqual({ old: true });
 		})
 	);
 

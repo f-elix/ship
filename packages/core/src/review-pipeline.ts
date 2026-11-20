@@ -97,12 +97,10 @@ const { settle, onDefect } = machineKit<ReviewRunState, 'failed'>({
 });
 
 /** After `review`: `post` when asked to and there is something to post, else `done`. */
-const afterReview = (context: ReviewRunState, round: ReviewRound): ReviewNext => {
-	const next = { ...context, review: round };
-	return context.post && round.findings.length > 0
-		? { target: 'post', context: next }
-		: { target: 'done', context: next };
-};
+const afterReview = (context: ReviewRunState, round: ReviewRound): ReviewNext =>
+	context.post && round.findings.length > 0
+		? { target: 'post', context }
+		: { target: 'done', context };
 
 /**
  * The review machine: one state per primitive, like the pipeline. A resumed `review`

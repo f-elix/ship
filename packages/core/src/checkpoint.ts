@@ -1,6 +1,9 @@
 /**
  * Durable results of a run's sub-work. A resumed run re-runs the step that was in flight;
  * the step skips the parts it already finished by wrapping each in `Checkpoint.once`.
+ *
+ * Stored values outlive the code that wrote them, so changing the schema of a checkpointed
+ * value requires bumping `SNAPSHOT_VERSION`: runs saved before it are then not resumed.
  */
 import { Context, Effect, Option, Schema } from 'effect';
 
@@ -16,15 +19,27 @@ export interface CheckpointShape {
 	 * value is stored only once `effect` succeeds, so a failed or interrupted `effect` runs
 	 * again next time. Whatever `effect` does besides producing its value, such as
 	 * reporting events or recording cost, is not repeated when the stored value is
-	 * returned. A stored value that no longer decodes with `schema` counts as absent.
+	 * returned. A stored value that does not decode with `schema` fails with
+	 * `CheckpointUnreadable` instead of running `effect` again, since its side effects,
+	 * such as a posted review, may already have happened.
 	 */
 	readonly once: <A, I, E, R>(
 		key: string,
 		schema: Schema.Codec<A, I>,
 		effect: Effect.Effect<A, E, R>
-	) => Effect.Effect<A, E, R>;
+	) => Effect.Effect<A, E | CheckpointUnreadable, R>;
 	/** The same checkpoints with every key under `prefix`, e.g. `review:2`. */
 	readonly scoped: (prefix: string) => CheckpointShape;
+}
+
+/** A stored checkpoint value does not decode with the schema it is read with. */
+export class CheckpointUnreadable extends Schema.TaggedError<CheckpointUnreadable>()(
+	'CheckpointUnreadable',
+	{ key: Schema.String, detail: Schema.String }
+) {
+	override get message(): string {
+		return `The checkpoint ${this.key} cannot be read: ${this.detail}`;
+	}
 }
 
 /** A run's checkpoints. The run driver provides one per run, kept in the run store. */
@@ -42,17 +57,16 @@ export const makeCheckpoint = (storage: CheckpointStorage, prefix?: string): Che
 			key: string,
 			schema: Schema.Codec<A, I>,
 			effect: Effect.Effect<A, E, R>
-		): Effect.Effect<A, E, R> =>
+		): Effect.Effect<A, E | CheckpointUnreadable, R> =>
 			Effect.gen(function* () {
 				const full = fullKey(key);
 				const stored = yield* storage.load(full);
 				if (Option.isSome(stored)) {
-					const decoded = yield* Effect.option(
-						Schema.decodeUnknownEffect(schema)(stored.value)
-					);
-					if (Option.isSome(decoded)) return decoded.value;
-					yield* Effect.logWarning(
-						`The checkpoint ${full} no longer decodes; running its work again`
+					return yield* Schema.decodeUnknownEffect(schema)(stored.value).pipe(
+						Effect.mapError(
+							(cause) =>
+								new CheckpointUnreadable({ key: full, detail: cause.message })
+						)
 					);
 				}
 				const value = yield* effect;
