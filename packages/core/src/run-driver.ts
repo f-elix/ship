@@ -162,7 +162,7 @@ const kindOfLog = (events: ReadonlyArray<RunEvent>): LogFinisher<Summary> => {
 
 // --- Driver ---
 
-/** A new run from its initial state, or an interrupted one from its last snapshot. */
+/** A new run from its initial state, or an interrupted or failed one from its last snapshot. */
 type RunStart<C> = Data.TaggedEnum<{
 	New: { readonly state: C };
 	Restore: { readonly snapshot: PersistedRunSnapshot };
@@ -272,8 +272,9 @@ export const startPrimitiveRun = Effect.fn('startPrimitiveRun')(function* (
 
 /**
  * Runs the kind's machine for one run until it ends. Every state change saves the
- * snapshot together with the events since the last save, `StateChanged` last; events
- * reported mid-step are saved as they come. A checkpoint is saved in order with the
+ * snapshot together with the events since the last save, `StateChanged` last; a failure
+ * keeps the snapshot of the state that failed. Events reported mid-step are saved as they
+ * come. A checkpoint is saved in order with the
  * events, together with the ones before it, and its step waits until it is. At the end
  * it builds the summary from the event log and finishes the run in the journal.
  *
@@ -358,7 +359,9 @@ const runMachine = Effect.fnUntraced(function* <C extends KindContext, S extends
 				yield* Deferred.succeed(item.saved, undefined);
 				continue;
 			}
-			persisted = item.persisted;
+			// A failed run keeps the snapshot of the state it failed in, so resuming it runs
+			// that state's step again.
+			if (item.end?.status !== 'failed') persisted = item.persisted;
 			end = end ?? item.end;
 			if (item.path !== path) {
 				pending.push({
@@ -473,11 +476,11 @@ const describeLoad = (load: SnapshotLoad): string =>
 	});
 
 /**
- * Resumes an interrupted run from its last snapshot with the caller's fresh `env`. The
- * step that was in flight runs again. The run is marked resumed only once its snapshot
- * loaded and fits the machine, so a run that cannot be restored stays `interrupted`. A
- * run that stopped after its machine reached a final state, but before it was finished,
- * is finished now.
+ * Resumes an interrupted or failed run from its last snapshot with the caller's fresh
+ * `env`. The step that was in flight, or that failed, runs again; its checkpoints skip
+ * the sub-work it finished. The run is marked resumed only once its snapshot loaded and
+ * fits the machine, so a run that cannot be restored keeps its status. A run that stopped
+ * after its machine reached a final state, but before it was finished, is finished now.
  */
 export const resumeRun = Effect.fn('resumeRun')(function* (runId: RunId, env: Env) {
 	const journal = yield* RunJournal;
@@ -532,6 +535,12 @@ const resumeKind = Effect.fnUntraced(function* <C extends KindContext, S extends
 	});
 	if (snapshot['status'] === 'done') {
 		const path = statePath(snapshot.value);
+		if (path === 'failed') {
+			return yield* new SnapshotNotResumable({
+				runId,
+				reason: 'it kept no state to run again'
+			});
+		}
 		yield* journal.markResumed(runId);
 		const summary = yield* finishFromLog(kind, runId, finalEnd(path, context));
 		return {

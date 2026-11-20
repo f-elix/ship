@@ -4,6 +4,7 @@ import {
 	FixRunInfo,
 	FixRunState,
 	InvalidRunStatus,
+	isResumable,
 	NonNegativeInt,
 	PrimitiveRunInfo,
 	PrimitiveRunKind,
@@ -721,9 +722,7 @@ const make = Effect.gen(function* () {
 		const at = yield* DateTime.now;
 		return yield* appending(
 			Effect.gen(function* () {
-				yield* updateRun(runId, (status) => status === 'interrupted', {
-					status: 'running'
-				});
+				yield* updateRun(runId, isResumable, { status: 'running', summary: null });
 				return yield* insertEvent(runId, RunEvent.cases.RunResumed.make({ at }));
 			}),
 			(envelope) => [envelope]

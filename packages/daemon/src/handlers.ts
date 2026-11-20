@@ -11,6 +11,7 @@ import {
 	initialReviewRunState,
 	initialRunState,
 	InvalidRunStatus,
+	isResumable,
 	isWaitingState,
 	PreconditionFailed,
 	resumeRun,
@@ -406,7 +407,7 @@ export const handlers = ShipRpcs.toLayer(
 				// Lets a start or a cancel in progress settle, so the status read is current.
 				yield* host.active(runId);
 				const info = yield* store.get(runId);
-				if (info.status !== 'interrupted') {
+				if (!isResumable(info.status)) {
 					return yield* new InvalidRunStatus({ runId, status: info.status });
 				}
 				yield* host.launch(runId, resumeRun(runId, env));

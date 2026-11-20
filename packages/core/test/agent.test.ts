@@ -68,6 +68,20 @@ const input: AgentRunInput = {
 	timeoutMs: 60_000
 };
 
+/**
+ * Runs `effect` to its end past every retry wait. Tries do real file I/O, so the test clock
+ * moves a second at a time, well inside the call's timeout, until the call ends.
+ */
+const settle = <A, E>(effect: Effect.Effect<A, E>) =>
+	Effect.gen(function* () {
+		const fiber = yield* Effect.forkChild(effect);
+		while (fiber.pollUnsafe() === undefined) {
+			yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 1)));
+			yield* TestClock.adjust('1 second');
+		}
+		return yield* Fiber.join(fiber);
+	});
+
 const Output = Schema.Struct({ findings: Schema.Array(Schema.String) });
 
 describe('Agent', () => {
@@ -138,16 +152,20 @@ describe('Agent', () => {
 		expect(callCost(0.5, session)).toBe(0.5);
 	});
 
-	it.effect('fails with AgentSdkError on an error result, a throw, or no result', () =>
+	it.effect('fails with AgentSdkError on an error result, without trying again', () =>
 		Effect.gen(function* () {
+			const calls: Array<Recorded> = [];
 			const errored = yield* agentWith(
-				scripted([
-					result({
-						subtype: 'error_max_turns',
-						is_error: true,
-						errors: ['too many turns']
-					})
-				])
+				scripted(
+					[
+						result({
+							subtype: 'error_max_turns',
+							is_error: true,
+							errors: ['too many turns']
+						})
+					],
+					calls
+				)
 			);
 			const maxTurns = yield* Effect.flip(errored.run(input));
 			expect(maxTurns).toBeInstanceOf(AgentSdkError);
@@ -155,6 +173,7 @@ describe('Agent', () => {
 				reason: 'error_max_turns',
 				detail: expect.stringContaining('too many turns')
 			});
+			expect(calls).toHaveLength(1);
 			// An error result is still billed, so its cost survives the failure.
 			expect(agentErrorCost(maxTurns)).toEqual({
 				step: 'review',
@@ -162,20 +181,49 @@ describe('Agent', () => {
 				sessionId: 'session-1',
 				costUsd: 0.5
 			});
+		})
+	);
 
+	it.effect('tries a throw or a missing result twice more, then fails with AgentSdkError', () =>
+		Effect.gen(function* () {
+			let throws = 0;
 			const throwing = yield* agentWith(() => {
-				throw new Error('not logged in');
+				throws += 1;
+				throw new Error('overloaded');
 			});
-			const thrown = yield* Effect.flip(throwing.run(input));
+			const thrown = yield* settle(Effect.flip(throwing.run(input)));
 			expect(thrown).toMatchObject({
 				_tag: 'AgentSdkError',
 				reason: 'exception',
-				detail: 'not logged in'
+				detail: 'overloaded'
 			});
 			expect(agentErrorCost(thrown)).toBeNull();
+			expect(throws).toBe(3);
 
-			const silent = yield* agentWith(scripted([assistant]));
-			expect(yield* Effect.flip(silent.run(input))).toMatchObject({ reason: 'no-result' });
+			const calls: Array<Recorded> = [];
+			const silent = yield* agentWith(scripted([assistant], calls));
+			expect(yield* settle(Effect.flip(silent.run(input)))).toMatchObject({
+				reason: 'no-result'
+			});
+			expect(calls).toHaveLength(3);
+		})
+	);
+
+	it.effect('succeeds when a try after a transient failure does', () =>
+		Effect.gen(function* () {
+			const dir = yield* tempDir;
+			let tries = 0;
+			const agent = yield* agentWith((params) => {
+				tries += 1;
+				if (tries === 1) throw new Error('safeguards flagged this message');
+				return scripted([result({})])(params);
+			});
+			const answer = yield* settle(agent.run({ ...input, transcript: { dir } }));
+			expect(answer).toMatchObject({
+				text: 'done',
+				transcriptPath: `${dir}/review-security-2.jsonl`
+			});
+			expect(tries).toBe(2);
 		})
 	);
 

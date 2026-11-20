@@ -383,7 +383,7 @@ describe('RunStore', () => {
 			}).pipe(Effect.provide(TestLayer))
 		);
 
-		it.effect('resumes only an interrupted run', () =>
+		it.effect('resumes only an interrupted or failed run', () =>
 			Effect.gen(function* () {
 				const store = yield* RunStore;
 				const { runId } = yield* store.create(newRun);
@@ -394,6 +394,14 @@ describe('RunStore', () => {
 				const resumed = yield* store.markResumed(runId);
 				expect(resumed).toMatchObject({ seq: 3, event: { _tag: 'RunResumed' } });
 				expect((yield* store.get(runId)).status).toBe('running');
+
+				yield* store.finish(summaryOf(runId, 'failed'));
+				yield* store.markResumed(runId);
+				expect(yield* store.get(runId)).toMatchObject({ status: 'running', summary: null });
+
+				yield* store.finish(summaryOf(runId, 'done'));
+				const done = yield* Effect.flip(store.markResumed(runId));
+				expect(done).toMatchObject({ _tag: 'InvalidRunStatus', status: 'done' });
 			}).pipe(Effect.provide(TestLayer))
 		);
 	});

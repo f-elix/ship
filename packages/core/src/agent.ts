@@ -10,6 +10,7 @@ import {
 	Exit,
 	FileSystem,
 	Layer,
+	Schedule,
 	Schema,
 	SchemaIssue,
 	Stream,
@@ -187,6 +188,19 @@ export const callCost = (totalCostUsd: number, resume: AgentSession | undefined)
 	const previous = resume?.cumulativeCostUsd ?? 0;
 	return totalCostUsd >= previous ? totalCostUsd - previous : totalCostUsd;
 };
+
+/**
+ * Whether a failed call is worth another try: the SDK threw, as it does on an API error
+ * such as an overload or a false-positive safeguard flag, or the agent ended without a
+ * result. Neither reports a cost to lose. Error results are billed and mostly repeat
+ * (`error_max_turns`), so they fail the call at once, as do timeouts.
+ */
+const isTransient = (error: AgentError): boolean =>
+	error._tag === 'AgentSdkError' &&
+	(error.reason === 'exception' || error.reason === 'no-result');
+
+/** How often and how long after a transient failure a call is tried again. */
+const RETRY = { times: 2, schedule: Schedule.exponential('5 seconds') } as const;
 
 const READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob'];
 
@@ -403,7 +417,12 @@ export const makeAgent = (runQuery: QueryFn) =>
 			};
 		});
 
-		const withTimeout = (input: AgentRunInput, schema: Schema.Top | undefined) =>
+		/**
+		 * One call under its timeout, tried again after a transient failure. Each try gets
+		 * the whole timeout and its own transcript. A retried edit call finds the tree as the
+		 * failed try left it.
+		 */
+		const withRetry = (input: AgentRunInput, schema: Schema.Top | undefined) =>
 			Effect.scoped(runCall(input, schema)).pipe(
 				Effect.timeoutOrElse({
 					duration: input.timeoutMs,
@@ -411,11 +430,17 @@ export const makeAgent = (runQuery: QueryFn) =>
 						Effect.fail(
 							new AgentTimeout({ step: input.step, timeoutMs: input.timeoutMs })
 						)
-				})
+				}),
+				Effect.tapError((error) =>
+					isTransient(error)
+						? Effect.logWarning(`Transient agent failure: ${error.message}`)
+						: Effect.void
+				),
+				Effect.retry({ ...RETRY, while: isTransient })
 			);
 
 		const run = Effect.fn('Agent.run')(function* (input: AgentRunInput) {
-			const result = yield* withTimeout(input, undefined);
+			const result = yield* withRetry(input, undefined);
 			return { ...Struct.omit(result, ['structuredOutput']), output: null };
 		});
 
@@ -423,7 +448,7 @@ export const makeAgent = (runQuery: QueryFn) =>
 			input: AgentRunInput,
 			schema: OutputSchema<A>
 		) {
-			const { structuredOutput, ...result } = yield* withTimeout(input, schema);
+			const { structuredOutput, ...result } = yield* withRetry(input, schema);
 			const output = yield* decodeOutput(input.step, schema, structuredOutput).pipe(
 				Effect.mapError(billedTo(result))
 			);

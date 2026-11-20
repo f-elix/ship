@@ -300,11 +300,11 @@ export class ShipRpcs extends RpcGroup.make(
 		error: PreconditionFailed
 	}),
 	/**
-	 * Resumes an `interrupted` run: re-enters its current state and re-runs its step. `env`
-	 * is the resuming caller's environment and replaces the one the run was started with.
-	 * Config is fixed when the run starts, so resuming reads no config files. Fails with
-	 * `SnapshotNotResumable` when the stored snapshot cannot be restored; the run then
-	 * stays `interrupted` and can only be cancelled.
+	 * Resumes an `interrupted` or `failed` run: re-enters the state it stopped or failed in
+	 * and re-runs its step. `env` is the resuming caller's environment and replaces the one
+	 * the run was started with. Config is fixed when the run starts, so resuming reads no
+	 * config files. Fails with `SnapshotNotResumable` when the stored snapshot cannot be
+	 * restored; the run then keeps its status, and an interrupted one can only be cancelled.
 	 */
 	Rpc.make('resume', {
 		payload: { runId: RunId, env: Env },
