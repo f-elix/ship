@@ -1,14 +1,25 @@
 import { Clock, Context, DateTime, Duration, Effect, Ref, Schema } from 'effect';
 import { agentErrorCost, type AgentCallCost, type AgentError } from './agent.ts';
+import type { CheckpointUnreadable } from './checkpoint.ts';
 import type { CheckSpawnError, CheckTimeout } from './checks.ts';
 import type { GhError } from './gh.ts';
 import { Git, type GitError } from './git.ts';
 import type { UnknownLockResource } from './locks.ts';
 import type { PrPublishError } from './pr.ts';
-import { CostUsd, Step } from './primitives.ts';
+import { CostUsd, Step, type Env, type GitSha } from './primitives.ts';
 import type { ReviewerFileError } from './reviewer-markdown.ts';
 import type { AppendableEvent } from './run-journal.ts';
-import { AgentSession, type RunState } from './run.ts';
+import { AgentSession } from './run.ts';
+
+/**
+ * Where a step runs git, and the base a timed-out step compares `HEAD` with to tell whether
+ * it committed.
+ */
+interface GitRepoAt {
+	readonly cwd: string;
+	readonly env: Env;
+	readonly baseSha: GitSha;
+}
 
 // --- Reporting ---
 
@@ -49,6 +60,7 @@ export class StepNotReady extends Schema.TaggedError<StepNotReady>()('StepNotRea
 /** Every error a step can fail with; anything else is a defect and fails the run. */
 export type StepError =
 	| AgentError
+	| CheckpointUnreadable
 	| CheckSpawnError
 	| CheckTimeout
 	| GhError
@@ -115,6 +127,7 @@ const TIMED_OUT: Readonly<Record<StepError['_tag'], boolean>> = {
 	CheckTimeout: true,
 	AgentSdkError: false,
 	AgentOutputMismatch: false,
+	CheckpointUnreadable: false,
 	CheckSpawnError: false,
 	GhError: false,
 	GitError: false,
@@ -124,8 +137,11 @@ const TIMED_OUT: Readonly<Record<StepError['_tag'], boolean>> = {
 	UnknownLockResource: false
 };
 
-/** The steps that run the implementer, whose session the next fix step resumes. */
-const IMPLEMENTER_STEPS: ReadonlySet<Step> = new Set(['implement', 'fixChecks', 'fix']);
+/**
+ * The steps that run the implementer, whose session the next fix step resumes: `checks`
+ * runs it between passes.
+ */
+const IMPLEMENTER_STEPS: ReadonlySet<Step> = new Set(['implement', 'checks', 'fix']);
 
 interface FailedSpend {
 	readonly cost: AgentCallCost | null;
@@ -141,6 +157,7 @@ const failedSpend = (error: StepError): FailedSpend => {
 		case 'AgentOutputMismatch':
 			return { cost: agentErrorCost(error), session: error.spend?.session ?? null };
 		case 'AgentTimeout':
+		case 'CheckpointUnreadable':
 		case 'StepTimeout':
 		case 'CheckTimeout':
 		case 'CheckSpawnError':
@@ -160,7 +177,7 @@ const failedSpend = (error: StepError): FailedSpend => {
  */
 export const runStep = <A, R>(
 	step: Step,
-	state: Pick<RunState, 'cwd' | 'env' | 'baseSha'>,
+	state: Pick<GitRepoAt, 'cwd' | 'env' | 'baseSha'>,
 	options: RunStepOptions,
 	body: (kit: StepKit) => Effect.Effect<A, StepError, R>
 ): Effect.Effect<StepOutcome<A>, never, R | RunReporter | Git> =>

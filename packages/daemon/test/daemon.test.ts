@@ -530,7 +530,85 @@ describe('ship review', () => {
 	);
 
 	it.live(
-		'reviews a PR in a worktree at its fetched head, posts the findings and removes the worktree',
+		"refuses a PR that is not checked out cleanly in the caller's checkout",
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				const { head, env } = cloneOfExample(fx);
+				yield* Context.get(services, GhFake).addPr({
+					base: 'main',
+					head: 'feature',
+					title: 'Add the feature',
+					body: '',
+					draft: false,
+					headSha: head
+				});
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+				const reasonFor = () =>
+					rpc.review({ pr: '1', post: false, cwd: fx.work, env }).pipe(
+						Effect.flip,
+						Effect.map((error) =>
+							error instanceof PreconditionFailed ? error : error._tag
+						)
+					);
+
+				fx.write('src/feature.ts', 'export const feature = 2;\n');
+				expect(yield* reasonFor()).toMatchObject({
+					reason: 'dirty-tree',
+					detail: expect.stringContaining('`gh pr checkout 1`')
+				});
+				fx.git('commit', '--quiet', '-am', 'Not pushed');
+				expect(yield* reasonFor()).toMatchObject({
+					reason: 'pr-not-checked-out',
+					detail: expect.stringContaining('`gh pr checkout 1`')
+				});
+				expect(yield* rpc.list({})).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'refuses a PR whose base branch cannot be fetched, keeping the git error as the cause',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				const { head, env } = cloneOfExample(fx);
+				// The PR exists and is checked out, but origin has no branch named like its base.
+				yield* Context.get(services, GhFake).addPr({
+					base: 'gone',
+					head: 'feature',
+					title: 'Add the feature',
+					body: '',
+					draft: false,
+					headSha: head
+				});
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+
+				const error = yield* Effect.flip(
+					rpc.review({ pr: '1', post: false, cwd: fx.work, env })
+				);
+
+				expect(error).toBeInstanceOf(PreconditionFailed);
+				expect(error).toMatchObject({
+					reason: 'base-fetch-failed',
+					detail: expect.stringContaining('base branch gone')
+				});
+				const cause = error instanceof PreconditionFailed ? error.cause : undefined;
+				expect(cause).toBeInstanceOf(Error);
+				expect(cause).toMatchObject({
+					message: expect.stringContaining('refs/heads/gone')
+				});
+				expect(yield* rpc.list({})).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		"reviews a PR in the caller's checkout, posts the findings and stores the review",
 		() =>
 			Effect.gen(function* () {
 				const fx = yield* fixture;
@@ -542,15 +620,14 @@ describe('ship review', () => {
 					head: 'feature',
 					title: 'Add the feature',
 					body: 'Adds src/feature.ts.',
-					draft: false
+					draft: false,
+					headSha: head
 				});
 				const agent = Context.get(services, AgentFake);
 				const reviewedIn: Array<string> = [];
 				yield* agent.script({ step: 'review', label: 'standards' }, (input) =>
 					Effect.sync(() => {
 						reviewedIn.push(input.cwd);
-						expect(existsSync(join(input.cwd, 'src/feature.ts'))).toBe(true);
-						expect(existsSync(join(input.cwd, 'src/later.ts'))).toBe(false);
 						return {
 							output: {
 								findings: [
@@ -590,12 +667,14 @@ describe('ship review', () => {
 				const events = yield* allEvents(rpc, runId);
 
 				expect(events[0]).toBe('ReviewRunCreated');
+				expect(events).toContain('ReviewStored');
 				expect(events).toContain('PrReviewPosted');
 				expect(events.at(-1)).toBe('RunFinished');
-				const worktree = join(fx.home, 'reviews', runId);
-				expect(reviewedIn).toEqual([worktree]);
-				expect(existsSync(worktree)).toBe(false);
-				expect(fx.git('worktree', 'list', '--porcelain')).not.toContain(worktree);
+				// ship reviews where it was called and leaves no worktree behind.
+				expect(reviewedIn).toEqual([fx.work]);
+				expect(
+					fx.git('worktree', 'list', '--porcelain').match(/^worktree /gmu)
+				).toHaveLength(1);
 				const reviews = yield* gh.reviews;
 				expect(reviews).toMatchObject([
 					{
@@ -611,24 +690,29 @@ describe('ship review', () => {
 					prUrl: 'https://github.com/f-elix/example/pull/1',
 					reviewUrl: reviews[0]?.url
 				});
-				expect(info.summary).toMatchObject({ kind: 'review', mustFix: [{ line: 1 }] });
+				expect(info.summary).toMatchObject({
+					kind: 'review',
+					reviewId: `${runId}-r1`,
+					mustFix: [{ line: 1 }]
+				});
 			}).pipe(Effect.scoped),
 		TIMEOUT
 	);
 
 	it.live(
-		'removes the worktree of an interrupted review run when a later daemon cancels it',
+		'cancels an interrupted review run from a later daemon',
 		() =>
 			Effect.gen(function* () {
 				const fx = yield* fixture;
 				const services = yield* fakes;
-				const { env } = cloneOfExample(fx);
+				const { head, env } = cloneOfExample(fx);
 				yield* Context.get(services, GhFake).addPr({
 					base: 'main',
 					head: 'feature',
 					title: 'Add the feature',
 					body: '',
-					draft: false
+					draft: false,
+					headSha: head
 				});
 				yield* Context.get(services, AgentFake).script(
 					{ step: 'review', label: 'standards' },
@@ -648,18 +732,13 @@ describe('ship review', () => {
 						return runId;
 					})
 				);
-				const worktree = join(fx.home, 'reviews', runId);
-				expect(existsSync(worktree)).toBe(true);
 
-				// The caller's env is not sent: the daemon removes the worktree with its own.
 				yield* daemon(fx.home, services);
 				const rpc = yield* client(fx.home);
 				expect((yield* rpc.status({ runId })).status).toBe('interrupted');
 				yield* rpc.cancel({ runId });
 
 				expect((yield* rpc.status({ runId })).status).toBe('cancelled');
-				expect(existsSync(worktree)).toBe(false);
-				expect(fx.git('worktree', 'list', '--porcelain')).not.toContain(worktree);
 			}).pipe(Effect.scoped),
 		TIMEOUT
 	);

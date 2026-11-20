@@ -13,6 +13,8 @@ import {
 	resolveConfig,
 	resumeRun,
 	Reviewers,
+	reviewIdFor,
+	Reviews,
 	ShipHome,
 	startReview,
 	type ReviewRunState,
@@ -28,7 +30,7 @@ import {
 	type AgentScript
 } from '@ship/core/testing';
 import { RunStore } from '@ship/store';
-import { Deferred, Effect, Layer, Schema, type Scope } from 'effect';
+import { Deferred, Effect, Layer, Option, Schema, type Scope } from 'effect';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -40,8 +42,8 @@ const PR_URL = 'https://github.com/f-elix/example/pull/7';
 const BASE = fakeSha(0xb);
 const HEAD = fakeSha(0xc);
 
-const REVIEWER = `---
-name: standards
+const reviewer = (name: string) => `---
+name: ${name}
 triggers:
     fileKinds: [source]
 ---
@@ -70,7 +72,8 @@ const harness = (dir: string) =>
 		ChecksFake.layer,
 		Pr.layer,
 		ShipHome.layer(join(dir, 'home')),
-		RunStore.journal
+		RunStore.journal,
+		RunStore.reviews
 	).pipe(
 		Layer.provideMerge(
 			Layer.mergeAll(
@@ -91,12 +94,17 @@ const harness = (dir: string) =>
 
 type Harness = Layer.Success<ReturnType<typeof harness>>;
 
-/** Runs `body` against fresh fakes, a temp run store and a temp reviewer brief. */
-const withHarness = <A, E>(body: (dir: string) => Effect.Effect<A, E, Harness | Scope.Scope>) =>
+/** Runs `body` against fresh fakes, a temp run store and a temp brief per reviewer. */
+const withHarness = <A, E>(
+	body: (dir: string) => Effect.Effect<A, E, Harness | Scope.Scope>,
+	reviewerNames: ReadonlyArray<string> = ['standards']
+) =>
 	Effect.gen(function* () {
 		const dir = yield* tempDir;
 		mkdirSync(join(dir, 'briefs/reviewers'), { recursive: true });
-		writeFileSync(join(dir, 'briefs/reviewers/standards.md'), REVIEWER);
+		for (const name of reviewerNames) {
+			writeFileSync(join(dir, `briefs/reviewers/${name}.md`), reviewer(name));
+		}
 		writeFileSync(join(dir, 'briefs/verifier.md'), 'You verify findings.\n');
 		return yield* body(dir).pipe(Effect.provide(harness(dir)));
 	}).pipe(Effect.scoped);
@@ -105,7 +113,6 @@ const withHarness = <A, E>(body: (dir: string) => Effect.Effect<A, E, Harness | 
 const newReview = (post: boolean) =>
 	Effect.gen(function* () {
 		const store = yield* RunStore;
-		const home = yield* ShipHome;
 		const projectConfig = yield* decodeProjectConfig({ reviewers: { clef: false } }).pipe(
 			Effect.orDie
 		);
@@ -120,7 +127,7 @@ const newReview = (post: boolean) =>
 		return initialReviewRunState({
 			runId: info.runId,
 			projectKey,
-			cwd: home.reviewWorktree(info.runId),
+			cwd: '/repo',
 			env,
 			config: resolveConfig(
 				Schema.decodeUnknownSync(GlobalConfig, configParseOptions)({}),
@@ -134,8 +141,7 @@ const newReview = (post: boolean) =>
 				baseSha: BASE,
 				headSha: HEAD
 			},
-			post,
-			repoDir: '/repo'
+			post
 		});
 	});
 
@@ -178,57 +184,96 @@ const eventsOf = Effect.fnUntraced(function* (state: ReviewRunState) {
 const transitions = (events: ReadonlyArray<RunEvent | { readonly _tag: 'UnknownEvent' }>) =>
 	events.flatMap((event) => (event._tag === 'StateChanged' ? [event.to] : []));
 
+/** Runs the review until `started` completes, then stops it as a daemon shutdown would. */
+const interruptAfter = (state: ReviewRunState, started: Deferred.Deferred<void>) =>
+	Effect.gen(function* () {
+		const store = yield* RunStore;
+		yield* Effect.scoped(
+			Effect.gen(function* () {
+				yield* startReview(state);
+				yield* Deferred.await(started);
+			})
+		);
+		expect(yield* store.markInterrupted).toEqual([state.runId]);
+	});
+
+/** Waits until the run's checkpoint `key` is stored. */
+const checkpointed = (state: ReviewRunState, key: string) =>
+	Effect.gen(function* () {
+		const store = yield* RunStore;
+		while (Option.isNone(yield* store.loadCheckpoint(state.runId, key))) {
+			yield* Effect.yieldNow;
+		}
+	});
+
+/** The reviewers called so far, sorted: reviewers run concurrently. */
+const reviewerCalls = Effect.gen(function* () {
+	const calls = yield* (yield* AgentFake).calls;
+	return calls
+		.filter((call) => call.step === 'review')
+		.map((call) => call.label)
+		.toSorted();
+});
+
 describe('review run', () => {
-	it.effect('reviews the PR in a worktree at its head and removes the worktree after', () =>
+	it.effect("reviews the PR in the caller's checkout and stores the review", () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
-				const git = yield* GitFake;
 				const gh = yield* GhFake;
-				const state = yield* newReview(false);
-				// The reviewer runs in the worktree, added at the PR's head before the round.
-				yield* agent.script({ step: 'review', label: 'standards' }, () =>
-					Effect.map(git.state, (repo) => {
-						expect(repo.worktrees).toEqual([{ path: state.cwd, sha: HEAD }]);
-						return reviewerSays(finding('must-fix', 3));
-					})
+				const reviews = yield* Reviews;
+				yield* agent.script(
+					{ step: 'review', label: 'standards' },
+					reviewerSays(finding('must-fix', 3))
 				);
 				yield* agent.script({ step: 'verify' }, verifierConfirms(1));
+				const state = yield* newReview(false);
 
 				const summary = yield* Effect.flatMap(startReview(state), (handle) => handle.await);
 
-				expect((yield* git.state).worktrees).toEqual([]);
+				const reviewId = reviewIdFor(state.runId, 1);
 				expect(summary).toMatchObject({
 					kind: 'review',
 					status: 'done',
 					prUrl: PR_URL,
 					reviewUrl: null,
+					reviewId,
 					costUsd: expect.closeTo(0.3),
 					tradeoffs: [],
 					nits: [],
 					error: null
 				});
 				expect(summary.mustFix).toHaveLength(1);
-				expect(transitions(yield* eventsOf(state))).toEqual([
-					'route',
-					'review',
-					'verify',
-					'done'
-				]);
+				expect(transitions(yield* eventsOf(state))).toEqual(['done']);
+				// The review outlives the run: it is stored with the subject it is about.
+				const stored = yield* reviews.get(reviewId);
+				expect(stored).toMatchObject({
+					runId: state.runId,
+					subject: {
+						projectKey,
+						prUrl: PR_URL,
+						baseSha: BASE,
+						headSha: HEAD,
+						intent: { _tag: 'Description', title: 'Add the feature' }
+					},
+					postedUrl: null
+				});
+				expect(stored.findings).toEqual(summary.mustFix);
 				// Without --post nothing reaches GitHub.
 				expect(yield* gh.reviews).toEqual([]);
 				const calls = yield* agent.calls;
-				expect(calls.map((call) => call.cwd)).toEqual([state.cwd, state.cwd]);
+				expect(calls.map((call) => call.cwd)).toEqual(['/repo', '/repo']);
 				expect(calls[0]?.prompt).toContain('Title: Add the feature');
 			})
 		)
 	);
 
-	it.effect('posts the findings as one review on the pinned head with --post', () =>
+	it.effect('posts the stored review on the pinned head with --post', () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
 				const gh = yield* GhFake;
+				const reviews = yield* Reviews;
 				yield* agent.script(
 					{ step: 'review', label: 'standards' },
 					reviewerSays(finding('must-fix', 3), finding('nit', 40))
@@ -238,8 +283,8 @@ describe('review run', () => {
 
 				const summary = yield* Effect.flatMap(startReview(state), (handle) => handle.await);
 
-				const reviews = yield* gh.reviews;
-				expect(reviews).toMatchObject([
+				const posted = yield* gh.reviews;
+				expect(posted).toMatchObject([
 					{
 						prUrl: PR_URL,
 						commitId: HEAD,
@@ -247,13 +292,12 @@ describe('review run', () => {
 						comments: [{ path: 'src/feature.ts', line: 3 }]
 					}
 				]);
-				expect(reviews[0]?.body).toContain('`src/feature.ts:40`');
-				expect(summary).toMatchObject({
-					status: 'done',
-					reviewUrl: `${PR_URL}#pullrequestreview-1`
-				});
+				expect(posted[0]?.body).toContain('`src/feature.ts:40`');
+				const reviewUrl = `${PR_URL}#pullrequestreview-1`;
+				expect(summary).toMatchObject({ status: 'done', reviewUrl });
+				expect((yield* reviews.get(reviewIdFor(state.runId, 1))).postedUrl).toBe(reviewUrl);
 				const events = yield* eventsOf(state);
-				expect(transitions(events)).toEqual(['route', 'review', 'verify', 'post', 'done']);
+				expect(transitions(events)).toEqual(['post', 'done']);
 				expect(events.find((event) => event._tag === 'PrReviewPosted')).toMatchObject({
 					event: 'REQUEST_CHANGES',
 					inline: 1,
@@ -263,7 +307,7 @@ describe('review run', () => {
 		)
 	);
 
-	it.effect('posts nothing when the round found nothing, even with --post', () =>
+	it.effect('posts nothing when the review found nothing, even with --post', () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
@@ -275,17 +319,17 @@ describe('review run', () => {
 
 				expect(summary).toMatchObject({ status: 'done', reviewUrl: null, mustFix: [] });
 				expect(yield* gh.reviews).toEqual([]);
-				expect(transitions(yield* eventsOf(state))).not.toContain('post');
+				expect(transitions(yield* eventsOf(state))).toEqual(['done']);
 			})
 		)
 	);
 
-	it.effect('fails when posting fails, still removing the worktree', () =>
+	it.effect('fails when posting fails, keeping the stored review unposted', () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
 				const gh = yield* GhFake;
-				const git = yield* GitFake;
+				const reviews = yield* Reviews;
 				yield* gh.fail('submitReview', 'HTTP 422: Unprocessable Entity');
 				yield* agent.script(
 					{ step: 'review', label: 'standards' },
@@ -298,110 +342,191 @@ describe('review run', () => {
 
 				expect(summary.status).toBe('failed');
 				expect(summary.error).toContain('HTTP 422');
-				expect((yield* git.state).worktrees).toEqual([]);
+				expect((yield* reviews.get(reviewIdFor(state.runId, 1))).postedUrl).toBeNull();
 			})
 		)
 	);
 
-	it.effect('removes the worktree when cancelled mid-review', () =>
+	it.effect('fails without storing a review when HEAD moved before the review routed', () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
 				const git = yield* GitFake;
+				const reviews = yield* Reviews;
+				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
+				yield* git.update((repo) => ({ ...repo, headSha: fakeSha(0xd) }));
+				const state = yield* newReview(false);
+
+				const summary = yield* Effect.flatMap(startReview(state), (handle) => handle.await);
+
+				expect(summary.status).toBe('failed');
+				expect(summary.error).toContain(`to ${fakeSha(0xd)} during the review`);
+				const missing = yield* Effect.flip(reviews.get(reviewIdFor(state.runId, 1)));
+				expect(missing._tag).toBe('ReviewNotFound');
+			})
+		)
+	);
+
+	it.effect('is cancelled mid-review', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
 				const started = yield* Deferred.make<void>();
 				yield* agent.script({ step: 'review', label: 'standards' }, hangs(started));
 				const state = yield* newReview(false);
 
 				const handle = yield* startReview(state);
 				yield* Deferred.await(started);
-				expect((yield* git.state).worktrees).toHaveLength(1);
 				yield* handle.cancel;
 				const summary = yield* handle.await;
 
 				expect(summary.status).toBe('cancelled');
-				expect((yield* git.state).worktrees).toEqual([]);
 			})
 		)
 	);
 
-	it.effect('resumes mid-review on the pinned head, reusing its worktree', () =>
+	it.effect('resumes mid-review without re-running the reviewers that reported', () =>
+		withHarness(
+			() =>
+				Effect.gen(function* () {
+					const agent = yield* AgentFake;
+					const gh = yield* GhFake;
+					const git = yield* GitFake;
+					const started = yield* Deferred.make<void>();
+					yield* agent.script(
+						{ step: 'review', label: 'standards' },
+						reviewerSays(finding('must-fix', 2))
+					);
+					yield* agent.script(
+						{ step: 'review', label: 'security' },
+						hangs(started),
+						reviewerSays(finding('nit', 4))
+					);
+					yield* agent.script({ step: 'verify' }, verifierConfirms(2));
+					const state = yield* newReview(true);
+
+					// The daemon stops while `security` reviews, after `standards` reported.
+					yield* Effect.scoped(
+						Effect.gen(function* () {
+							yield* startReview(state);
+							yield* Deferred.await(started);
+							yield* checkpointed(state, 'review/reviewer/standards');
+						})
+					);
+					yield* (yield* RunStore).markInterrupted;
+					expect(yield* reviewerCalls).toEqual(['security', 'standards']);
+					const freshEnv = { PATH: '/opt/bin' };
+
+					const summary = yield* Effect.flatMap(
+						resumeRun(state.runId, freshEnv),
+						(handle) => handle.await
+					);
+
+					if (summary.kind !== 'review') throw new Error('Expected a review summary');
+					expect(summary.status).toBe('done');
+					// Only the interrupted reviewer runs again; `standards`' report is reused.
+					expect(yield* reviewerCalls).toEqual(['security', 'security', 'standards']);
+					expect(summary.mustFix.map((finding) => finding.reviewer)).toEqual([
+						'standards'
+					]);
+					expect(summary.nits.map((finding) => finding.reviewer)).toEqual(['security']);
+					expect((yield* agent.calls).at(-1)?.env).toEqual(freshEnv);
+					expect((yield* git.state).fetches).toEqual([]);
+					expect((yield* gh.reviews).map((review) => review.commitId)).toEqual([HEAD]);
+					expect(transitions(yield* eventsOf(state))).toEqual(['post', 'done']);
+				}),
+			['standards', 'security']
+		)
+	);
+
+	it.effect('does not post a second review when resumed after GitHub accepted the first', () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
-				const git = yield* GitFake;
 				const gh = yield* GhFake;
-				const store = yield* RunStore;
+				const reviews = yield* Reviews;
+				const accepted = yield* Deferred.make<void>();
+				yield* agent.script(
+					{ step: 'review', label: 'standards' },
+					reviewerSays(finding('must-fix', 3))
+				);
+				yield* agent.script({ step: 'verify' }, verifierConfirms(1));
+				// GitHub accepts the review, then the daemon stops before ship records it.
+				yield* gh.afterSubmit(
+					Deferred.succeed(accepted, undefined).pipe(Effect.andThen(Effect.never))
+				);
+				const state = yield* newReview(true);
+				yield* interruptAfter(state, accepted);
+				yield* gh.afterSubmit(Effect.void);
+
+				const summary = yield* Effect.flatMap(
+					resumeRun(state.runId, env),
+					(handle) => handle.await
+				);
+
+				const posted = yield* gh.reviews;
+				expect(posted).toHaveLength(1);
+				expect(posted[0]?.body).toContain(
+					`<!-- ship-review: ${reviewIdFor(state.runId, 1)} -->`
+				);
+				expect(summary).toMatchObject({ status: 'done', reviewUrl: posted[0]?.url });
+				expect((yield* reviews.get(reviewIdFor(state.runId, 1))).postedUrl).toBe(
+					posted[0]?.url
+				);
+				// The resumed run did not review again either.
+				expect(yield* reviewerCalls).toEqual(['standards']);
+			})
+		)
+	);
+
+	it.effect('refuses to post when HEAD moved since the run started', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
+				const gh = yield* GhFake;
+				const git = yield* GitFake;
 				const started = yield* Deferred.make<void>();
 				yield* agent.script(
 					{ step: 'review', label: 'standards' },
-					hangs(started),
-					reviewerSays(finding('must-fix', 2))
+					reviewerSays(finding('must-fix', 3))
 				);
-				yield* agent.script({ step: 'verify' }, verifierConfirms(1));
+				yield* agent.script({ step: 'verify' }, hangs(started), verifierConfirms(1));
 				const state = yield* newReview(true);
+				// The run stops while verifying, and the caller checks out another commit.
+				yield* interruptAfter(state, started);
+				yield* git.update((repo) => ({ ...repo, headSha: fakeSha(0xd) }));
 
-				// The daemon stops mid-review: the run's scope closes without finishing it.
-				yield* Effect.scoped(
-					Effect.gen(function* () {
-						yield* startReview(state);
-						yield* Deferred.await(started);
-					})
+				const summary = yield* Effect.flatMap(
+					resumeRun(state.runId, env),
+					(handle) => handle.await
 				);
-				expect(yield* store.markInterrupted).toEqual([state.runId]);
-				// Someone pushes to the PR meanwhile; the run keeps reviewing what it pinned.
-				yield* git.update((repo) => ({
-					...repo,
-					remoteRefs: { 'refs/pull/7/head': fakeSha(0xd) }
-				}));
 
-				const freshEnv = { PATH: '/opt/bin' };
-				const handle = yield* resumeRun(state.runId, freshEnv);
-				const summary = yield* handle.await;
-
-				expect(summary).toMatchObject({ kind: 'review', status: 'done' });
-				const repo = yield* git.state;
-				expect(repo.fetches).toEqual([]);
-				expect(repo.worktrees).toEqual([]);
-				expect((yield* gh.reviews).map((review) => review.commitId)).toEqual([HEAD]);
-				const calls = yield* agent.calls;
-				expect(calls.at(-1)?.env).toEqual(freshEnv);
-				expect(transitions(yield* eventsOf(state))).toEqual([
-					'route',
-					'review',
-					'verify',
-					'post',
-					'done'
-				]);
+				expect(summary.status).toBe('failed');
+				expect(summary.error).toContain(
+					`HEAD moved from the reviewed ${HEAD} to ${fakeSha(0xd)}`
+				);
+				expect(yield* gh.reviews).toEqual([]);
 			})
 		)
 	);
 
-	it.effect('removes the worktree when an interrupted run is cancelled', () =>
+	it.effect('is cancelled from its log once interrupted', () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
-				const git = yield* GitFake;
 				const store = yield* RunStore;
 				const started = yield* Deferred.make<void>();
 				yield* agent.script({ step: 'review', label: 'standards' }, hangs(started));
 				const state = yield* newReview(false);
-				yield* Effect.scoped(
-					Effect.gen(function* () {
-						yield* startReview(state);
-						yield* Deferred.await(started);
-					})
-				);
-				yield* store.markInterrupted;
-				expect((yield* git.state).worktrees).toHaveLength(1);
+				yield* interruptAfter(state, started);
 
-				const summary = yield* cancelFromLog(state.runId, env);
+				const summary = yield* cancelFromLog(state.runId);
 
 				expect(summary).toMatchObject({
 					kind: 'review',
 					status: 'cancelled',
 					prUrl: PR_URL
 				});
-				expect((yield* git.state).worktrees).toEqual([]);
 				expect((yield* store.get(state.runId)).status).toBe('cancelled');
 			})
 		)

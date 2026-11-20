@@ -43,7 +43,18 @@ export const ModelId = Schema.NonEmptyString;
 export const SessionId = Schema.NonEmptyString.pipe(Schema.brand('SessionId'));
 export type SessionId = typeof SessionId.Type;
 
-/** Pipeline steps, named after the machine states that run them. */
+/**
+ * A review stored by a ship run, which later commands find it by. It outlives the run that
+ * made it; see `StoredReview`.
+ */
+export const ReviewId = Schema.NonEmptyString.pipe(Schema.brand('ReviewId'));
+export type ReviewId = typeof ReviewId.Type;
+
+/**
+ * Steps: the primitives and pipeline steps that report `StepStarted` and `StepEnded`, and the
+ * agent calls inside them (`fixChecks` in `checks`, `route` and `verify` in `review`). The
+ * names a run no longer reports, such as `prepare`, stay so that older logs still decode.
+ */
 export const Step = Schema.Literals([
 	'baseline',
 	'implement',

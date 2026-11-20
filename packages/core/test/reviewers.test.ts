@@ -76,7 +76,7 @@ const context = { cwd: '/repo', env: { PATH: '/bin' } };
 const subject: ReviewSubject = {
 	diff: 'diff --git a/src/a.ts b/src/a.ts\n+const a = 1;',
 	commits: [{ sha: fakeSha(1), subject: 'Add a' }],
-	intent: ChangeIntent.Plan({
+	intent: ChangeIntent.cases.Plan.make({
 		specPath: '/plans/feature/spec.md',
 		planPath: '/plans/feature/implementation-plan.md'
 	}),
@@ -360,7 +360,7 @@ describe('Reviewers.review', () => {
 
 				yield* (yield* Reviewers).review({
 					...subject,
-					intent: ChangeIntent.Description({
+					intent: ChangeIntent.cases.Description.make({
 						title: 'Cache the config',
 						body: 'Reads the config once per run.'
 					}),

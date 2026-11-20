@@ -5,6 +5,7 @@
 import { NodeServices } from '@effect/platform-node';
 import {
 	BUILTIN_BRIEFS_DIR,
+	GitSha,
 	projectKeyOf,
 	shipPaths,
 	type AgentRunInput,
@@ -14,6 +15,7 @@ import { AgentFake, ClefFake, GhFake, type AgentReply, type AgentScript } from '
 import { Context, Effect, Layer, References, Schedule, Stream } from 'effect';
 import { execFileSync, spawn } from 'node:child_process';
 import {
+	appendFileSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -136,9 +138,10 @@ export const fixture = Effect.gen(function* () {
 
 /**
  * Makes `fx.work` a clone of `github.com/f-elix/example`, the repository of the fake's PRs,
- * and pushes PR 1's head to the fixture's bare repo as GitHub does. `origin` gets the
- * GitHub ssh URL, and the returned env makes ssh to it reach the bare repo; the project
- * config moves to the new project key.
+ * with PR 1's head checked out as `gh pr checkout 1` leaves it: one commit adding
+ * `src/feature.ts`. `origin` gets the GitHub ssh URL, and the returned env makes ssh to it
+ * reach the fixture's bare repo; the project config moves to the new project key. Returns
+ * the PR's head, which the GitHub fake's PR must report.
  */
 export const cloneOfExample = (fx: Fixture) => {
 	const origin = join(fx.dir, 'origin.git');
@@ -146,11 +149,8 @@ export const cloneOfExample = (fx: Fixture) => {
 	fx.write('src/feature.ts', 'export const feature = 1;\n');
 	fx.git('add', 'src');
 	fx.git('commit', '--quiet', '-m', 'Add the feature');
-	fx.git('push', '--quiet', 'origin', 'HEAD:refs/pull/1/head');
-	// The PR's head moves on locally; the run reviews what origin has.
-	fx.write('src/later.ts', 'export const later = 2;\n');
-	fx.git('add', 'src');
-	fx.git('commit', '--quiet', '-m', 'Not pushed');
+	// The fixture's plan is untracked; a review wants a clean tree.
+	appendFileSync(join(fx.work, '.git/info/exclude'), '/.plans/\n');
 
 	const paths = shipPaths(fx.home);
 	const config = readFileSync(
@@ -162,7 +162,7 @@ export const cloneOfExample = (fx: Fixture) => {
 	mkdirSync(dirname(projectConfig), { recursive: true });
 	writeFileSync(projectConfig, config);
 	return {
-		head: fx.git('rev-parse', 'HEAD~1'),
+		head: GitSha.make(fx.git('rev-parse', 'HEAD')),
 		// Git appends the host and the remote command; the shell ignores them.
 		env: { ...fx.env, GIT_SSH_COMMAND: `sh -c 'exec git-upload-pack "${origin}"' ssh` }
 	};
@@ -185,8 +185,7 @@ export const daemon = (home: string, services: Fakes, version = VERSION) =>
 	startDaemon({
 		home,
 		version,
-		services: Layer.succeedContext(services),
-		env: isolatedEnv(dirname(home))
+		services: Layer.succeedContext(services)
 	}).pipe(
 		Effect.provide(NodeServices.layer),
 		Effect.provideService(References.MinimumLogLevel, 'Warn')

@@ -1,61 +1,110 @@
+/**
+ * The `ship run` machine: baseline, implement, checks, review, then fix, checks and review
+ * again until triage opens the PR or escalates. Each working state invokes one primitive
+ * (triage is the one pure step), so re-running a state on resume repeats only that
+ * primitive, and the primitive's checkpoints skip what it already finished.
+ */
+import { createEffectEventStreamLogic, createEffectLogic, setupEffect } from '@xstate/effect';
+import { Schema, type Effect } from 'effect';
+import { baselinePrimitive, ChecksOutput, checksPrimitive } from './check-primitives.ts';
+import { withCheckpointScope } from './checkpoint.ts';
+import { fixPrimitive, implementPrimitive, planIntent, planName } from './implementer.ts';
 import {
-	createEffectEventStreamLogic,
-	createEffectLogic,
-	EffectFailure,
-	setupEffect
-} from '@xstate/effect';
-import { Cause, Schema, type Effect } from 'effect';
-import {
-	baselineStep,
-	checksPassed,
-	checksStep,
-	escalateStep,
-	fixChecksStep,
-	fixStep,
-	implementStep,
-	planIntent,
-	prStep,
-	TriageNext,
-	triageStep
-} from './pipeline-steps.ts';
-import {
-	completeRound,
-	reviewStep,
-	routeStep,
-	startRound,
-	verifyStep,
-	withFindings
-} from './review-round.ts';
-import { stepOutcome, type StepOutcome, type StepSpend } from './run-step.ts';
-import { CheckRound, RunState, type EscalationReason } from './run.ts';
+	addCost,
+	checksEvents,
+	escalate,
+	fail,
+	machineKit,
+	stepInput,
+	type Next
+} from './machine-kit.ts';
+import type { PrimitiveScope } from './primitive-scope.ts';
+import { invokePrimitive } from './primitive.ts';
+import { escalatePrimitive, prPrimitive, type PrInput } from './publish.ts';
+import { reviewPrimitive } from './review-primitive.ts';
+import { stepOutcome, type StepOutcome } from './run-step.ts';
+import { RunState, type ReviewRound } from './run.ts';
+import { TriageNext, triageStep } from './triage.ts';
+
+// --- Context to primitive inputs ---
+
+/** The primitive scope of the run's context. */
+const scopeOf = (state: RunState): PrimitiveScope => ({
+	runId: state.runId,
+	projectKey: state.projectKey,
+	cwd: state.cwd,
+	env: state.env,
+	baseSha: state.baseSha,
+	config: state.config
+});
+
+/**
+ * The message of the round's commit, and of the single commit a squash leaves. Round 0
+ * uses the implementer's subject, or `Implement <plan name>` when it gave none.
+ */
+export const commitMessage = (state: RunState): string =>
+	state.round === 0
+		? (state.commitSubject ?? `Implement ${planName(state.planDir)}`)
+		: `Address review round ${state.round} findings`;
+
+const implementerScope = (state: RunState) => ({
+	...scopeOf(state),
+	planDir: state.planDir,
+	session: state.implementerSession
+});
+
+const prInput = (state: RunState): PrInput => ({
+	...scopeOf(state),
+	planDir: state.planDir,
+	branch: state.branch,
+	squashMessage: commitMessage({ ...state, round: 0 }),
+	checks: state.checks,
+	unresolved: state.unresolved
+});
+
+/**
+ * The round's review. After the first round it follows up on the fix: the verifier checks
+ * the must-fix findings and nits the fix was given, and routing looks at the fix commits.
+ */
+const reviewInput = (state: RunState) => ({
+	...scopeOf(state),
+	round: state.round,
+	intent: planIntent(state.planDir),
+	followUp:
+		state.lastReviewedSha === null
+			? null
+			: {
+					previous: [...state.unresolved.mustFix, ...state.unresolved.nits],
+					knownTradeoffs: state.unresolved.tradeoffs,
+					routedFromSha: state.lastReviewedSha
+				}
+});
+
+/**
+ * Wraps a state's primitive invocation so its checkpoints are keyed under the state and the
+ * round: each loop iteration gets its own keys.
+ */
+const inState = (state: string, round: number) => withCheckpointScope(`${state}:${round}`);
 
 // --- Step actors ---
 
 const step = <A, R>(run: (state: RunState) => Effect.Effect<StepOutcome<A>, never, R>) =>
 	createEffectLogic({ schemas: { input: RunState }, effect: ({ input }) => run(input) });
 
-const checksLogic = (run: typeof checksStep) =>
+const checksLogic = <R>(
+	run: (state: RunState) => Effect.Effect<StepOutcome<ChecksOutput>, never, R>
+) =>
 	createEffectEventStreamLogic({
 		schemas: { input: RunState },
-		stream: ({ input }) => run(input)
+		stream: ({ input }) => checksEvents(run(input))
 	});
-
-/**
- * Every step actor gets the run's context as its input, in this machine and the review
- * machine. The driver relies on this when it restarts a step that finished before the
- * machine took its result.
- */
-export const stepInput = <C>({ context }: { readonly context: C }): C => context;
 
 // --- Transitions ---
 
 type Settled =
 	| 'implement'
 	| 'checks'
-	| 'fixChecks'
-	| 'route'
 	| 'review'
-	| 'verify'
 	| 'triage'
 	| 'fix'
 	| 'escalate'
@@ -64,92 +113,56 @@ type Settled =
 	| 'escalated'
 	| 'failed';
 
-interface Next {
-	readonly target: Settled;
-	readonly context: RunState;
-}
-
-/** Adds what a step spent to the context. */
-const withSpend = (context: RunState, spent: StepSpend): RunState => ({
-	...context,
-	costUsd: context.costUsd + spent.costUsd,
-	implementerSession: spent.session ?? context.implementerSession
-});
-
-const escalate = (context: RunState, reason: EscalationReason): Next => ({
-	target: 'escalate',
-	context: { ...context, escalationReason: reason }
-});
-
-const fail = (context: RunState, error: string): Next => ({
-	target: 'failed',
-	context: { ...context, error }
-});
+type PipelineNext = Next<RunState, Settled>;
 
 /**
- * Where a step's outcome leads. A failed step fails the run, except a timeout after the
- * run committed work, which escalates so the work still ends up in a draft PR. A failing
- * `escalate` always fails the run, so escalation cannot loop.
+ * A failed step fails the run, except a timeout after the run committed work, which
+ * escalates so the work still ends up in a draft PR. A failing `escalate` always fails the
+ * run, so escalation cannot loop.
  */
-const settle = <A>(
-	context: RunState,
-	outcome: StepOutcome<A>,
-	onOk: (context: RunState, output: A) => Next
-): Next => {
-	const spent = withSpend(context, outcome.spent);
-	if (outcome._tag === 'Ok') return onOk(spent, outcome.output);
-	const { failure } = outcome;
-	return failure.timedOut && failure.hasCommits && failure.step !== 'escalate'
-		? escalate(spent, 'timeout')
-		: fail(spent, failure.message);
-};
+const { settle, onDefect } = machineKit<RunState, 'escalate' | 'failed'>({
+	spend: (context, spent) => ({
+		...addCost(context, spent),
+		implementerSession: spent.session ?? context.implementerSession
+	}),
+	onFailure: (context, failure) =>
+		failure.timedOut && failure.hasCommits && failure.step !== 'escalate'
+			? escalate(context, 'timeout')
+			: fail(context, failure.message)
+});
 
-/** A defect in a step actor: an error no step expects. */
-const onDefect = ({ context, event }: { context: RunState; event: { error: unknown } }): Next =>
-	fail(context, describeDefect(event.error));
-
-/** The message of a step actor's or the machine's unexpected error. */
-export const describeDefect = (error: unknown): string => {
-	const cause = EffectFailure.is(error) ? error.cause : null;
-	if (cause !== null) {
-		const squashed = Cause.squash(cause);
-		return squashed instanceof Error ? squashed.message : String(squashed);
-	}
-	return error instanceof Error ? error.message : String(error);
-};
-
-const afterChecks = (context: RunState, round: CheckRound): Next => {
-	const next = { ...context, checks: [...context.checks, round] };
-	if (checksPassed(round)) {
-		return {
-			target: 'route',
-			context: { ...next, round: next.round + 1, checkFixAttempts: 0 }
-		};
-	}
-	return next.checkFixAttempts < next.config.caps.checkFixAttempts
-		? { target: 'fixChecks', context: next }
-		: escalate(next, 'check-fix-cap');
-};
-
-const afterBaseline = (context: RunState, round: CheckRound): Next => {
-	const next = { ...context, checks: [...context.checks, round] };
-	if (checksPassed(round)) return { target: 'implement', context: next };
-	const failing = round.results
+const afterBaseline = (context: RunState, output: ChecksOutput): PipelineNext => {
+	const next = { ...context, checks: [...context.checks, ...output.passes] };
+	if (output.passed) return { target: 'implement', context: next };
+	const failing = (output.passes.at(-1)?.results ?? [])
 		.filter((result) => result.exitCode !== 0)
 		.map((result) => result.name);
 	return fail(next, `Baseline checks failed before any change: ${failing.join(', ')}`);
 };
 
+const afterChecks = (context: RunState, output: ChecksOutput): PipelineNext => {
+	const next = { ...context, checks: [...context.checks, ...output.passes] };
+	return output.passed
+		? { target: 'review', context: { ...next, round: next.round + 1 } }
+		: escalate(next, 'check-fix-cap');
+};
+
+/** The context once a review closed its round; the next round routes from its head. */
+const completeRound = (context: RunState, round: ReviewRound): RunState => ({
+	...context,
+	lastReviewedSha: round.toSha,
+	reviewRounds: [...context.reviewRounds, round]
+});
+
 // --- Machine ---
 
 /**
- * The pipeline. Each working state invokes one step actor; the step reports its own
- * events and returns an outcome, and the state's `onDone` picks the next state from it.
+ * The pipeline. Each working state invokes one step actor, which maps the context to its
+ * primitive's input and returns the outcome; the state's `onDone` picks the next state.
  *
  * `baseline` and `checks` have `running` and `waiting` substates: `waiting` while a
  * check waits for its lock (see {@link isWaitingState}). A passing check pass commits
- * inside the `checks` step and pushing happens inside `pr` and `escalate`, so every state
- * is one `Step` and re-running a step on resume repeats only that step.
+ * inside `checks`, and pushing happens inside `pr` and `escalate`.
  */
 export const pipelineMachine = setupEffect({
 	schemas: {
@@ -159,21 +172,44 @@ export const pipelineMachine = setupEffect({
 			cancel: Schema.Struct({}),
 			'lock.waiting': Schema.Struct({}),
 			'lock.acquired': Schema.Struct({}),
-			'checks.done': Schema.Struct({ outcome: stepOutcome(CheckRound) })
+			'checks.done': Schema.Struct({ outcome: stepOutcome(ChecksOutput) })
 		}
 	},
 	actors: {
-		baseline: checksLogic(baselineStep),
-		checks: checksLogic(checksStep),
-		implement: step(implementStep),
-		fixChecks: step(fixChecksStep),
-		route: step(routeStep),
-		review: step((state) => reviewStep(state, planIntent(state))),
-		verify: step((state) => verifyStep(state, planIntent(state))),
+		baseline: checksLogic((state) =>
+			invokePrimitive(baselinePrimitive, { ...scopeOf(state), planDir: state.planDir })
+		),
+		implement: step((state) => invokePrimitive(implementPrimitive, implementerScope(state))),
+		checks: checksLogic((state) =>
+			inState(
+				'checks',
+				state.round
+			)(
+				invokePrimitive(checksPrimitive, {
+					...implementerScope(state),
+					round: state.round,
+					commitMessage: commitMessage(state)
+				})
+			)
+		),
+		review: step((state) =>
+			inState('review', state.round)(invokePrimitive(reviewPrimitive, reviewInput(state)))
+		),
 		triage: step(triageStep),
-		fix: step(fixStep),
-		escalate: step(escalateStep),
-		pr: step(prStep)
+		fix: step((state) =>
+			invokePrimitive(fixPrimitive, {
+				...implementerScope(state),
+				mustFix: state.unresolved.mustFix,
+				nits: state.unresolved.nits
+			})
+		),
+		escalate: step((state) =>
+			invokePrimitive(escalatePrimitive, {
+				...prInput(state),
+				reason: state.escalationReason
+			})
+		),
+		pr: step((state) => invokePrimitive(prPrimitive, prInput(state)))
 	}
 }).createMachine({
 	id: 'pipeline',
@@ -215,53 +251,15 @@ export const pipelineMachine = setupEffect({
 				'checks.done': ({ context, event }) => settle(context, event.outcome, afterChecks)
 			}
 		},
-		fixChecks: {
-			invoke: {
-				src: 'fixChecks',
-				input: stepInput,
-				onDone: ({ context, event }) =>
-					settle(context, event.output, (next) => ({
-						target: 'checks',
-						context: { ...next, checkFixAttempts: next.checkFixAttempts + 1 }
-					})),
-				onError: onDefect
-			}
-		},
-		route: {
-			invoke: {
-				src: 'route',
-				input: stepInput,
-				onDone: ({ context, event }) =>
-					settle(context, event.output, (next, review) => ({
-						target: 'review',
-						context: startRound(next, review)
-					})),
-				onError: onDefect
-			}
-		},
 		review: {
 			invoke: {
 				src: 'review',
 				input: stepInput,
 				onDone: ({ context, event }) =>
-					settle(context, event.output, (next, findings) => ({
-						target: 'verify',
-						context: withFindings(next, findings)
+					settle(context, event.output, (next, round) => ({
+						target: 'triage',
+						context: completeRound(next, round)
 					})),
-				onError: onDefect
-			}
-		},
-		verify: {
-			invoke: {
-				src: 'verify',
-				input: stepInput,
-				onDone: ({ context, event }) =>
-					settle(context, event.output, (next, verified) => {
-						const completed = completeRound(next, verified);
-						return completed === null
-							? fail(next, 'No review round is in progress')
-							: { target: 'triage', context: completed };
-					}),
 				onError: onDefect
 			}
 		},
@@ -273,11 +271,8 @@ export const pipelineMachine = setupEffect({
 					settle(context, event.output, (next, { unresolved, next: decision }) => {
 						const triaged = { ...next, unresolved };
 						return TriageNext.$match(decision, {
-							pr: (): Next => ({ target: 'pr', context: triaged }),
-							fix: (): Next => ({
-								target: 'fix',
-								context: { ...triaged, checkFixAttempts: 0 }
-							}),
+							pr: (): PipelineNext => ({ target: 'pr', context: triaged }),
+							fix: (): PipelineNext => ({ target: 'fix', context: triaged }),
 							escalate: ({ reason }) => escalate(triaged, reason)
 						});
 					}),

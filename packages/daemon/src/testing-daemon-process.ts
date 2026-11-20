@@ -4,7 +4,7 @@
  */
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
 import { Effect, Layer, References } from 'effect';
-import { processEnv, serveDaemon, shipHomeDir } from './index.ts';
+import { serveDaemon, shipHomeDir } from './index.ts';
 import { hangingFakes } from './testing.ts';
 
 const services = Layer.effectContext(hangingFakes);
@@ -15,8 +15,7 @@ NodeRuntime.runMain(
 		yield* serveDaemon({
 			home,
 			version: process.argv[2] ?? 'unknown',
-			services,
-			env: processEnv()
+			services
 		});
 	}).pipe(
 		Effect.provide(NodeServices.layer),

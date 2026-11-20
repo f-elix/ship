@@ -320,7 +320,7 @@ const reviewer = (conventions?: ReviewerDef['conventions']): ReviewerDef => ({
 const subject: ReviewSubject = {
 	diff: '',
 	commits: [{ sha: fakeSha(1), subject: 'Add a' }],
-	intent: ChangeIntent.Plan({
+	intent: ChangeIntent.cases.Plan.make({
 		specPath: '/plans/x/spec.md',
 		planPath: '/plans/x/implementation-plan.md'
 	}),

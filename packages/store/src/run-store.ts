@@ -4,8 +4,10 @@ import {
 	InvalidRunStatus,
 	NonNegativeInt,
 	ProjectKey,
+	ReviewNotFound,
 	ReviewRunInfo,
 	ReviewRunState,
+	Reviews,
 	RunEvent,
 	RunId,
 	RunInfo,
@@ -17,14 +19,18 @@ import {
 	SNAPSHOT_VERSION,
 	SnapshotLoad,
 	statePath,
+	StoredReview,
 	Summary,
 	TerminalRunStatus,
 	UnknownEvent,
 	type AppendableEvent,
 	type Env,
 	type PersistedRunSnapshot,
+	type ReviewId,
+	type ReviewsShape,
 	type RunEventEnvelope,
-	type RunJournalShape
+	type RunJournalShape,
+	type StoredCheckpoint
 } from '@ship/core';
 import {
 	Context,
@@ -32,6 +38,7 @@ import {
 	DateTime,
 	Effect,
 	Layer,
+	Option,
 	PubSub,
 	Random,
 	Result,
@@ -66,6 +73,8 @@ export interface RunFilter {
 
 /** The run store; the members a run driver needs are documented on `RunJournalShape`. */
 export interface RunStoreShape extends RunJournalShape {
+	/** Stored reviews, which outlive the runs that made them. */
+	readonly reviews: ReviewsShape;
 	/** Creates a run with status `running` and appends its `RunCreated` event (seq 1). */
 	readonly create: (run: NewRun) => Effect.Effect<ShipRunInfo>;
 	/**
@@ -164,6 +173,8 @@ const decodeSnapshotObject = Schema.decodeUnknownEffect(
 	Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 );
 const decodeRunState = Schema.decodeUnknownEffect(Schema.Union([ReviewRunState, RunState]));
+const encodeReview = Schema.encodeEffect(Schema.fromJsonString(StoredReview));
+const decodeReview = Schema.decodeUnknownEffect(Schema.fromJsonString(StoredReview));
 
 /** Decodes a stored event, turning one this build does not know into an `UnknownEvent`. */
 const decodeStoredEvent = (type: string, payload: string): RunEvent | UnknownEvent => {
@@ -386,7 +397,8 @@ const make = Effect.gen(function* () {
 			const touched = yield* sql`
 				UPDATE runs SET ${sql.update({
 					state: statePath(snapshot.value),
-					round: context.round,
+					// A review run reviews once, as round 1.
+					round: context.kind === 'review' ? 1 : context.round,
 					pr_url: context.kind === 'review' ? context.reviewUrl : context.prUrl,
 					updated_at: now
 				})} WHERE id = ${runId} RETURNING id
@@ -446,6 +458,76 @@ const make = Effect.gen(function* () {
 			Effect.map((snapshot) => SnapshotLoad.Found({ snapshot })),
 			Effect.catch((error) => Effect.succeed(SnapshotLoad.Corrupt({ error: error.message })))
 		);
+	}, orDieStorage);
+
+	const saveCheckpoint = Effect.fn('RunStore.saveCheckpoint')(function* (
+		checkpoint: StoredCheckpoint,
+		events: ReadonlyArray<AppendableEvent> = []
+	) {
+		const { runId, key } = checkpoint;
+		const value = JSON.stringify(checkpoint.value);
+		const write = Effect.gen(function* () {
+			yield* updateRun(runId, isUnfinished, {});
+			yield* sql`
+				INSERT INTO checkpoints ${sql.insert({ run_id: runId, key, value })}
+				ON CONFLICT (run_id, key) DO UPDATE SET value = excluded.value
+			`;
+			return yield* Effect.forEach(events, (event) => insertEvent(runId, event));
+		});
+		return yield* appending(write, (envelopes) => envelopes);
+	}, orDieStorage);
+
+	const loadCheckpoint = Effect.fn('RunStore.loadCheckpoint')(function* (
+		runId: RunId,
+		key: string
+	) {
+		yield* findRun(runId);
+		const [row] = yield* sql<{ value: string }>`
+			SELECT value FROM checkpoints WHERE run_id = ${runId} AND key = ${key}
+		`;
+		return row === undefined ? Option.none() : Option.some<unknown>(JSON.parse(row.value));
+	}, orDieStorage);
+
+	const saveReview = Effect.fn('Reviews.save')(function* (review: StoredReview) {
+		const json = yield* encodeReview(review);
+		const now = yield* nowMillis;
+		// A review saved again keeps when it was first stored.
+		yield* sql`
+			INSERT INTO reviews ${sql.insert({
+				id: review.id,
+				run_id: review.runId,
+				project_key: review.subject.projectKey,
+				pr_url: review.subject.prUrl,
+				base_sha: review.subject.baseSha,
+				head_sha: review.subject.headSha,
+				review: json,
+				posted_url: review.postedUrl,
+				created_at: now
+			})}
+			ON CONFLICT (id) DO UPDATE SET
+				run_id = excluded.run_id,
+				project_key = excluded.project_key,
+				pr_url = excluded.pr_url,
+				base_sha = excluded.base_sha,
+				head_sha = excluded.head_sha,
+				review = excluded.review,
+				posted_url = excluded.posted_url
+		`;
+	}, orDieStorage);
+
+	const getReview = Effect.fn('Reviews.get')(function* (reviewId: ReviewId) {
+		const [row] = yield* sql<{
+			review: string;
+		}>`SELECT review FROM reviews WHERE id = ${reviewId}`;
+		if (row === undefined) return yield* new ReviewNotFound({ reviewId });
+		return yield* decodeReview(row.review);
+	}, orDieStorage);
+
+	const reviewsByPr = Effect.fn('Reviews.byPr')(function* (url: string) {
+		const rows = yield* sql<{ review: string }>`
+			SELECT review FROM reviews WHERE pr_url = ${url} ORDER BY created_at, id
+		`;
+		return yield* Effect.forEach(rows, (row) => decodeReview(row.review));
 	}, orDieStorage);
 
 	const get = Effect.fn('RunStore.get')(function* (runId: RunId) {
@@ -555,7 +637,10 @@ const make = Effect.gen(function* () {
 		events,
 		follow,
 		saveSnapshot,
+		saveCheckpoint,
+		loadCheckpoint,
 		loadSnapshot,
+		reviews: { save: saveReview, get: getReview, byPr: reviewsByPr },
 		get,
 		list,
 		finish,
@@ -577,6 +662,14 @@ export class RunStore extends Context.Service<RunStore, RunStoreShape>()('@ship/
 	/** The store on a SQLite file, created if absent. */
 	static readonly layerFile = (filename: string) =>
 		this.layer.pipe(Layer.provide(SqliteClient.layer({ filename })));
+
+	/** The store's reviews as the `Reviews` service. */
+	static readonly reviews: Layer.Layer<Reviews, never, RunStore> = Layer.effect(
+		Reviews,
+		Effect.gen(function* () {
+			return Reviews.of((yield* RunStore).reviews);
+		})
+	);
 
 	/** The store as the `RunJournal` a run driver writes to. */
 	static readonly journal: Layer.Layer<RunJournal, never, RunStore> = Layer.effect(

@@ -31,8 +31,8 @@ export interface RunStart {
 	readonly config: ResolvedConfig;
 }
 
-const failed = (reason: PreconditionReason, detail: string) =>
-	new PreconditionFailed({ reason, detail });
+const failed = (reason: PreconditionReason, detail: string, cause?: unknown) =>
+	new PreconditionFailed(cause === undefined ? { reason, detail } : { reason, detail, cause });
 
 /**
  * Loads and resolves the project's config, failing when it is missing or invalid or when a
@@ -130,7 +130,10 @@ export const checkPreconditions = Effect.fn('checkPreconditions')(
 export interface ReviewRequest {
 	/** A PR number in the repo's GitHub repository, or a PR URL. */
 	readonly pr: string;
-	/** Where `ship review` was run: a clone of the PR's base repository. */
+	/**
+	 * Where `ship review` was run: a clone of the PR's base repository, with the PR checked
+	 * out and nothing uncommitted.
+	 */
 	readonly cwd: string;
 	/** The caller's env, which git and `gh` run with. */
 	readonly env: Env;
@@ -139,20 +142,22 @@ export interface ReviewRequest {
 /** What a review run starts from once its preconditions hold. */
 export interface ReviewStart {
 	readonly projectKey: ProjectKey;
-	/** The PR, with its head fetched and pinned and its merge base found. */
+	/** The PR, with its head pinned to the checked-out commit and its merge base found. */
 	readonly pr: ReviewedPr;
 	readonly config: ResolvedConfig;
 }
 
 /**
- * Checks that `ship review` can review the PR from the caller's repo, with the caller's env,
- * and pins what it reviews: the PR exists and belongs to the repository `origin` points at,
- * and the project config, when there is one, is valid, as `ship run` would read it. Then it
- * fetches the PR's head as `refs/pull/<n>/head` and its base branch from `origin`; the run
- * reviews the merge base of the two up to that head.
+ * Checks that `ship review` can review the PR in the caller's checkout, with the caller's
+ * env, and pins what it reviews: the PR exists and belongs to the repository `origin` points
+ * at, the project config, when there is one, is valid, as `ship run` would read it, and the
+ * checkout is clean with `HEAD` at the PR's head commit. ship never checks the PR out
+ * itself; the caller does, with `gh pr checkout <n>`. Then it fetches the PR's base branch
+ * from `origin`; the run reviews the merge base of the base and `HEAD` up to `HEAD`.
  *
  * Git failures past the first check are not precondition failures, so they are defects,
- * except fetching, which fails as `pr-not-found`.
+ * except fetching the base branch, which fails as `base-fetch-failed` with the git error as
+ * its `cause`.
  */
 export const checkReviewPreconditions = Effect.fn('checkReviewPreconditions')(
 	function* (request: ReviewRequest) {
@@ -167,7 +172,7 @@ export const checkReviewPreconditions = Effect.fn('checkReviewPreconditions')(
 		const projectKey = yield* git.projectKey(repo);
 		const pr = yield* gh
 			.viewPr(repo, request.pr)
-			.pipe(Effect.mapError((error) => failed('pr-not-found', error.message)));
+			.pipe(Effect.mapError((error) => failed('pr-not-found', error.message, error)));
 		const prRepo = prRepoKey(pr.url);
 		if (prRepo !== projectKey) {
 			return yield* failed(
@@ -182,14 +187,32 @@ export const checkReviewPreconditions = Effect.fn('checkReviewPreconditions')(
 				Effect.mapError((error) => failed(error.reason, `${error.path}: ${error.detail}`))
 			);
 
-		const fetchFailed = (error: { readonly message: string }) =>
-			failed('pr-not-found', `Could not fetch ${pr.url} from origin: ${error.message}`);
-		const headSha = yield* git
-			.fetchRef(repo, `refs/pull/${pr.number}/head`)
-			.pipe(Effect.mapError(fetchFailed));
+		const checkout = `run \`gh pr checkout ${pr.number}\` first`;
+		if (!(yield* git.isClean(repo))) {
+			return yield* failed(
+				'dirty-tree',
+				`${request.cwd} has uncommitted changes; commit or stash them, then ${checkout}`
+			);
+		}
+		const headSha = pr.headSha;
+		const head = yield* git.headSha(repo);
+		if (head !== headSha) {
+			return yield* failed(
+				'pr-not-checked-out',
+				`HEAD in ${request.cwd} is ${head}, not ${pr.url}'s head ${headSha}; ${checkout}`
+			);
+		}
 		const baseTip = yield* git
 			.fetchRef(repo, `refs/heads/${pr.baseRef}`)
-			.pipe(Effect.mapError(fetchFailed));
+			.pipe(
+				Effect.mapError((error) =>
+					failed(
+						'base-fetch-failed',
+						`Could not fetch ${pr.url}'s base branch ${pr.baseRef} from origin: ${error.message}`,
+						error
+					)
+				)
+			);
 		const baseSha = yield* git.mergeBase(repo, baseTip, headSha);
 		return {
 			projectKey,

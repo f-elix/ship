@@ -144,7 +144,7 @@ const harness = (dir: string, permits: Readonly<Record<string, number>>) => {
 		Pr.layer,
 		ShipHome.layer(join(dir, 'home'))
 	).pipe(Layer.provideMerge(fakes), Layer.provideMerge(NodeServices.layer));
-	const journal = JournalSpy.layer.pipe(
+	const journal = Layer.mergeAll(JournalSpy.layer, RunStore.reviews).pipe(
 		Layer.provideMerge(RunStore.layerFile(join(dir, 'ship.db')))
 	);
 	return Layer.mergeAll(services, journal);
@@ -203,9 +203,7 @@ const newRun = (project: Record<string, unknown> = {}) =>
 			config: yield* configWith(project),
 			implementerSession: null,
 			round: 0,
-			checkFixAttempts: 0,
 			lastReviewedSha: null,
-			review: null,
 			reviewRounds: [],
 			unresolved: { mustFix: [], tradeoffs: [], nits: [] },
 			checks: [],
@@ -361,7 +359,11 @@ describe('pipeline', () => {
 					error: null
 				});
 				expect(
-					summary.checks.map((pass) => [pass.baseline, pass.round, pass.attempt])
+					shipRun(summary)?.checks.map((pass) => [
+						pass.baseline,
+						pass.round,
+						pass.attempt
+					])
 				).toEqual([
 					[true, 0, 0],
 					[false, 0, 0]
@@ -370,9 +372,7 @@ describe('pipeline', () => {
 				expect(transitions(events)).toEqual([
 					'implement',
 					'checks.running',
-					'route',
 					'review',
-					'verify',
 					'triage',
 					'pr',
 					'done'
@@ -548,7 +548,7 @@ describe('pipeline', () => {
 				expect(summary.checks.map((pass) => pass.attempt)).toEqual([0, 0, 1]);
 				expect((yield* gh.prs).map((pr) => pr.draft)).toEqual([true]);
 				const calls = yield* agent.calls;
-				// The check fix resumed the implementer's session.
+				// The check fix ran inside `checks`, resuming the implementer's session.
 				expect(calls.find((call) => call.step === 'fixChecks')?.resume?.sessionId).toBe(
 					'fake-session-1'
 				);
@@ -561,8 +561,6 @@ describe('pipeline', () => {
 				]);
 				expect(transitions(yield* eventsOf(state.runId))).toEqual([
 					'implement',
-					'checks.running',
-					'fixChecks',
 					'checks.running',
 					'escalate',
 					'escalated'
@@ -624,15 +622,11 @@ describe('pipeline', () => {
 				expect(transitions(yield* eventsOf(state.runId))).toEqual([
 					'implement',
 					'checks.running',
-					'route',
 					'review',
-					'verify',
 					'triage',
 					'fix',
 					'checks.running',
-					'route',
 					'review',
-					'verify',
 					'triage',
 					'escalate',
 					'escalated'
@@ -967,6 +961,62 @@ describe('pipeline', () => {
 		)
 	);
 
+	it.effect('resumes a check fix without re-running the check pass before it', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
+				const git = yield* GitFake;
+				const checks = yield* ChecksFake;
+				const store = yield* RunStore;
+				const started = yield* Deferred.make<void>();
+				// Baseline passes, the round's first pass fails, the pass after the fix passes.
+				yield* checks.respond(yield* exitCodesByCheck({ test: [0, 1, 0] }));
+				yield* agent.script({ step: 'implement' }, edits(git, 'feature.ts'));
+				yield* agent.script(
+					{ step: 'fixChecks' },
+					hangs(started),
+					edits(git, 'feature.ts', 0.25)
+				);
+				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
+				yield* agent.script({ step: 'pr' }, prText);
+				const state = yield* newRun({ caps: { checkFixAttempts: 1 } });
+
+				// The daemon stops while the check fix runs.
+				yield* Effect.scoped(
+					Effect.gen(function* () {
+						yield* startRun(state);
+						yield* Deferred.await(started);
+					})
+				);
+				expect(yield* store.markInterrupted).toEqual([state.runId]);
+
+				const summary = yield* Effect.flatMap(
+					resumeRun(state.runId, env),
+					(handle) => handle.await
+				);
+
+				// The failed pass is not run again, and the fix still counts as the one allowed:
+				// a resumed run that forgot it would have passed without a fix, or fixed twice.
+				expect(summary.status).toBe('done');
+				expect((yield* checks.calls).filter((call) => call.kind === 'run')).toHaveLength(3);
+				expect(
+					(yield* agent.calls).filter((call) => call.step === 'fixChecks')
+				).toHaveLength(2);
+				expect(
+					shipRun(summary)?.checks.map((pass) => [
+						pass.baseline,
+						pass.attempt,
+						pass.results[0]?.exitCode
+					])
+				).toEqual([
+					[true, 0, 0],
+					[false, 0, 1],
+					[false, 1, 0]
+				]);
+			})
+		)
+	);
+
 	it.effect('resumes mid-step, re-running only the step in flight with the fresh env', () =>
 		withHarness((dir) =>
 			Effect.gen(function* () {
@@ -1018,9 +1068,7 @@ describe('pipeline', () => {
 					'implement',
 					'implement',
 					'checks',
-					'route',
 					'review',
-					'verify',
 					'triage',
 					'pr'
 				]);

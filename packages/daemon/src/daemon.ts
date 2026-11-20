@@ -12,7 +12,6 @@ import {
 	ShipRpcs,
 	type Agent,
 	type Clef,
-	type Env,
 	type Gh,
 	type ShipPaths
 } from '@ship/core';
@@ -37,8 +36,6 @@ export interface DaemonOptions {
 	 * `gh` and Clef layers ({@link productionServices}); tests pass fakes.
 	 */
 	readonly services: Layer.Layer<Agent | Gh | Clef>;
-	/** The daemon's own env; see `DaemonControl`. */
-	readonly env: Env;
 }
 
 /** Another daemon is listening on the socket. */
@@ -174,7 +171,8 @@ const daemonServices = (options: DaemonOptions, paths: ShipPaths) => {
 		Reviewers.layer.pipe(Layer.provide([git, external, platform])),
 		Conventions.layer.pipe(Layer.provide([git, platform])),
 		Pr.layer.pipe(Layer.provide(external)),
-		RunStore.journal.pipe(Layer.provide(store))
+		RunStore.journal.pipe(Layer.provide(store)),
+		RunStore.reviews.pipe(Layer.provide(store))
 	);
 	const host = RunHost.layer.pipe(Layer.provide([pipeline, store]));
 	return Layer.mergeAll(platform, config, store, pipeline, host);
@@ -224,7 +222,6 @@ export const startDaemon = Effect.fn('startDaemon')(function* (options: DaemonOp
 	const shutdown = yield* Deferred.make<void>();
 	const control = Layer.succeed(DaemonControl, {
 		version: options.version,
-		env: options.env,
 		shutdown
 	});
 	yield* Layer.build(

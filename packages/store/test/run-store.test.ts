@@ -1,6 +1,7 @@
 import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { assert, describe, expect, it } from '@effect/vitest';
 import {
+	ChangeIntent,
 	configParseOptions,
 	GitSha,
 	GlobalConfig,
@@ -11,11 +12,12 @@ import {
 	RunEvent,
 	RunId,
 	SNAPSHOT_VERSION,
+	StoredReview,
 	type PersistedRunSnapshot,
 	type RunState,
 	type Summary
 } from '@ship/core';
-import { DateTime, Deferred, Effect, Fiber, Layer, Schema, Stream } from 'effect';
+import { DateTime, Deferred, Effect, Fiber, Layer, Option, Schema, Stream } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { TestClock } from 'effect/testing';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -58,9 +60,7 @@ const runState = (runId: RunId): RunState => ({
 	config: resolveConfig(decodeGlobalConfigSync({}), decodeProjectConfigSync({})),
 	implementerSession: null,
 	round: 1,
-	checkFixAttempts: 0,
 	lastReviewedSha: null,
-	review: null,
 	reviewRounds: [],
 	unresolved: { mustFix: [], tradeoffs: [], nits: [] },
 	checks: [],
@@ -107,6 +107,35 @@ const tagsOf = (envelopes: ReadonlyArray<{ readonly event: { readonly _tag: stri
 	envelopes.map((e) => e.event._tag);
 const range = (from: number, to: number) =>
 	Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+/** A stored review of PR 7 with one must-fix finding. */
+const reviewPrUrl = 'https://github.com/f-elix/ship/pull/7';
+const reviewOf = (id: string, runId: RunId, url: string | null = reviewPrUrl) =>
+	Schema.decodeUnknownSync(StoredReview)({
+		id,
+		runId,
+		subject: {
+			projectKey,
+			prUrl: url,
+			baseSha,
+			headSha: 'b'.repeat(40),
+			intent: ChangeIntent.cases.Description.make({ title: 'T', body: '' })
+		},
+		findings: [
+			{
+				reviewer: 'standards',
+				file: 'src/a.ts',
+				line: 3,
+				severity: 'must-fix',
+				claim: 'Wrong',
+				evidence: 'x',
+				id: 'f1',
+				round: 1,
+				alsoReportedBy: []
+			}
+		],
+		postedUrl: null
+	});
 
 describe('RunStore', () => {
 	it.effect('creates a running run whose log starts with RunCreated', () =>
@@ -426,15 +455,14 @@ describe('RunStore', () => {
 					...initialReviewRunState({
 						runId,
 						projectKey,
-						cwd: '/home/reviews/run',
+						cwd: '/repo',
 						env: secretEnv,
 						config: resolveConfig(
 							decodeGlobalConfigSync({}),
 							decodeProjectConfigSync({})
 						),
 						pr: { number: 7, url: prUrl, title: 'T', body: '', baseSha, headSha },
-						post: true,
-						repoDir: '/repo'
+						post: true
 					}),
 					reviewUrl
 				};
@@ -448,6 +476,172 @@ describe('RunStore', () => {
 			}).pipe(Effect.provide(TestLayer))
 		);
 	});
+
+	describe('checkpoints', () => {
+		it.effect('stores a value per run and key, replacing it when saved again', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const { runId } = yield* store.create(newRun);
+				const other = (yield* store.create(newRun)).runId;
+
+				yield* store.saveCheckpoint({ runId, key: 'review:1/route', value: { n: 1 } });
+				yield* store.saveCheckpoint({ runId, key: 'review:1/route', value: { n: 2 } });
+
+				expect(yield* store.loadCheckpoint(runId, 'review:1/route')).toEqual(
+					Option.some({ n: 2 })
+				);
+				// Another key, or the same key in another run, is a different checkpoint.
+				expect(yield* store.loadCheckpoint(runId, 'review:2/route')).toEqual(Option.none());
+				expect(yield* store.loadCheckpoint(other, 'review:1/route')).toEqual(Option.none());
+			}).pipe(Effect.provide(TestLayer))
+		);
+
+		it.effect('appends the given events in the same write as the checkpoint', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const { runId } = yield* store.create(newRun);
+
+				const appended = yield* store.saveCheckpoint(
+					{ runId, key: 'checks:1/pass/1', value: [] },
+					[{ _tag: 'StepStarted', at, step: 'checks' }]
+				);
+
+				expect(tagsOf(appended)).toEqual(['StepStarted']);
+				expect(tagsOf(yield* store.events(runId))).toEqual(['RunCreated', 'StepStarted']);
+			}).pipe(Effect.provide(TestLayer))
+		);
+
+		it.effect(
+			'refuses a checkpoint for a finished run, so nothing is written after the end',
+			() =>
+				Effect.gen(function* () {
+					const store = yield* RunStore;
+					const { runId } = yield* store.create(newRun);
+					yield* store.finish(summaryOf(runId));
+
+					const error = yield* Effect.flip(
+						store.saveCheckpoint({ runId, key: 'post/post', value: 'x' })
+					);
+
+					expect(error).toMatchObject({
+						_tag: 'InvalidRunStatus',
+						runId,
+						status: 'done'
+					});
+					expect(yield* store.loadCheckpoint(runId, 'post/post')).toEqual(Option.none());
+				}).pipe(Effect.provide(TestLayer))
+		);
+
+		it.effect('goes with its run when the run is deleted', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const sql = yield* SqlClient.SqlClient;
+				const { runId } = yield* store.create(newRun);
+				yield* store.saveCheckpoint({ runId, key: 'k', value: 1 });
+
+				yield* sql`DELETE FROM runs WHERE id = ${runId}`;
+
+				expect(yield* sql`SELECT * FROM checkpoints`).toEqual([]);
+			}).pipe(Effect.provide(TestLayer))
+		);
+	});
+
+	describe('reviews', () => {
+		it.effect('stores a review that reads back as saved', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const { runId } = yield* store.create(newRun);
+				const review = reviewOf(`${runId}-r1`, runId);
+
+				yield* store.reviews.save(review);
+
+				expect(yield* store.reviews.get(review.id)).toEqual(review);
+			}).pipe(Effect.provide(TestLayer))
+		);
+
+		it.effect('fails with ReviewNotFound for an unknown review', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const id = reviewOf('missing', RunId.make('20261117-120000-abcdef')).id;
+
+				const error = yield* Effect.flip(store.reviews.get(id));
+
+				expect(error).toMatchObject({ _tag: 'ReviewNotFound', reviewId: 'missing' });
+			}).pipe(Effect.provide(TestLayer))
+		);
+
+		it.effect("lists a PR's reviews oldest first, a re-saved review keeping its place", () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const { runId } = yield* store.create(newRun);
+				const first = reviewOf('a-first', runId);
+				const second = reviewOf('b-second', runId);
+				yield* store.reviews.save(second);
+				yield* TestClock.adjust('1 second');
+				yield* store.reviews.save(first);
+				yield* store.reviews.save(
+					reviewOf('other', runId, 'https://github.com/f-elix/ship/pull/8')
+				);
+				yield* TestClock.adjust('1 second');
+
+				// Posting saves the review again; it stays where it was first stored.
+				const posted = { ...second, postedUrl: `${reviewPrUrl}#pullrequestreview-1` };
+				yield* store.reviews.save(posted);
+
+				expect(yield* store.reviews.byPr(reviewPrUrl)).toEqual([posted, first]);
+				expect(yield* store.reviews.byPr('https://github.com/f-elix/ship/pull/9')).toEqual(
+					[]
+				);
+			}).pipe(Effect.provide(TestLayer))
+		);
+
+		it.effect('outlives the run that made it', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const sql = yield* SqlClient.SqlClient;
+				const { runId } = yield* store.create(newRun);
+				const review = reviewOf(`${runId}-r1`, runId);
+				yield* store.reviews.save(review);
+
+				yield* sql`DELETE FROM runs WHERE id = ${runId}`;
+
+				expect(yield* store.reviews.get(review.id)).toEqual(review);
+			}).pipe(Effect.provide(TestLayer))
+		);
+	});
+
+	it.effect('adds checkpoints and reviews to a database from before primitives', () =>
+		Effect.gen(function* () {
+			const filename = yield* tempDbFile;
+			// A database as the second migration left it.
+			yield* Effect.void.pipe(
+				Effect.provide(
+					SqliteMigrator.layer({
+						loader: Effect.map(migrations, (all) => all.filter(([id]) => id <= 2))
+					}).pipe(Layer.provideMerge(SqliteClient.layer({ filename })))
+				)
+			);
+
+			yield* Effect.gen(function* () {
+				const store = yield* RunStore;
+				const sql = yield* SqlClient.SqlClient;
+				const applied = yield* sql<{ migration_id: number }>`
+					SELECT migration_id FROM effect_sql_migrations ORDER BY migration_id
+				`;
+				expect(applied.map((row) => row.migration_id)).toEqual([1, 2, 3]);
+				const { runId } = yield* store.create(newRun);
+				yield* store.saveCheckpoint({ runId, key: 'k', value: 'v' });
+				expect(yield* store.loadCheckpoint(runId, 'k')).toEqual(Option.some('v'));
+				const review = reviewOf(`${runId}-r1`, runId);
+				yield* store.reviews.save(review);
+				expect(yield* store.reviews.get(review.id)).toEqual(review);
+			}).pipe(
+				Effect.provide(
+					RunStore.layer.pipe(Layer.provideMerge(SqliteClient.layer({ filename })))
+				)
+			);
+		}).pipe(Effect.scoped)
+	);
 
 	it.effect('keeps the runs of a database from before review runs as ship runs', () =>
 		Effect.gen(function* () {

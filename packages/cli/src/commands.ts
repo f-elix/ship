@@ -206,7 +206,7 @@ const review = Command.make(
 	}, Effect.scoped)
 ).pipe(
 	Command.withDescription(
-		"Review a pull request of the current repository: one round of ship's reviewers and verifier over its diff, in a worktree at its head, checked against its title and description. Events stream to stderr; the summary JSON goes to stdout. Exit code 0 no must-fix findings, 2 must-fix findings, 1 failed, cancelled or interrupted, 130 interrupted by Ctrl-C (a started run keeps going)."
+		"Review a pull request of the current repository: one round of ship's reviewers and verifier over its diff, checked against its title and description. Run it in a clean checkout of the PR's head (`gh pr checkout <n>`); the review is stored and its id is in the summary. Events stream to stderr; the summary JSON goes to stdout. Exit code 0 no must-fix findings, 2 must-fix findings, 1 failed, cancelled or interrupted, 130 interrupted by Ctrl-C (a started run keeps going)."
 	)
 );
 

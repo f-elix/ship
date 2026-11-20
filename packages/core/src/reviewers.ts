@@ -1,4 +1,4 @@
-import { Context, Data, Effect, FileSystem, Layer, Result, Schema, Struct } from 'effect';
+import { Context, Effect, FileSystem, Layer, Result, Schema, Struct } from 'effect';
 import { fileURLToPath } from 'node:url';
 import {
 	Agent,
@@ -46,13 +46,13 @@ export interface AgentContext {
  * What the change sets out to do, which the reviewers check it against: the plan ship
  * implemented (`ship run`), or the description of a PR ship did not write (`ship review`).
  */
-export type ChangeIntent = Data.TaggedEnum<{
+export const ChangeIntent = Schema.TaggedUnion({
 	/** Absolute paths of the plan's `spec.md` and `implementation-plan.md`. */
-	Plan: { readonly specPath: string; readonly planPath: string };
+	Plan: { specPath: Schema.String, planPath: Schema.String },
 	/** The PR's title and body. */
-	Description: { readonly title: string; readonly body: string };
-}>;
-export const ChangeIntent = Data.taggedEnum<ChangeIntent>();
+	Description: { title: Schema.String, body: Schema.String }
+});
+export type ChangeIntent = typeof ChangeIntent.Type;
 
 /** What reviewers and the verifier are told about the work under review. */
 export interface ReviewSubject {
@@ -251,7 +251,7 @@ const MAX_REVIEW_DIFF_CHARS = 200_000;
 
 /** The stated intent: the plan's files to read, or the PR's description quoted in full. */
 const intentLines = (intent: ChangeIntent): ReadonlyArray<string> =>
-	ChangeIntent.$match(intent, {
+	ChangeIntent.match(intent, {
 		Plan: ({ specPath, planPath }) => [
 			`- Spec: ${specPath}`,
 			`- Implementation plan: ${planPath}`
