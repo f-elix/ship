@@ -2,8 +2,11 @@ import { createEffectActor, type RequirementsFrom } from '@xstate/effect';
 import { Cause, Data, DateTime, Deferred, Effect, Exit, Predicate, Queue, Scope } from 'effect';
 import type { StateValue } from 'xstate';
 import type { RunEvent } from './event.ts';
+import { Git } from './git.ts';
 import { describeDefect, pipelineMachine, stepInput, type PipelineMachine } from './pipeline.ts';
 import type { Env, RunId } from './primitives.ts';
+import { reviewMachine, type ReviewMachine } from './review-pipeline.ts';
+import { buildReviewSummary, type ReviewRunState } from './review-run.ts';
 import { SnapshotNotResumable, type InvalidRunStatus, type RunNotFound } from './rpc.ts';
 import {
 	RunJournal,
@@ -12,13 +15,14 @@ import {
 	type PersistedRunSnapshot
 } from './run-journal.ts';
 import { RunReporter } from './run-step.ts';
-import { buildSummary } from './run-summary.ts';
-import type { RunState, Summary, TerminalRunStatus } from './run.ts';
+import { buildSummary, ofTag, type SummaryInput } from './run-summary.ts';
+import type { ReviewSummary, RunState, ShipSummary, Summary, TerminalRunStatus } from './run.ts';
+import { ShipHome } from './ship-paths.ts';
 import { statePath } from './state-path.ts';
 
 // --- Public types ---
 
-export interface RunHandle {
+export interface RunHandle<S extends Summary = Summary> {
 	readonly runId: RunId;
 	/** The machine's current state as a dotted path, e.g. `checks.waiting`. */
 	readonly state: Effect.Effect<string>;
@@ -28,20 +32,102 @@ export interface RunHandle {
 	 */
 	readonly cancel: Effect.Effect<void>;
 	/** Waits for the run to end and returns the summary it was finished with. */
-	readonly await: Effect.Effect<Summary, RunNotFound | InvalidRunStatus>;
+	readonly await: Effect.Effect<S, RunNotFound | InvalidRunStatus>;
 }
 
-/** The services the pipeline's steps use; the driver adds `RunReporter` itself. */
-export type PipelineServices = Exclude<RequirementsFrom<PipelineMachine>, RunReporter>;
+/**
+ * The services both machines' steps use, plus what finishing a run needs; the driver adds
+ * `RunReporter` itself.
+ */
+export type PipelineServices =
+	| Exclude<RequirementsFrom<PipelineMachine> | RequirementsFrom<ReviewMachine>, RunReporter>
+	| Git
+	| ShipHome;
+
+// --- Run kinds ---
+
+/** A machine's context: a `ship run` one or a `ship review` one. */
+type KindContext = PersistedRunSnapshot['context'];
+
+/**
+ * What the driver uses of a running actor, whatever its machine. Each kind creates its
+ * own actor with its machine's full types; the driver sees only this.
+ */
+interface RunActor<C extends KindContext> {
+	readonly getSnapshot: () => {
+		readonly value: StateValue;
+		readonly status: string;
+		readonly context: C;
+		readonly error: unknown;
+	};
+	readonly getPersistedSnapshot: () => object;
+	readonly subscribe: (observer: {
+		readonly next: () => void;
+		readonly error: () => void;
+	}) => unknown;
+	readonly send: (event: { readonly type: 'cancel' }) => void;
+}
+
+/** What `cleanup` gets: the run's log, and the env to run git with. */
+interface CleanupInput {
+	readonly runId: RunId;
+	readonly events: ReadonlyArray<RunEvent>;
+	readonly env: Env;
+}
+
+/**
+ * A kind of run: `ship run` or `ship review`. The driver picks one by the run's context
+ * when it starts or resumes it, and by its log when it cancels a run with no machine.
+ */
+interface RunKind<C extends KindContext, S extends Summary> {
+	/** Creates the actor, from its input for a new run or from a stored snapshot. */
+	readonly spawn: (
+		start: { readonly input: C } | { readonly snapshot: ReturnType<typeof restorable> }
+	) => Effect.Effect<RunActor<C>, never, PipelineServices | RunReporter | Scope.Scope>;
+	/** Throws when `value` names states the machine does not have. */
+	readonly resolve: (value: StateValue, context: C) => void;
+	readonly summarize: (input: SummaryInput) => S;
+	/** Releases what the run held once it finished; must not fail. */
+	readonly cleanup: (input: CleanupInput) => Effect.Effect<void, never, PipelineServices>;
+}
+
+const shipKind: RunKind<RunState, ShipSummary> = {
+	spawn: (start) => createEffectActor(pipelineMachine, start),
+	resolve: (value, context) => void pipelineMachine.resolveState({ value, context }),
+	summarize: buildSummary,
+	cleanup: () => Effect.void
+};
+
+const reviewKind: RunKind<ReviewRunState, ReviewSummary> = {
+	spawn: (start) => createEffectActor(reviewMachine, start),
+	resolve: (value, context) => void reviewMachine.resolveState({ value, context }),
+	summarize: buildReviewSummary,
+	/** Removes the run's worktree from the checkout it was started in. */
+	cleanup: ({ runId, events, env }) =>
+		Effect.gen(function* () {
+			const created = ofTag(events, 'ReviewRunCreated')[0];
+			if (created === undefined) return;
+			const git = yield* Git;
+			const home = yield* ShipHome;
+			yield* git.removeWorktree({ cwd: created.repoDir, env }, home.reviewWorktree(runId));
+		}).pipe(
+			Effect.catchTag('GitError', (error) =>
+				Effect.logWarning('Could not remove the review worktree', error)
+			)
+		)
+};
+
+/** The kind of a run whose log is `events`: a review run's log starts with `ReviewRunCreated`. */
+const kindOfLog = (events: ReadonlyArray<RunEvent>) =>
+	events.some((event) => event._tag === 'ReviewRunCreated') ? reviewKind : shipKind;
 
 // --- Driver ---
 
 /** A new run from its initial state, or an interrupted one from its last snapshot. */
-type RunStart = Data.TaggedEnum<{
-	New: { readonly state: RunState };
+type RunStart<C> = Data.TaggedEnum<{
+	New: { readonly state: C };
 	Restore: { readonly snapshot: PersistedRunSnapshot };
 }>;
-const RunStart = Data.taggedEnum<RunStart>();
 
 interface RunEnd {
 	readonly status: TerminalRunStatus;
@@ -69,38 +155,62 @@ const isKnown = (event: RunEvent | { readonly _tag: 'UnknownEvent' }): event is 
 	event._tag !== 'UnknownEvent';
 
 /** How a machine that reached a final state ended. */
-const finalEnd = (path: string, context: RunState): RunEnd => ({
+const finalEnd = (path: string, context: KindContext): RunEnd => ({
 	status: FINAL[path] ?? 'failed',
 	error: context.error
 });
 
-/** Builds the summary from the run's event log and finishes the run with it. */
-const finishFromLog = Effect.fnUntraced(function* (runId: RunId, end: RunEnd) {
+const readLog = Effect.fnUntraced(function* (runId: RunId) {
 	const journal = yield* RunJournal;
-	const events = (yield* journal.events(runId)).map((envelope) => envelope.event).filter(isKnown);
-	const summary = buildSummary({ runId, status: end.status, events, error: end.error });
+	return (yield* journal.events(runId)).map((envelope) => envelope.event).filter(isKnown);
+});
+
+/** What finishing a run from its log uses of its kind, whatever its machine's context. */
+type LogFinisher<S extends Summary> = Pick<RunKind<KindContext, S>, 'summarize' | 'cleanup'>;
+
+/**
+ * Builds the summary from the run's event log, releases what the run held (`env` is what
+ * git runs with for that) and finishes the run with the summary.
+ */
+const finishFromLog = Effect.fnUntraced(function* <S extends Summary>(
+	kind: LogFinisher<S>,
+	runId: RunId,
+	end: RunEnd,
+	env: Env
+) {
+	const journal = yield* RunJournal;
+	const events = yield* readLog(runId);
+	const summary = kind.summarize({ runId, status: end.status, events, error: end.error });
+	yield* kind.cleanup({ runId, events, env });
 	yield* journal.finish(summary);
 	return summary;
 });
 
 /**
  * Finishes a run that has no machine running, such as an `interrupted` one, as
- * `cancelled`. The summary comes from the event log, so no snapshot or env is needed.
+ * `cancelled`. The summary comes from the event log, so no snapshot is needed. `env` is
+ * what git runs with to release what the run held; the run's own env is not stored.
  */
-export const cancelFromLog = Effect.fn('cancelFromLog')(function* (runId: RunId) {
-	return yield* finishFromLog(runId, { status: 'cancelled', error: null });
+export const cancelFromLog = Effect.fn('cancelFromLog')(function* (runId: RunId, env: Env) {
+	const kind: LogFinisher<Summary> = kindOfLog(yield* readLog(runId));
+	return yield* finishFromLog(kind, runId, { status: 'cancelled', error: null }, env);
 });
 
 /**
- * Starts a new run from its initial state. See {@link runMachine}; an interrupted run
- * continues through {@link resumeRun}.
+ * Starts a new `ship run` from its initial state. See {@link runMachine}; an interrupted
+ * run continues through {@link resumeRun}.
  */
 export const startRun = Effect.fn('startRun')(function* (state: RunState) {
-	return yield* runMachine(RunStart.New({ state }));
+	return yield* runMachine(shipKind, { _tag: 'New', state });
+});
+
+/** Starts a new `ship review` run from its initial state, like {@link startRun}. */
+export const startReview = Effect.fn('startReview')(function* (state: ReviewRunState) {
+	return yield* runMachine(reviewKind, { _tag: 'New', state });
 });
 
 /**
- * Runs the pipeline machine for one run until it ends. Every state change saves the
+ * Runs the kind's machine for one run until it ends. Every state change saves the
  * snapshot together with the events since the last save, `StateChanged` last; events
  * reported mid-step are saved as they come. At the end it builds the summary from the
  * event log and finishes the run in the journal.
@@ -108,7 +218,10 @@ export const startRun = Effect.fn('startRun')(function* (state: RunState) {
  * The run lives in the caller's scope: closing it interrupts the run without finishing
  * it, which is how a stopping daemon leaves runs to be marked `interrupted`.
  */
-const runMachine = Effect.fnUntraced(function* (start: RunStart) {
+const runMachine = Effect.fnUntraced(function* <C extends KindContext, S extends Summary>(
+	kind: RunKind<C, S>,
+	start: RunStart<C>
+) {
 	const journal = yield* RunJournal;
 	const items = yield* Queue.unbounded<Item>();
 	const reporter = RunReporter.of({
@@ -116,10 +229,11 @@ const runMachine = Effect.fnUntraced(function* (start: RunStart) {
 	});
 
 	const actorScope = yield* Scope.fork(yield* Effect.scope);
-	const actor = yield* createEffectActor(
-		pipelineMachine,
-		start._tag === 'New' ? { input: start.state } : { snapshot: restorable(start.snapshot) }
-	).pipe(Effect.provideService(RunReporter, reporter), Scope.provide(actorScope));
+	const actor = yield* kind
+		.spawn(
+			start._tag === 'New' ? { input: start.state } : { snapshot: restorable(start.snapshot) }
+		)
+		.pipe(Effect.provideService(RunReporter, reporter), Scope.provide(actorScope));
 	const runId = actor.getSnapshot().context.runId;
 
 	const toItem = (): SnapshotItem => {
@@ -188,7 +302,7 @@ const runMachine = Effect.fnUntraced(function* (start: RunStart) {
 		// Closing the actor's scope waits for the interrupted step to report how it ended.
 		yield* Scope.close(actorScope, Exit.void);
 		yield* process(yield* Queue.clear(items));
-		return yield* finishFromLog(runId, end);
+		return yield* finishFromLog(kind, runId, end, actor.getSnapshot().context.env);
 	}).pipe(
 		// Interrupted without finishing (the daemon stops): keep what the run got to, so it
 		// resumes from its latest state, then the events of the step shutting down. The
@@ -207,7 +321,7 @@ const runMachine = Effect.fnUntraced(function* (start: RunStart) {
 		)
 	);
 
-	const done = yield* Deferred.make<Summary, RunNotFound | InvalidRunStatus>();
+	const done = yield* Deferred.make<S, RunNotFound | InvalidRunStatus>();
 	yield* drive.pipe(
 		Effect.exit,
 		Effect.flatMap((exit) => Deferred.done(done, exit)),
@@ -221,7 +335,7 @@ const runMachine = Effect.fnUntraced(function* (start: RunStart) {
 			if (actor.getSnapshot().status === 'active') actor.send({ type: 'cancel' });
 		}),
 		await: Deferred.await(done)
-	} satisfies RunHandle;
+	} satisfies RunHandle<S>;
 });
 
 /**
@@ -276,8 +390,9 @@ const describeLoad = (load: SnapshotLoad): string =>
 /**
  * Resumes an interrupted run from its last snapshot with the caller's fresh `env`. The
  * step that was in flight runs again. The run is marked resumed only once its snapshot
- * loaded and fits the machine, so a run that cannot be restored stays `interrupted`. A run that stopped after
- * its machine reached a final state, but before it was finished, is finished now.
+ * loaded and fits the machine, so a run that cannot be restored stays `interrupted`. A
+ * run that stopped after its machine reached a final state, but before it was finished,
+ * is finished now.
  */
 export const resumeRun = Effect.fn('resumeRun')(function* (runId: RunId, env: Env) {
 	const journal = yield* RunJournal;
@@ -286,14 +401,27 @@ export const resumeRun = Effect.fn('resumeRun')(function* (runId: RunId, env: En
 		return yield* new SnapshotNotResumable({ runId, reason: describeLoad(load) });
 	}
 	const { snapshot } = load;
+	const { context } = snapshot;
+	const handle: RunHandle =
+		context.kind === 'review'
+			? yield* resumeKind(reviewKind, snapshot, context)
+			: yield* resumeKind(shipKind, snapshot, context);
+	return handle;
+});
+
+/** Resumes a loaded snapshot whose context is `context`, of `kind`. */
+const resumeKind = Effect.fnUntraced(function* <C extends KindContext, S extends Summary>(
+	kind: RunKind<C, S>,
+	snapshot: PersistedRunSnapshot,
+	context: C
+) {
+	const journal = yield* RunJournal;
+	const runId = context.runId;
 	// A snapshot that loads can still name states this machine does not have.
 	yield* Effect.try({
 		try: () => {
 			if (!isStateValue(snapshot.value)) throw new Error('it has no state value');
-			return pipelineMachine.resolveState({
-				value: snapshot.value,
-				context: snapshot.context
-			});
+			kind.resolve(snapshot.value, context);
 		},
 		catch: (error) =>
 			new SnapshotNotResumable({
@@ -304,13 +432,13 @@ export const resumeRun = Effect.fn('resumeRun')(function* (runId: RunId, env: En
 	if (snapshot['status'] === 'done') {
 		const path = statePath(snapshot.value);
 		yield* journal.markResumed(runId);
-		const summary = yield* finishFromLog(runId, finalEnd(path, snapshot.context));
+		const summary = yield* finishFromLog(kind, runId, finalEnd(path, context), context.env);
 		return {
 			runId,
 			state: Effect.succeed(path),
 			cancel: Effect.void,
 			await: Effect.succeed(summary)
-		} satisfies RunHandle;
+		} satisfies RunHandle<S>;
 	}
 	if (snapshot['status'] !== 'active') {
 		return yield* new SnapshotNotResumable({
@@ -319,5 +447,5 @@ export const resumeRun = Effect.fn('resumeRun')(function* (runId: RunId, env: En
 		});
 	}
 	yield* journal.markResumed(runId);
-	return yield* runMachine(RunStart.Restore({ snapshot }));
+	return yield* runMachine(kind, { _tag: 'Restore', snapshot });
 });

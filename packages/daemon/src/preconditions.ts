@@ -1,14 +1,17 @@
 import {
 	ConfigLoader,
+	Gh,
 	Git,
 	Locks,
 	PLAN_FILES,
 	PreconditionFailed,
+	prRepoKey,
 	type Env,
 	type GitSha,
 	type PreconditionReason,
 	type ProjectKey,
-	type ResolvedConfig
+	type ResolvedConfig,
+	type ReviewedPr
 } from '@ship/core';
 import { Effect, FileSystem } from 'effect';
 import { join } from 'node:path';
@@ -121,4 +124,85 @@ export const checkPreconditions = Effect.fn('checkPreconditions')(
 		return { projectKey, branch, baseSha, config: resolved } satisfies RunStart;
 	},
 	Effect.catchTags({ GitError: Effect.die, PlatformError: Effect.die })
+);
+
+/** What `ship review` asks the daemon to review, and from where. */
+export interface ReviewRequest {
+	/** A PR number in the repo's GitHub repository, or a PR URL. */
+	readonly pr: string;
+	/** Where `ship review` was run: a clone of the PR's base repository. */
+	readonly cwd: string;
+	/** The caller's env, which git and `gh` run with. */
+	readonly env: Env;
+}
+
+/** What a review run starts from once its preconditions hold. */
+export interface ReviewStart {
+	readonly projectKey: ProjectKey;
+	/** The PR, with its head fetched and pinned and its merge base found. */
+	readonly pr: ReviewedPr;
+	readonly config: ResolvedConfig;
+}
+
+/**
+ * Checks that `ship review` can review the PR from the caller's repo, with the caller's env,
+ * and pins what it reviews: the PR exists and belongs to the repository `origin` points at,
+ * and the project config, when there is one, is valid, as `ship run` would read it. Then it
+ * fetches the PR's head as `refs/pull/<n>/head` and its base branch from `origin`; the run
+ * reviews the merge base of the two up to that head.
+ *
+ * Git failures past the first check are not precondition failures, so they are defects,
+ * except fetching, which fails as `pr-not-found`.
+ */
+export const checkReviewPreconditions = Effect.fn('checkReviewPreconditions')(
+	function* (request: ReviewRequest) {
+		const git = yield* Git;
+		const gh = yield* Gh;
+		const loader = yield* ConfigLoader;
+		const repo = { cwd: request.cwd, env: request.env };
+
+		yield* git
+			.repoRoot(repo)
+			.pipe(Effect.mapError((error) => failed('not-a-git-repo', error.message)));
+		const projectKey = yield* git.projectKey(repo);
+		const pr = yield* gh
+			.viewPr(repo, request.pr)
+			.pipe(Effect.mapError((error) => failed('pr-not-found', error.message)));
+		const prRepo = prRepoKey(pr.url);
+		if (prRepo !== projectKey) {
+			return yield* failed(
+				'pr-other-repo',
+				`${pr.url} belongs to ${prRepo ?? 'another repository'}, but origin is ${projectKey}; run ship review from a clone of the PR's base repository`
+			);
+		}
+
+		const { resolved } = yield* loader
+			.loadOrDefaults(projectKey)
+			.pipe(
+				Effect.mapError((error) => failed(error.reason, `${error.path}: ${error.detail}`))
+			);
+
+		const fetchFailed = (error: { readonly message: string }) =>
+			failed('pr-not-found', `Could not fetch ${pr.url} from origin: ${error.message}`);
+		const headSha = yield* git
+			.fetchRef(repo, `refs/pull/${pr.number}/head`)
+			.pipe(Effect.mapError(fetchFailed));
+		const baseTip = yield* git
+			.fetchRef(repo, `refs/heads/${pr.baseRef}`)
+			.pipe(Effect.mapError(fetchFailed));
+		const baseSha = yield* git.mergeBase(repo, baseTip, headSha);
+		return {
+			projectKey,
+			pr: {
+				number: pr.number,
+				url: pr.url,
+				title: pr.title,
+				body: pr.body,
+				baseSha,
+				headSha
+			},
+			config: resolved
+		} satisfies ReviewStart;
+	},
+	Effect.catchTags({ GitError: Effect.die })
 );

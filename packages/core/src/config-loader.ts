@@ -42,6 +42,11 @@ export interface ConfigLoaderShape {
 	 */
 	readonly load: (key: ProjectKey) => Effect.Effect<LoadedConfig, ConfigError>;
 	/**
+	 * Like `load`, but a missing project config reads as `{}`: the built-in reviewers and
+	 * the global models and timeouts. `ship review` needs no project setup.
+	 */
+	readonly loadOrDefaults: (key: ProjectKey) => Effect.Effect<LoadedConfig, ConfigError>;
+	/**
 	 * Validates the text of a project config as `load` does, against the global config, and
 	 * returns it decoded. `path` only labels the errors. Every schema issue is reported, not
 	 * only the first.
@@ -114,12 +119,13 @@ const make = (home: string) =>
 			return project;
 		});
 
-		const load = Effect.fn('ConfigLoader.load')(function* (key: ProjectKey) {
+		/** Loads the configs; `missing` is the project config's text when it has no file. */
+		const loadWith = Effect.fnUntraced(function* (key: ProjectKey, missing: string | null) {
 			const global = yield* loadGlobal;
 
 			const projectPath = paths.projectConfig(key);
-			const text = yield* readText(projectPath);
-			if (text === undefined) {
+			const text = (yield* readText(projectPath)) ?? missing;
+			if (text === null) {
 				return yield* new ConfigError({
 					reason: 'unknown-project-config',
 					path: projectPath,
@@ -130,6 +136,16 @@ const make = (home: string) =>
 			return { global, project, resolved: resolveConfig(global, project) };
 		});
 
+		const load = Effect.fn('ConfigLoader.load')(function* (key: ProjectKey) {
+			return yield* loadWith(key, null);
+		});
+
+		const loadOrDefaults = Effect.fn('ConfigLoader.loadOrDefaults')(function* (
+			key: ProjectKey
+		) {
+			return yield* loadWith(key, '{}');
+		});
+
 		const validateProject = Effect.fn('ConfigLoader.validateProject')(function* (
 			text: string,
 			path: string
@@ -137,7 +153,7 @@ const make = (home: string) =>
 			return yield* validate(yield* loadGlobal, text, path);
 		});
 
-		return ConfigLoader.of({ paths, loadGlobal, load, validateProject });
+		return ConfigLoader.of({ paths, loadGlobal, load, loadOrDefaults, validateProject });
 	});
 
 /** Loads ship's config files from its home directory. */

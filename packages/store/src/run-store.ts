@@ -4,6 +4,8 @@ import {
 	InvalidRunStatus,
 	NonNegativeInt,
 	ProjectKey,
+	ReviewRunInfo,
+	ReviewRunState,
 	RunEvent,
 	RunId,
 	RunInfo,
@@ -11,6 +13,7 @@ import {
 	RunNotFound,
 	RunState,
 	RunStatus,
+	ShipRunInfo,
 	SNAPSHOT_VERSION,
 	SnapshotLoad,
 	statePath,
@@ -45,6 +48,9 @@ import { restoreEnv, stripEnv, type EnvPath } from './snapshot.ts';
 /** What a new run starts from: its `RunCreated` event without the timestamp. */
 export type NewRun = Omit<typeof RunEvent.cases.RunCreated.Type, '_tag' | 'at'>;
 
+/** What a new review run starts from: its `ReviewRunCreated` event without the timestamp. */
+export type NewReviewRun = Omit<typeof RunEvent.cases.ReviewRunCreated.Type, '_tag' | 'at'>;
+
 /** Statuses the store records; `waiting` is derived by the daemon from the live machine. */
 export type StoredRunStatus = Exclude<RunStatus, 'waiting'>;
 
@@ -61,7 +67,12 @@ export interface RunFilter {
 /** The run store; the members a run driver needs are documented on `RunJournalShape`. */
 export interface RunStoreShape extends RunJournalShape {
 	/** Creates a run with status `running` and appends its `RunCreated` event (seq 1). */
-	readonly create: (run: NewRun) => Effect.Effect<RunInfo>;
+	readonly create: (run: NewRun) => Effect.Effect<ShipRunInfo>;
+	/**
+	 * Creates a `ship review` run with status `running` and appends its `ReviewRunCreated`
+	 * event (seq 1).
+	 */
+	readonly createReview: (run: NewReviewRun) => Effect.Effect<ReviewRunInfo>;
 	/** Appends an event with the run's next seq. Fails with `InvalidRunStatus` once the run finished. */
 	readonly append: (
 		runId: RunId,
@@ -97,13 +108,18 @@ export interface RunStoreShape extends RunJournalShape {
 
 const RunRow = Schema.Struct({
 	id: RunId,
+	kind: Schema.Literals(['ship', 'review']),
 	project_key: ProjectKey,
 	cwd: Schema.String,
-	plan_dir: Schema.String,
-	branch: Schema.String,
+	/** A `ship run`'s plan dir and branch; `null` for a review run. */
+	plan_dir: Schema.NullOr(Schema.String),
+	branch: Schema.NullOr(Schema.String),
+	/** A review run's PR URL; `null` for a `ship run`. */
+	subject: Schema.NullOr(Schema.String),
 	status: RunStatus,
 	state: Schema.String,
 	round: NonNegativeInt,
+	/** The PR a `ship run` opened, or the review a review run posted. */
 	pr_url: Schema.NullOr(Schema.String),
 	created_at: Schema.Number,
 	updated_at: Schema.Number,
@@ -114,22 +130,29 @@ type RunRow = typeof RunRow.Type;
 const decodeRunRow = Schema.decodeUnknownEffect(RunRow);
 
 const decodeRunInfo = Schema.decodeUnknownEffect(RunInfo);
+const decodeShipRunInfo = Schema.decodeUnknownEffect(ShipRunInfo);
+const decodeReviewRunInfo = Schema.decodeUnknownEffect(ReviewRunInfo);
 
-const toRunInfo = (row: RunRow) =>
-	decodeRunInfo({
+/** A row as `RunInfo`, still to be decoded; its fields depend on the run's kind. */
+const runInfoFields = (row: RunRow) => {
+	const common = {
+		kind: row.kind,
 		runId: row.id,
 		projectKey: row.project_key,
 		cwd: row.cwd,
-		planDir: row.plan_dir,
-		branch: row.branch,
 		status: row.status,
 		state: row.state,
 		round: row.round,
-		prUrl: row.pr_url,
 		createdAt: DateTime.formatIso(DateTime.makeUnsafe(row.created_at)),
 		updatedAt: DateTime.formatIso(DateTime.makeUnsafe(row.updated_at)),
 		summary: row.summary === null ? null : JSON.parse(row.summary)
-	});
+	};
+	return row.kind === 'review'
+		? { ...common, prUrl: row.subject, reviewUrl: row.pr_url }
+		: { ...common, planDir: row.plan_dir, branch: row.branch, prUrl: row.pr_url };
+};
+
+const toRunInfo = (row: RunRow) => decodeRunInfo(runInfoFields(row));
 
 const encodeEvent = Schema.encodeEffect(Schema.fromJsonString(RunEvent));
 const encodeSummary = Schema.encodeEffect(Schema.fromJsonString(Summary));
@@ -140,7 +163,7 @@ const decodeEnvPaths = Schema.decodeUnknownEffect(
 const decodeSnapshotObject = Schema.decodeUnknownEffect(
 	Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 );
-const decodeRunState = Schema.decodeUnknownEffect(RunState);
+const decodeRunState = Schema.decodeUnknownEffect(Schema.Union([ReviewRunState, RunState]));
 
 /** Decodes a stored event, turning one this build does not know into an `UnknownEvent`. */
 const decodeStoredEvent = (type: string, payload: string): RunEvent | UnknownEvent => {
@@ -256,32 +279,63 @@ const make = Effect.gen(function* () {
 			}));
 		});
 
+	/** Inserts a `running` run with `columns` and its first event; returns the new row. */
+	const insertRun = (
+		columns: Pick<RunRow, 'kind' | 'project_key' | 'cwd' | 'plan_dir' | 'branch' | 'subject'>,
+		created: (runId: RunId, at: DateTime.Utc) => RunEvent
+	) =>
+		Effect.gen(function* () {
+			const runId = yield* newRunId;
+			const now = yield* DateTime.now;
+			const row = yield* appending(
+				Effect.gen(function* () {
+					const [inserted] = yield* sql`INSERT INTO runs ${sql.insert({
+						id: runId,
+						...columns,
+						status: 'running',
+						state: '',
+						round: 0,
+						pr_url: null,
+						created_at: DateTime.toEpochMillis(now),
+						updated_at: DateTime.toEpochMillis(now),
+						summary: null
+					})} RETURNING *`;
+					const envelope = yield* insertEvent(runId, created(runId, now));
+					return { inserted, envelope };
+				}),
+				({ envelope }) => [envelope]
+			);
+			return yield* decodeRunRow(row.inserted);
+		});
+
 	const create = Effect.fn('RunStore.create')(function* (run: NewRun) {
-		const runId = yield* newRunId;
-		const now = yield* DateTime.now;
-		const created = RunEvent.cases.RunCreated.make({ ...run, at: now });
-		const row = yield* appending(
-			Effect.gen(function* () {
-				const [inserted] = yield* sql`INSERT INTO runs ${sql.insert({
-					id: runId,
-					project_key: run.projectKey,
-					cwd: run.cwd,
-					plan_dir: run.planDir,
-					branch: run.branch,
-					status: 'running',
-					state: '',
-					round: 0,
-					pr_url: null,
-					created_at: DateTime.toEpochMillis(now),
-					updated_at: DateTime.toEpochMillis(now),
-					summary: null
-				})} RETURNING *`;
-				const envelope = yield* insertEvent(runId, created);
-				return { inserted, envelope };
-			}),
-			({ envelope }) => [envelope]
+		const row = yield* insertRun(
+			{
+				kind: 'ship',
+				project_key: run.projectKey,
+				cwd: run.cwd,
+				plan_dir: run.planDir,
+				branch: run.branch,
+				subject: null
+			},
+			(_runId, at) => RunEvent.cases.RunCreated.make({ ...run, at })
 		);
-		return yield* toRunInfo(yield* decodeRunRow(row.inserted));
+		return yield* decodeShipRunInfo(runInfoFields(row));
+	}, orDieStorage);
+
+	const createReview = Effect.fn('RunStore.createReview')(function* (run: NewReviewRun) {
+		const row = yield* insertRun(
+			{
+				kind: 'review',
+				project_key: run.projectKey,
+				cwd: run.repoDir,
+				plan_dir: null,
+				branch: null,
+				subject: run.prUrl
+			},
+			(_runId, at) => RunEvent.cases.ReviewRunCreated.make({ ...run, at })
+		);
+		return yield* decodeReviewRunInfo(runInfoFields(row));
 	}, orDieStorage);
 
 	const append = Effect.fn('RunStore.append')(function* (runId: RunId, event: AppendableEvent) {
@@ -333,7 +387,7 @@ const make = Effect.gen(function* () {
 				UPDATE runs SET ${sql.update({
 					state: statePath(snapshot.value),
 					round: context.round,
-					pr_url: context.prUrl,
+					pr_url: context.kind === 'review' ? context.reviewUrl : context.prUrl,
 					updated_at: now
 				})} WHERE id = ${runId} RETURNING id
 			`;
@@ -496,6 +550,7 @@ const make = Effect.gen(function* () {
 
 	const store: RunStoreShape = {
 		create,
+		createReview,
 		append,
 		events,
 		follow,

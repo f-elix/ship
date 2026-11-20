@@ -13,7 +13,15 @@ import {
 import { AgentFake, ClefFake, GhFake, type AgentReply, type AgentScript } from '@ship/core/testing';
 import { Context, Effect, Layer, References, Schedule, Stream } from 'effect';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -126,6 +134,40 @@ export const fixture = Effect.gen(function* () {
 	} satisfies Fixture;
 });
 
+/**
+ * Makes `fx.work` a clone of `github.com/f-elix/example`, the repository of the fake's PRs,
+ * and pushes PR 1's head to the fixture's bare repo as GitHub does. `origin` gets the
+ * GitHub ssh URL, and the returned env makes ssh to it reach the bare repo; the project
+ * config moves to the new project key.
+ */
+export const cloneOfExample = (fx: Fixture) => {
+	const origin = join(fx.dir, 'origin.git');
+	const url = 'git@github.com:f-elix/example.git';
+	fx.write('src/feature.ts', 'export const feature = 1;\n');
+	fx.git('add', 'src');
+	fx.git('commit', '--quiet', '-m', 'Add the feature');
+	fx.git('push', '--quiet', 'origin', 'HEAD:refs/pull/1/head');
+	// The PR's head moves on locally; the run reviews what origin has.
+	fx.write('src/later.ts', 'export const later = 2;\n');
+	fx.git('add', 'src');
+	fx.git('commit', '--quiet', '-m', 'Not pushed');
+
+	const paths = shipPaths(fx.home);
+	const config = readFileSync(
+		paths.projectConfig(projectKeyOf({ remoteUrl: origin, repoRoot: fx.work })),
+		'utf8'
+	);
+	fx.git('remote', 'set-url', 'origin', url);
+	const projectConfig = paths.projectConfig(projectKeyOf({ remoteUrl: url, repoRoot: fx.work }));
+	mkdirSync(dirname(projectConfig), { recursive: true });
+	writeFileSync(projectConfig, config);
+	return {
+		head: fx.git('rev-parse', 'HEAD~1'),
+		// Git appends the host and the remote command; the shell ignores them.
+		env: { ...fx.env, GIT_SSH_COMMAND: `sh -c 'exec git-upload-pack "${origin}"' ssh` }
+	};
+};
+
 /** Fake Agent SDK, GitHub and Clef, built once so tests can script and inspect them. */
 export const fakes = Layer.build(Layer.mergeAll(AgentFake.layer, GhFake.layer, ClefFake.layer));
 export type Fakes = Effect.Success<typeof fakes>;
@@ -140,7 +182,12 @@ export const hangingFakes = Effect.gen(function* () {
 
 /** Starts a daemon in the current scope, in `home`, on the given fakes. */
 export const daemon = (home: string, services: Fakes, version = VERSION) =>
-	startDaemon({ home, version, services: Layer.succeedContext(services) }).pipe(
+	startDaemon({
+		home,
+		version,
+		services: Layer.succeedContext(services),
+		env: isolatedEnv(dirname(home))
+	}).pipe(
 		Effect.provide(NodeServices.layer),
 		Effect.provideService(References.MinimumLogLevel, 'Warn')
 	);

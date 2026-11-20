@@ -18,4 +18,4 @@ Check the comments, docstrings and docs this change adds.
 
 A comment or doc the code contradicts is `must-fix`: quote both. Noise and wording are `nit`.
 
-Out of scope: existing docs or comments the change makes stale (standards), the code's behaviour, names (standards, domain-language), and the plan files.
+Out of scope: existing docs or comments the change makes stale (standards), the code's behaviour, names (standards, domain-language), and the stated intent's own files (the plan, or the PR description).

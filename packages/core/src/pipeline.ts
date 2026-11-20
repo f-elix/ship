@@ -13,13 +13,19 @@ import {
 	fixChecksStep,
 	fixStep,
 	implementStep,
+	planIntent,
 	prStep,
+	TriageNext,
+	triageStep
+} from './pipeline-steps.ts';
+import {
+	completeRound,
 	reviewStep,
 	routeStep,
-	TriageNext,
-	triageStep,
-	verifyStep
-} from './pipeline-steps.ts';
+	startRound,
+	verifyStep,
+	withFindings
+} from './review-round.ts';
 import { stepOutcome, type StepOutcome, type StepSpend } from './run-step.ts';
 import { CheckRound, RunState, type EscalationReason } from './run.ts';
 
@@ -35,10 +41,11 @@ const checksLogic = (run: typeof checksStep) =>
 	});
 
 /**
- * Every step actor gets the run's context as its input. The driver relies on this when
- * it restarts a step that finished before the machine took its result.
+ * Every step actor gets the run's context as its input, in this machine and the review
+ * machine. The driver relies on this when it restarts a step that finished before the
+ * machine took its result.
  */
-export const stepInput = ({ context }: { readonly context: RunState }): RunState => context;
+export const stepInput = <C>({ context }: { readonly context: C }): C => context;
 
 // --- Transitions ---
 
@@ -161,8 +168,8 @@ export const pipelineMachine = setupEffect({
 		implement: step(implementStep),
 		fixChecks: step(fixChecksStep),
 		route: step(routeStep),
-		review: step(reviewStep),
-		verify: step(verifyStep),
+		review: step((state) => reviewStep(state, planIntent(state))),
+		verify: step((state) => verifyStep(state, planIntent(state))),
 		triage: step(triageStep),
 		fix: step(fixStep),
 		escalate: step(escalateStep),
@@ -227,7 +234,7 @@ export const pipelineMachine = setupEffect({
 				onDone: ({ context, event }) =>
 					settle(context, event.output, (next, review) => ({
 						target: 'review',
-						context: { ...next, review }
+						context: startRound(next, review)
 					})),
 				onError: onDefect
 			}
@@ -239,7 +246,7 @@ export const pipelineMachine = setupEffect({
 				onDone: ({ context, event }) =>
 					settle(context, event.output, (next, findings) => ({
 						target: 'verify',
-						context: { ...next, review: next.review && { ...next.review, findings } }
+						context: withFindings(next, findings)
 					})),
 				onError: onDefect
 			}
@@ -249,28 +256,12 @@ export const pipelineMachine = setupEffect({
 				src: 'verify',
 				input: stepInput,
 				onDone: ({ context, event }) =>
-					settle(context, event.output, (next, verified) =>
-						next.review === null
+					settle(context, event.output, (next, verified) => {
+						const completed = completeRound(next, verified);
+						return completed === null
 							? fail(next, 'No review round is in progress')
-							: {
-									target: 'triage',
-									context: {
-										...next,
-										review: null,
-										lastReviewedSha: next.review.toSha,
-										reviewRounds: [
-											...next.reviewRounds,
-											{
-												round: next.review.round,
-												fromSha: next.review.fromSha,
-												toSha: next.review.toSha,
-												reviewers: next.review.reviewers,
-												findings: verified
-											}
-										]
-									}
-								}
-					),
+							: { target: 'triage', context: completed };
+					}),
 				onError: onDefect
 			}
 		},

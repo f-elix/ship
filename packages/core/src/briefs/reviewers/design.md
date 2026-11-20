@@ -15,7 +15,7 @@ triggers:
 
 Judge whether the change chose a sound ownership model, boundary, interface or persistence strategy.
 
-Read the full diff, the surrounding modules and callers, and the plan. Separate choices the requirements force from choices the implementation made. Treat the author's explanations as hypotheses.
+Read the full diff, the surrounding modules and callers, and the stated intent (the plan, or the PR description). Separate choices the requirements force from choices the implementation made. Treat the author's explanations as hypotheses.
 
 For each meaningful decision, ask:
 

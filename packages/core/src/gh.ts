@@ -1,8 +1,9 @@
 import { Context, Effect, Layer, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import type { GitRepo } from './git.ts';
-import { Url } from './primitives.ts';
+import { GitSha, Url } from './primitives.ts';
 import { exec } from './process.ts';
+import { normalizeRemoteUrl } from './project-key.ts';
 
 /** An open pull request. */
 export interface PullRequest {
@@ -19,6 +20,67 @@ export interface CreatePrInput {
 	readonly body: string;
 	readonly draft: boolean;
 }
+
+/** A pull request as `ship review` reads it. */
+export interface PrDetails {
+	readonly number: number;
+	readonly url: string;
+	readonly title: string;
+	readonly body: string;
+	/** The branch the PR merges into. */
+	readonly baseRef: string;
+	readonly headSha: GitSha;
+}
+
+/** What a posted review says about the PR; GitHub never gets an `APPROVE` from ship. */
+export type ReviewEvent = 'COMMENT' | 'REQUEST_CHANGES';
+
+/** A review comment on one line of the PR's diff, on its new side. */
+export interface ReviewComment {
+	readonly path: string;
+	readonly line: number;
+	readonly body: string;
+}
+
+/** One review to post on a pull request: its verdict, its body and its inline comments. */
+export interface SubmitReviewInput {
+	/** The PR's URL, as `viewPr` returned it; the review goes to its repository. */
+	readonly prUrl: string;
+	/** The commit the review is about; comments anchor to its diff. */
+	readonly commitId: GitSha;
+	readonly event: ReviewEvent;
+	readonly body: string;
+	readonly comments: ReadonlyArray<ReviewComment>;
+}
+
+const PR_URL = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/u;
+
+/** The parts of a pull request URL, or `null` when `url` is not one. */
+export const parsePrUrl = (
+	url: string
+): {
+	readonly host: string;
+	readonly owner: string;
+	readonly name: string;
+	readonly number: number;
+} | null => {
+	const match = PR_URL.exec(url.trim());
+	if (match === null) return null;
+	const [, host = '', owner = '', name = '', number = ''] = match;
+	return { host: host.toLowerCase(), owner, name, number: Number(number) };
+};
+
+/**
+ * The repository of a pull request URL, normalized like a remote URL so it compares with
+ * a project key: `https://github.com/f-elix/ship/pull/3` gives `github.com/f-elix/ship`.
+ * `null` when `url` is not a pull request URL.
+ */
+export const prRepoKey = (url: string): string | null => {
+	const parts = parsePrUrl(url);
+	return parts === null
+		? null
+		: normalizeRemoteUrl(`https://${parts.host}/${parts.owner}/${parts.name}`);
+};
 
 /** A `gh` command failed. `exitCode` is `null` when `gh` could not be started at all. */
 export class GhError extends Schema.TaggedError<GhError>()('GhError', {
@@ -45,6 +107,13 @@ export interface GhShape {
 	) => Effect.Effect<void, GhError>;
 	/** Turns a ready PR back into a draft. */
 	readonly markDraft: (repo: GitRepo, url: string) => Effect.Effect<void, GhError>;
+	/** The PR `ref` names: a number in `repo`'s GitHub repository, or a PR URL. */
+	readonly viewPr: (repo: GitRepo, ref: string) => Effect.Effect<PrDetails, GhError>;
+	/** Posts one review on a PR and returns the review's URL. */
+	readonly submitReview: (
+		repo: GitRepo,
+		input: SubmitReviewInput
+	) => Effect.Effect<string, GhError>;
 }
 
 const PrList = Schema.fromJsonString(
@@ -57,6 +126,19 @@ const PrList = Schema.fromJsonString(
 		})
 	)
 );
+
+const PrView = Schema.fromJsonString(
+	Schema.Struct({
+		number: Schema.Int,
+		url: Schema.String.check(Schema.isPattern(PR_URL, { expected: 'a pull request URL' })),
+		title: Schema.String,
+		body: Schema.String,
+		baseRefName: Schema.String,
+		headRefOid: GitSha
+	})
+);
+
+const PostedReview = Schema.fromJsonString(Schema.Struct({ html_url: Url }));
 
 const make = Effect.gen(function* () {
 	const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -164,7 +246,60 @@ const make = Effect.gen(function* () {
 		yield* run(repo, ['pr', 'ready', url, '--undo']);
 	});
 
-	return Gh.of({ findPr, createPr, editPr, markDraft });
+	const unexpected = (repo: GitRepo, args: ReadonlyArray<string>) => (error: Error) =>
+		new GhError({
+			args,
+			cwd: repo.cwd,
+			exitCode: 0,
+			stderr: `Unexpected output: ${error.message}`
+		});
+
+	const viewPr = Effect.fn('Gh.viewPr')(function* (repo: GitRepo, ref: string) {
+		const args = ['pr', 'view', ref, '--json', 'number,url,title,body,baseRefName,headRefOid'];
+		const view = yield* Schema.decodeUnknownEffect(PrView)(yield* run(repo, args)).pipe(
+			Effect.mapError(unexpected(repo, args))
+		);
+		return {
+			number: view.number,
+			url: view.url,
+			title: view.title,
+			body: view.body,
+			baseRef: view.baseRefName,
+			headSha: view.headRefOid
+		} satisfies PrDetails;
+	});
+
+	const submitReview = Effect.fn('Gh.submitReview')(function* (
+		repo: GitRepo,
+		input: SubmitReviewInput
+	) {
+		const pr = parsePrUrl(input.prUrl);
+		// `viewPr` decodes only pull request URLs.
+		if (pr === null)
+			return yield* Effect.die(new Error(`Not a pull request URL: ${input.prUrl}`));
+		const args = [
+			'api',
+			'--hostname',
+			pr.host,
+			'--method',
+			'POST',
+			`repos/${pr.owner}/${pr.name}/pulls/${pr.number}/reviews`,
+			'--input',
+			'-'
+		];
+		const payload = JSON.stringify({
+			commit_id: input.commitId,
+			event: input.event,
+			body: input.body,
+			comments: input.comments.map((comment) => ({ ...comment, side: 'RIGHT' }))
+		});
+		const posted = yield* Schema.decodeUnknownEffect(PostedReview)(
+			yield* run(repo, args, payload)
+		).pipe(Effect.mapError(unexpected(repo, args)));
+		return posted.html_url;
+	});
+
+	return Gh.of({ findPr, createPr, editPr, markDraft, viewPr, submitReview });
 });
 
 /** Runs the real `gh` CLI in the caller's repo, with the caller's env. */

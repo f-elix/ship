@@ -72,6 +72,14 @@ interface Save {
 	readonly events: ReadonlyArray<AppendableEvent>;
 }
 
+/** `value`, which must come from a `ship run` rather than a `ship review` run. */
+const shipRun = <T extends { readonly kind?: 'ship' | 'review' }>(
+	value: T | undefined
+): Exclude<T, { readonly kind: 'review' }> | undefined => {
+	if (value?.kind === 'review') throw new Error('Expected a ship run, got a review run');
+	return value as Exclude<T, { readonly kind: 'review' }> | undefined;
+};
+
 /** Records what the driver hands the journal, then passes it on to the real store. */
 class JournalSpy extends Context.Service<
 	JournalSpy,
@@ -381,7 +389,7 @@ describe('pipeline', () => {
 				const saves = yield* spy.saves;
 				expectSavedOnEveryStateChange(saves);
 				// The log and the machine's own state agree on what the summary reports.
-				const final = saves.at(-1)?.snapshot.context;
+				const final = shipRun(saves.at(-1)?.snapshot.context);
 				expect(final?.costUsd).toBeCloseTo(summary.costUsd);
 				expect(final?.checks).toEqual(summary.checks);
 				expect(final?.prUrl).toBe(summary.prUrl);
@@ -492,7 +500,7 @@ describe('pipeline', () => {
 
 				expect(summary).toMatchObject({ status: 'failed', costUsd: 0.4 });
 				expect(summary.error).toContain('Ran out of turns');
-				const final = (yield* spy.saves).at(-1)?.snapshot.context;
+				const final = shipRun((yield* spy.saves).at(-1)?.snapshot.context);
 				expect(final?.implementerSession).toEqual(session);
 				expect(final?.costUsd).toBeCloseTo(0.4);
 			})
@@ -792,7 +800,7 @@ describe('pipeline', () => {
 				expect((yield* git.state).commits.map((commit) => commit.message)).toEqual([
 					'Implement feature'
 				]);
-				const final = (yield* spy.saves).at(-1)?.snapshot.context;
+				const final = shipRun((yield* spy.saves).at(-1)?.snapshot.context);
 				expect(final?.implementerSession?.sessionId).toBe('fake-session-1');
 				expect(final).not.toHaveProperty('commitSubject');
 			})
@@ -1023,7 +1031,7 @@ describe('pipeline', () => {
 						.filter((event) => event._tag === 'StepEnded' && event.step === 'implement')
 						.map((event) => (event._tag === 'StepEnded' ? event.outcome : null))
 				).toEqual(['interrupted', 'ok']);
-				expect(summary.checks).toHaveLength(2);
+				expect(shipRun(summary)?.checks).toHaveLength(2);
 				expect(dumpDatabase(join(dir, 'ship.db'))).not.toContain('ghp_fresh');
 			})
 		)

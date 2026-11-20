@@ -18,10 +18,12 @@ import {
 	addsFeature,
 	allEvents,
 	client,
+	cloneOfExample,
 	daemon,
 	eventually,
 	fakes,
 	fixture,
+	reachState,
 	scriptHappyRun,
 	VERSION,
 	type Fixture
@@ -480,6 +482,184 @@ describe('daemon', () => {
 				// The pass was interrupted: its stream did not complete.
 				expect(Exit.isSuccess(yield* Fiber.join(pass))).toBe(false);
 				expect(existsSync(running.paths.socket)).toBe(false);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
+/** The reason `review` fails with for `pr`. */
+const reviewPreconditionOf = (
+	rpc: Effect.Success<ReturnType<typeof client>>,
+	fx: Fixture,
+	pr: string
+) =>
+	rpc.review({ pr, post: true, cwd: fx.work, env: fx.env }).pipe(
+		Effect.flip,
+		Effect.map((error) => (error instanceof PreconditionFailed ? error.reason : error._tag))
+	);
+
+describe('ship review', () => {
+	it.live(
+		'refuses a PR of another repository before creating a run',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				yield* Context.get(services, GhFake).addPr({
+					base: 'main',
+					head: 'feature',
+					title: 'Add the feature',
+					body: '',
+					draft: false
+				});
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+
+				// The fake's PRs belong to github.com/f-elix/example, not to this repo's origin.
+				expect(yield* reviewPreconditionOf(rpc, fx, '1')).toBe('pr-other-repo');
+				expect(
+					yield* reviewPreconditionOf(rpc, fx, 'https://github.com/f-elix/example/pull/1')
+				).toBe('pr-other-repo');
+				expect(yield* reviewPreconditionOf(rpc, fx, '2')).toBe('pr-not-found');
+				expect(
+					yield* reviewPreconditionOf(rpc, fx, 'https://github.com/someone/else/pull/1')
+				).toBe('pr-not-found');
+				expect(yield* rpc.list({})).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'reviews a PR in a worktree at its fetched head, posts the findings and removes the worktree',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				const { head, env } = cloneOfExample(fx);
+				const gh = Context.get(services, GhFake);
+				yield* gh.addPr({
+					base: 'main',
+					head: 'feature',
+					title: 'Add the feature',
+					body: 'Adds src/feature.ts.',
+					draft: false
+				});
+				const agent = Context.get(services, AgentFake);
+				const reviewedIn: Array<string> = [];
+				yield* agent.script({ step: 'review', label: 'standards' }, (input) =>
+					Effect.sync(() => {
+						reviewedIn.push(input.cwd);
+						expect(existsSync(join(input.cwd, 'src/feature.ts'))).toBe(true);
+						expect(existsSync(join(input.cwd, 'src/later.ts'))).toBe(false);
+						return {
+							output: {
+								findings: [
+									{
+										file: 'src/feature.ts',
+										line: 1,
+										severity: 'must-fix',
+										claim: 'The feature is unused',
+										evidence: 'export const feature = 1;'
+									}
+								]
+							},
+							costUsd: 0.1
+						};
+					})
+				);
+				yield* agent.script(
+					{ step: 'verify' },
+					{
+						output: {
+							verdicts: [{ index: 0, verdict: 'confirmed', reason: 'Seen' }],
+							previous: []
+						},
+						costUsd: 0.2
+					}
+				);
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+
+				// A URL copied from the PR's files tab names the PR too.
+				const { runId } = yield* rpc.review({
+					pr: 'https://github.com/f-elix/example/pull/1/files#diff-1',
+					post: true,
+					cwd: fx.work,
+					env
+				});
+				const events = yield* allEvents(rpc, runId);
+
+				expect(events[0]).toBe('ReviewRunCreated');
+				expect(events).toContain('PrReviewPosted');
+				expect(events.at(-1)).toBe('RunFinished');
+				const worktree = join(fx.home, 'reviews', runId);
+				expect(reviewedIn).toEqual([worktree]);
+				expect(existsSync(worktree)).toBe(false);
+				expect(fx.git('worktree', 'list', '--porcelain')).not.toContain(worktree);
+				const reviews = yield* gh.reviews;
+				expect(reviews).toMatchObject([
+					{
+						commitId: head,
+						event: 'REQUEST_CHANGES',
+						comments: [{ path: 'src/feature.ts', line: 1 }]
+					}
+				]);
+				const info = yield* rpc.status({ runId });
+				expect(info).toMatchObject({
+					kind: 'review',
+					status: 'done',
+					prUrl: 'https://github.com/f-elix/example/pull/1',
+					reviewUrl: reviews[0]?.url
+				});
+				expect(info.summary).toMatchObject({ kind: 'review', mustFix: [{ line: 1 }] });
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'removes the worktree of an interrupted review run when a later daemon cancels it',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				const { env } = cloneOfExample(fx);
+				yield* Context.get(services, GhFake).addPr({
+					base: 'main',
+					head: 'feature',
+					title: 'Add the feature',
+					body: '',
+					draft: false
+				});
+				yield* Context.get(services, AgentFake).script(
+					{ step: 'review', label: 'standards' },
+					() => Effect.never
+				);
+				const runId = yield* Effect.scoped(
+					Effect.gen(function* () {
+						yield* daemon(fx.home, services);
+						const before = yield* client(fx.home);
+						const { runId } = yield* before.review({
+							pr: '1',
+							post: false,
+							cwd: fx.work,
+							env
+						});
+						yield* reachState(before, runId, 'review');
+						return runId;
+					})
+				);
+				const worktree = join(fx.home, 'reviews', runId);
+				expect(existsSync(worktree)).toBe(true);
+
+				// The caller's env is not sent: the daemon removes the worktree with its own.
+				yield* daemon(fx.home, services);
+				const rpc = yield* client(fx.home);
+				expect((yield* rpc.status({ runId })).status).toBe('interrupted');
+				yield* rpc.cancel({ runId });
+
+				expect((yield* rpc.status({ runId })).status).toBe('cancelled');
+				expect(existsSync(worktree)).toBe(false);
+				expect(fx.git('worktree', 'list', '--porcelain')).not.toContain(worktree);
 			}).pipe(Effect.scoped),
 		TIMEOUT
 	);

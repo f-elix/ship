@@ -121,19 +121,44 @@ export const CommitSubject = Schema.NonEmptyString.check(
 export type CommitSubject = typeof CommitSubject.Type;
 
 /**
+ * The fields of a run's context that a review round reads and writes. A `ship run` and a
+ * `ship review` run both hold them, so the round's steps and reducers serve both machines.
+ */
+export const reviewRoundFields = {
+	runId: RunId,
+	projectKey: ProjectKey,
+	/** Where agents and git run: the user's checkout for `ship run`, a worktree for `ship review`. */
+	cwd: AbsolutePath,
+	env: Env,
+	/** Where the reviewed range starts. */
+	baseSha: GitSha,
+	/** Resolved when the run is created; later config edits do not change it. */
+	config: ResolvedConfig,
+	/** Current review round: a `ship run` is at 0 before its first review, a `ship review` run is at 1 from the start. */
+	round: NonNegativeInt,
+	lastReviewedSha: Schema.NullOr(GitSha),
+	review: Schema.NullOr(ReviewInProgress),
+	reviewRounds: Schema.Array(ReviewRound),
+	unresolved: UnresolvedFindings
+};
+
+/** The slice of a run's context that the review round reads and writes. */
+export const ReviewRoundState = Schema.Struct(reviewRoundFields);
+export interface ReviewRoundState extends Schema.Schema.Type<typeof ReviewRoundState> {}
+
+/**
  * The machine context, persisted in snapshots. Values the run has not produced yet are
  * `null` so the context always has the same keys.
  */
 export const RunState = Schema.Struct({
-	runId: RunId,
-	projectKey: ProjectKey,
-	cwd: AbsolutePath,
-	env: Env,
+	...reviewRoundFields,
+	/**
+	 * Tells a `ship run` context from a `ship review` one. Optional so that snapshots saved
+	 * before review runs existed still load: an absent kind is `ship`.
+	 */
+	kind: Schema.optionalKey(Schema.Literal('ship')),
 	planDir: AbsolutePath,
 	branch: Schema.NonEmptyString,
-	baseSha: GitSha,
-	/** Resolved when the run is created; later config edits do not change it. */
-	config: ResolvedConfig,
 	/** Set by `implement`; every fix step resumes this session. */
 	implementerSession: Schema.NullOr(AgentSession),
 	/**
@@ -142,14 +167,8 @@ export const RunState = Schema.Struct({
 	 * gave no valid subject, and the commit falls back to `Implement <plan name>`.
 	 */
 	commitSubject: Schema.optionalKey(CommitSubject),
-	/** Current review round; 0 before the first review. */
-	round: NonNegativeInt,
 	/** Check-fix attempts in the current round. */
 	checkFixAttempts: NonNegativeInt,
-	lastReviewedSha: Schema.NullOr(GitSha),
-	review: Schema.NullOr(ReviewInProgress),
-	reviewRounds: Schema.Array(ReviewRound),
-	unresolved: UnresolvedFindings,
 	checks: Schema.Array(CheckRound),
 	/**
 	 * Running cost for display while the run is live. The summary sums the `AgentCost`
@@ -172,6 +191,7 @@ export type NewRunState = Pick<
 /** The context of a run that has not taken a step yet. */
 export const initialRunState = (start: NewRunState): RunState => ({
 	...start,
+	kind: 'ship',
 	implementerSession: null,
 	round: 0,
 	checkFixAttempts: 0,
@@ -194,7 +214,9 @@ export const initialRunState = (start: NewRunState): RunState => ({
 export const SNAPSHOT_VERSION = 3;
 
 /** The JSON `ship run` prints on stdout when the run ends; also kept in the run store. */
-export const Summary = Schema.Struct({
+export const ShipSummary = Schema.Struct({
+	/** Absent in summaries stored before review runs existed. */
+	kind: Schema.optionalKey(Schema.Literal('ship')),
 	runId: RunId,
 	status: TerminalRunStatus,
 	prUrl: Schema.NullOr(Url),
@@ -211,4 +233,28 @@ export const Summary = Schema.Struct({
 	/** Why the run failed, when `status` is `failed`. */
 	error: Schema.NullOr(Schema.String)
 });
-export interface Summary extends Schema.Schema.Type<typeof Summary> {}
+export interface ShipSummary extends Schema.Schema.Type<typeof ShipSummary> {}
+
+/** The JSON `ship review` prints on stdout when the run ends; also kept in the run store. */
+export const ReviewSummary = Schema.Struct({
+	kind: Schema.Literal('review'),
+	runId: RunId,
+	/** `done`, `failed` or `cancelled`: a review run never escalates. */
+	status: TerminalRunStatus,
+	/** The reviewed PR. */
+	prUrl: Url,
+	/** The review posted on the PR; `null` without `--post` or when there was nothing to post. */
+	reviewUrl: Schema.NullOr(Url),
+	costUsd: CostUsd,
+	/** The verified findings, by severity. */
+	mustFix: Schema.Array(VerifiedFinding),
+	tradeoffs: Schema.Array(VerifiedFinding),
+	nits: Schema.Array(VerifiedFinding),
+	/** Why the run failed, when `status` is `failed`. */
+	error: Schema.NullOr(Schema.String)
+});
+export interface ReviewSummary extends Schema.Schema.Type<typeof ReviewSummary> {}
+
+/** What a run of either kind ends with. A summary without `kind` is a `ship run` one. */
+export const Summary = Schema.Union([ReviewSummary, ShipSummary]);
+export type Summary = typeof Summary.Type;

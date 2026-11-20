@@ -10,7 +10,7 @@ import {
 	RunId,
 	SessionId,
 	type Finding,
-	type Summary,
+	type ShipSummary,
 	type VerifiedFinding
 } from '../src/index.ts';
 
@@ -71,7 +71,7 @@ export const nit: VerifiedFinding = {
 	alsoReportedBy: []
 };
 
-export const escalatedSummary: Summary = {
+export const escalatedSummary: ShipSummary = {
 	runId,
 	status: 'escalated',
 	prUrl: 'https://github.com/f-elix/ship/pull/7',

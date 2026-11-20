@@ -59,24 +59,33 @@ Events stream to stderr as one line each: state changes, check results, lock wai
 
 Ctrl-C detaches instead of cancelling, and prints how to follow, check or cancel the run.
 
-| Command                              | What it does                                                                           |
-| ------------------------------------ | -------------------------------------------------------------------------------------- |
-| `ship run <plan-dir>`                | Start a run in the current directory with the current env                              |
-| `ship resume <id>`                   | Continue an interrupted run with the current env; streams and exits like `ship run`    |
-| `ship cancel <id>`                   | Stop a run; it ends as `cancelled`                                                     |
-| `ship status [id] [--json]`          | A run's details and summary, or the active runs                                        |
-| `ship list [--limit n] [--json]`     | Recent runs, most recently updated first (20 by default)                               |
-| `ship logs <id> [--follow] [--json]` | A run's event log; `--follow` keeps printing until the run ends                        |
-| `ship daemon status`                 | The daemon's version, pid, socket, log and active runs; starts it if it is not running |
-| `ship daemon stop [--force]`         | Stop the daemon                                                                        |
-| `ship daemon restart [--force]`      | Restart it, e.g. after upgrading ship or editing lock permits                          |
-| `ship init --detect`                 | Print a draft project config for the current directory                                 |
-| `ship init --write <file> [--force]` | Validate and save the project config, then run every check once                        |
-| `ship auth cloudflare`               | Save the Cloudflare credentials reviewer routing uses, after checking them             |
+| Command                              | What it does                                                                                         |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `ship run <plan-dir>`                | Start a run in the current directory with the current env                                            |
+| `ship review <pr> [--post]`          | Review a pull request of the current repository; see [Reviewing a PR](#reviewing-a-pr)               |
+| `ship resume <id>`                   | Continue an interrupted run with the current env; streams and exits like the command that started it |
+| `ship cancel <id>`                   | Stop a run; it ends as `cancelled`                                                                   |
+| `ship status [id] [--json]`          | A run's details and summary, or the active runs                                                      |
+| `ship list [--limit n] [--json]`     | Recent runs, most recently updated first (20 by default)                                             |
+| `ship logs <id> [--follow] [--json]` | A run's event log; `--follow` keeps printing until the run ends                                      |
+| `ship daemon status`                 | The daemon's version, pid, socket, log and active runs; starts it if it is not running               |
+| `ship daemon stop [--force]`         | Stop the daemon                                                                                      |
+| `ship daemon restart [--force]`      | Restart it, e.g. after upgrading ship or editing lock permits                                        |
+| `ship init --detect`                 | Print a draft project config for the current directory                                               |
+| `ship init --write <file> [--force]` | Validate and save the project config, then run every check once                                      |
+| `ship auth cloudflare`               | Save the Cloudflare credentials reviewer routing uses, after checking them                           |
 
 Runs are hosted by a background daemon, which the commands that need it start when it is not running (`ship daemon stop` does not); its output goes to `daemon.log` in ship's home. The CLI and the daemon must be the same version: after an upgrade, commands ask for `ship daemon restart`. Stopping or restarting the daemon is refused while runs are active; `--force` interrupts them, and `ship resume <id>` continues them later.
 
 The implementing agent runs unattended with every permission (`bypassPermissions`) in the project directory. Reviewers can only read.
+
+### Reviewing a PR
+
+`ship review <pr>` runs one review round of ship's reviewers and verifier over a pull request someone else opened. It leaves your checkout as it is, and changes nothing on GitHub unless you pass `--post`. `<pr>` is its number or its GitHub URL. Run it from a clone of the PR's base repository, on any branch and with any changes: the PR's head is fetched from `origin` as `refs/pull/<n>/head` and checked out in a detached worktree under `reviews/` in ship's home, which is removed when the run ends. The reviewers check the diff from the merge base to that head against the PR's title and description, with the project config when there is one and the defaults otherwise. A resumed review keeps the head it fetched.
+
+With `--post`, the verified findings are posted as one GitHub review on that head: a finding on a line of the diff becomes an inline comment, the others are listed in the review's body as `file:line`. The review requests changes when there are must-fix findings and only comments otherwise; ship never approves, and posts nothing when there are no findings.
+
+Events and the summary JSON go to stderr and stdout like `ship run`; the summary has `"kind": "review"` and the findings by severity. It exits 0 when there are no must-fix findings, 2 when there are, 1 when the review failed, was cancelled or did not start, and 130 on Ctrl-C.
 
 ## Reviewer routing
 

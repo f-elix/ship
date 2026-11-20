@@ -160,7 +160,7 @@ const failedSpend = (error: StepError): FailedSpend => {
  */
 export const runStep = <A, R>(
 	step: Step,
-	state: RunState,
+	state: Pick<RunState, 'cwd' | 'env' | 'baseSha'>,
 	options: RunStepOptions,
 	body: (kit: StepKit) => Effect.Effect<A, StepError, R>
 ): Effect.Effect<StepOutcome<A>, never, R | RunReporter | Git> =>

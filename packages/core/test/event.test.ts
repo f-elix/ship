@@ -36,6 +36,15 @@ const events: ReadonlyArray<RunEventType> = [
 		branch: 'feature',
 		baseSha
 	}),
+	RunEvent.cases.ReviewRunCreated.make({
+		at,
+		projectKey,
+		repoDir: '/repo',
+		prUrl: 'https://github.com/f-elix/ship/pull/7',
+		prNumber: 7,
+		baseSha,
+		headSha
+	}),
 	RunEvent.cases.StateChanged.make({ at, from: 'checks.running', to: 'checks.waiting' }),
 	RunEvent.cases.StepStarted.make({ at, step: 'implement' }),
 	RunEvent.cases.StepEnded.make({
@@ -92,7 +101,29 @@ const events: ReadonlyArray<RunEventType> = [
 	}),
 	RunEvent.cases.CommitCreated.make({ at, sha: headSha, message: 'ship: checks pass' }),
 	RunEvent.cases.PrOpened.make({ at, url: 'https://github.com/f-elix/ship/pull/7', draft: true }),
+	RunEvent.cases.PrReviewPosted.make({
+		at,
+		url: 'https://github.com/f-elix/ship/pull/7#pullrequestreview-1',
+		event: 'REQUEST_CHANGES',
+		inline: 1,
+		inBody: 1
+	}),
 	RunEvent.cases.RunFinished.make({ at, summary: escalatedSummary }),
+	RunEvent.cases.RunFinished.make({
+		at,
+		summary: {
+			kind: 'review',
+			runId,
+			status: 'done',
+			prUrl: 'https://github.com/f-elix/ship/pull/7',
+			reviewUrl: null,
+			costUsd: 0.12,
+			mustFix: [verifiedFinding],
+			tradeoffs: [],
+			nits: [],
+			error: null
+		}
+	}),
 	RunEvent.cases.RunInterrupted.make({ at }),
 	RunEvent.cases.RunResumed.make({ at }),
 	RunEvent.cases.RunCancelled.make({ at })

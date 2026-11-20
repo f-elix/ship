@@ -23,6 +23,6 @@ Check how the change stores, migrates and reads data.
 - Compatibility: data written by the previous version that the new code can no longer read, or new data the old version (still running, or after rollback) misreads.
 - Deletion and lifecycle: orphaned rows or files, cascades that delete more than intended.
 
-A traced path to lost, corrupted or unreadable data is `must-fix`. An indexing or normalisation choice the plan did not make, with an impact it did not foresee, is `tradeoff`.
+A traced path to lost, corrupted or unreadable data is `must-fix`. An indexing or normalisation choice the stated intent (the plan, or the PR description) did not make, with an impact it did not foresee, is `tradeoff`.
 
 Out of scope: SQL injection (security), query speed (performance), API shapes (contracts).

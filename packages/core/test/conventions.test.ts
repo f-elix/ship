@@ -7,6 +7,7 @@ import { parse as parseYaml } from 'yaml';
 import {
 	BUILTIN_BRIEFS_DIR,
 	BUILTIN_CONVENTIONS_DIR,
+	ChangeIntent,
 	Conventions,
 	IMPLEMENTER_REFERENCES,
 	implementerConventionFiles,
@@ -319,8 +320,10 @@ const reviewer = (conventions?: ReviewerDef['conventions']): ReviewerDef => ({
 const subject: ReviewSubject = {
 	diff: '',
 	commits: [{ sha: fakeSha(1), subject: 'Add a' }],
-	specPath: '/plans/x/spec.md',
-	planPath: '/plans/x/implementation-plan.md',
+	intent: ChangeIntent.Plan({
+		specPath: '/plans/x/spec.md',
+		planPath: '/plans/x/implementation-plan.md'
+	}),
 	conventions: scope
 };
 

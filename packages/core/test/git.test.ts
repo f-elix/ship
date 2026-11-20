@@ -275,4 +275,15 @@ describe('git output parsing', () => {
 			spécial: ['hi']
 		});
 	});
+
+	it('drops the tab git ends a path containing a space with', () => {
+		const diff = [
+			'diff --git a/my file.ts b/my file.ts',
+			'--- a/my file.ts\t',
+			'+++ b/my file.ts\t',
+			'@@ -0,0 +1 @@',
+			'+hi'
+		].join('\n');
+		expect(parseAddedLines(diff)).toEqual({ 'my file.ts': ['hi'] });
+	});
 });

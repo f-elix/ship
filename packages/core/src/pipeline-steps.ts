@@ -8,13 +8,13 @@ import {
 } from './agent.ts';
 import { baselinePass, Checks, filesForChecks } from './checks.ts';
 import { Conventions, implementerConventionsSection } from './conventions.ts';
-import { readCredentials, type Credentials } from './credentials.ts';
 import type { CheckEvent } from './event.ts';
 import type { VerifiedFinding } from './finding.ts';
-import { Git, type CommitRange } from './git.ts';
+import { Git } from './git.ts';
 import { Pr } from './pr.ts';
 import type { Step } from './primitives.ts';
-import { reviewChanges, Reviewers, type AgentContext, type ReviewSubject } from './reviewers.ts';
+import { agentContext } from './review-round.ts';
+import { ChangeIntent } from './reviewers.ts';
 import {
 	runStep,
 	StepNotReady,
@@ -28,17 +28,20 @@ import {
 	type AgentSession,
 	type CheckRound,
 	type EscalationReason,
-	type ReviewInProgress,
 	type RunState,
 	type UnresolvedFindings
 } from './run.ts';
-import { PLAN_FILES, ShipHome } from './ship-paths.ts';
+import { PLAN_FILES } from './ship-paths.ts';
 
 // --- Shared helpers ---
 
 const specPath = (state: RunState) => `${state.planDir}/${PLAN_FILES.spec}`;
 const planPath = (state: RunState) => `${state.planDir}/${PLAN_FILES.plan}`;
 const planName = (state: RunState) => state.planDir.slice(state.planDir.lastIndexOf('/') + 1);
+
+/** What a ship run's reviewers check the change against: its spec and plan. */
+export const planIntent = (state: RunState): ChangeIntent =>
+	ChangeIntent.Plan({ specPath: specPath(state), planPath: planPath(state) });
 
 /**
  * The message of the round's commit, and of the single commit a squash leaves. Round 0
@@ -52,15 +55,6 @@ export const commitMessage = (state: RunState): string =>
 /** Every check passed. */
 export const checksPassed = (round: CheckRound): boolean =>
 	round.results.every((result) => result.exitCode === 0);
-
-const agentContext = Effect.fnUntraced(function* (state: RunState) {
-	const home = yield* ShipHome;
-	return {
-		cwd: state.cwd,
-		env: state.env,
-		transcript: { dir: home.transcripts(state.runId) }
-	} satisfies AgentContext;
-});
 
 /** Runs the project's format command on the run's changed files, if it has one. */
 const formatChanges = Effect.fnUntraced(function* (state: RunState) {
@@ -344,191 +338,6 @@ export const fixStep = (state: RunState) =>
 				conventions
 			].join('\n'),
 		askPlain
-	);
-
-// --- Review ---
-
-const missingReview = new StepNotReady({ reason: 'No review round is in progress' });
-
-/** What reviewers and the verifier see of `range`, with the conventions that apply to it. */
-const reviewSubject = Effect.fnUntraced(function* (state: RunState, range: CommitRange) {
-	const changes = yield* reviewChanges(state, range);
-	const conventions = yield* (yield* Conventions).scope({
-		repo: state,
-		changes
-	});
-	return {
-		diff: changes.diff,
-		commits: changes.commits,
-		specPath: specPath(state),
-		planPath: planPath(state),
-		conventions
-	} satisfies ReviewSubject;
-});
-
-const loadReviewers = Effect.fnUntraced(function* (state: RunState) {
-	const reviewers = yield* Reviewers;
-	const home = yield* ShipHome;
-	return yield* reviewers.load({
-		projectDir: home.projectReviewers(state.projectKey),
-		disable: state.config.reviewers.disable
-	});
-});
-
-/**
- * The Clef input for routing: the saved Cloudflare credentials, or `null` when the project
- * turned Clef off, none are saved, or the file cannot be read, which logs a warning.
- */
-const clefRouting = Effect.fnUntraced(function* (state: RunState) {
-	if (!state.config.reviewers.clef) return null;
-	const home = yield* ShipHome;
-	const credentials: Credentials = yield* readCredentials(home.home).pipe(
-		Effect.catchTag('CredentialsFileError', (error) =>
-			Effect.as(Effect.logWarning('Routing without Clef', error), {})
-		)
-	);
-	if (credentials.cloudflare === undefined) {
-		yield* Effect.logWarning(
-			'No Cloudflare credentials are saved (`ship auth cloudflare`); routing without Clef'
-		);
-		return null;
-	}
-	return { credentials: credentials.cloudflare };
-});
-
-/**
- * Picks the round's reviewers and starts the round. Every round reviews the whole branch,
- * `base..HEAD`. Routing looks at `base..HEAD` in round 1, then at the fix commits,
- * `lastReviewedSha..HEAD`, and from round 2 every reviewer that had a must-fix finding in
- * the previous round runs again too.
- */
-export const routeStep = (state: RunState) =>
-	runStep('route', state, { timeoutMs: null }, (kit) =>
-		Effect.gen(function* () {
-			const git = yield* Git;
-			const reviewers = yield* Reviewers;
-			const routedFromSha = state.lastReviewedSha ?? state.baseSha;
-			const toSha = yield* git.headSha(state);
-			const changes = yield* reviewChanges(state, { from: routedFromSha, to: toSha });
-			const loaded = yield* loadReviewers(state);
-			const routed = yield* reviewers.route({
-				reviewers: loaded,
-				changes,
-				clef: yield* clefRouting(state)
-			});
-			if (routed.clefError !== null) {
-				yield* Effect.logWarning(
-					'Routing with the deterministic triggers only',
-					routed.clefError
-				);
-			}
-			const reasons = new Map(
-				routed.reviewers.map((picked) => [picked.reviewer.name, picked.reasons])
-			);
-			const previous = state.reviewRounds.at(-1);
-			if (previous !== undefined) {
-				const returning = previous.findings
-					.filter((finding) => finding.severity === 'must-fix')
-					.flatMap((finding) => finding.alsoReportedBy.concat(finding.reviewer));
-				for (const name of returning) {
-					reasons.set(name, [
-						...new Set([
-							...(reasons.get(name) ?? []),
-							`must-fix in round ${previous.round}`
-						])
-					]);
-				}
-			}
-			// In load order, and only reviewers that still exist.
-			const picked = loaded
-				.map((reviewer) => reviewer.name)
-				.filter((name) => reasons.has(name));
-			for (const name of picked) {
-				yield* Effect.logInfo(
-					`Round ${state.round} reviewer ${name}: ${(reasons.get(name) ?? []).join(', ')}`
-				);
-			}
-			yield* kit.report({
-				_tag: 'ReviewStarted',
-				round: state.round,
-				fromSha: state.baseSha,
-				toSha,
-				reviewers: picked
-			});
-			return {
-				round: state.round,
-				fromSha: state.baseSha,
-				toSha,
-				routedFromSha,
-				reviewers: picked,
-				findings: []
-			} satisfies ReviewInProgress;
-		})
-	);
-
-/**
- * Runs the round's reviewers. Each reviewer call has its own timeout, so the step has
- * none: reviewers run in batches and the step can rightly outlast one call.
- */
-export const reviewStep = (state: RunState) =>
-	runStep('review', state, { timeoutMs: null }, (kit) =>
-		Effect.gen(function* () {
-			const review = state.review;
-			if (review === null) return yield* missingReview;
-			const reviewers = yield* Reviewers;
-			const picked = (yield* loadReviewers(state)).filter((def) =>
-				review.reviewers.includes(def.name)
-			);
-			const reports = yield* reviewers.review({
-				...(yield* reviewSubject(state, { from: review.fromSha, to: review.toSha })),
-				reviewers: picked,
-				model: state.config.models.review,
-				timeoutMs: state.config.timeouts.review,
-				context: yield* agentContext(state),
-				onReport: (report) =>
-					Effect.andThen(
-						kit.recordCost(report.cost),
-						kit.report({
-							_tag: 'FindingsReported',
-							round: review.round,
-							reviewer: report.reviewer,
-							findings: report.findings
-						})
-					)
-			});
-			return reports.flatMap((report) => report.findings);
-		})
-	);
-
-/**
- * Verifies the round's findings and checks whether the last fix resolved the must-fix
- * findings and nits it was given.
- */
-export const verifyStep = (state: RunState) =>
-	runStep('verify', state, { timeoutMs: state.config.timeouts.verify }, (kit) =>
-		Effect.gen(function* () {
-			const review = state.review;
-			if (review === null) return yield* missingReview;
-			const reviewers = yield* Reviewers;
-			const result = yield* reviewers.verify({
-				...(yield* reviewSubject(state, { from: review.fromSha, to: review.toSha })),
-				round: review.round,
-				findings: review.findings,
-				previous: [...state.unresolved.mustFix, ...state.unresolved.nits],
-				knownTradeoffs: state.unresolved.tradeoffs,
-				model: state.config.models.verify,
-				timeoutMs: state.config.timeouts.verify,
-				context: yield* agentContext(state)
-			});
-			if (result.cost !== null) yield* kit.recordCost(result.cost);
-			yield* kit.report({
-				_tag: 'FindingsVerified',
-				round: review.round,
-				verified: result.verified,
-				disproved: result.disproved
-			});
-			return result.verified;
-		})
 	);
 
 // --- Triage ---

@@ -58,6 +58,35 @@ describe('ConfigLoader', () => {
 		}).pipe(Effect.scoped)
 	);
 
+	it.effect('loadOrDefaults reads a missing project config as {}, for ship review', () =>
+		Effect.gen(function* () {
+			const { loader, write, paths } = yield* setup;
+			write(paths.globalConfig, { caps: { reviewRounds: 4 } });
+
+			const config = yield* loader.loadOrDefaults(key);
+			expect(config.project).toEqual({
+				checks: [],
+				pr: { draft: true, squash: true },
+				reviewers: { clef: true, disable: [] }
+			});
+			expect(config.resolved.caps).toEqual({ checkFixAttempts: 3, reviewRounds: 4 });
+		}).pipe(Effect.scoped)
+	);
+
+	it.effect('loadOrDefaults still fails on a project config that exists but is invalid', () =>
+		Effect.gen(function* () {
+			const { loader, write, paths } = yield* setup;
+			write(paths.projectConfig(key), { checks: [{ name: 'lint' }] });
+
+			const error = yield* Effect.flip(loader.loadOrDefaults(key));
+			expect(error).toMatchObject({
+				reason: 'invalid-config',
+				path: paths.projectConfig(key)
+			});
+			expect(error.detail).toMatch(/run/);
+		}).pipe(Effect.scoped)
+	);
+
 	it.effect('fails with invalid-config on bad JSON, a schema error or an unknown lock', () =>
 		Effect.gen(function* () {
 			const { loader, write, paths } = yield* setup;

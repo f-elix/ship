@@ -14,6 +14,6 @@ Check that the behaviour this change adds or alters is protected by tests, and t
 - Flakiness: real time, real network, order dependence, shared state across tests, unseeded randomness.
 - Setup that hides what is being protected.
 
-`must-fix`: new or changed behaviour the spec requires with no test, or a test that cannot fail. A missing edge case is `must-fix` when the plan names it or a quoted convention calls for it; otherwise leave it out.
+`must-fix`: new or changed behaviour the stated intent (the plan, or the PR description) requires with no test, or a test that cannot fail. A missing edge case is `must-fix` when the stated intent (the plan, or the PR description) names it or a quoted convention calls for it; otherwise leave it out.
 
 Out of scope: whether the production code is correct (other reviewers own that), test style that tooling enforces.

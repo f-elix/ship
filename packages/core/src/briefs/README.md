@@ -16,7 +16,7 @@ Severities, as `reviewerPrompt` defines them for every reviewer:
 
 - `must-fix`: a defect with concrete evidence. The next fix round fixes it.
 - `nit`: style or wording with no effect on behaviour. The same fix round fixes it.
-- `tradeoff`: the change deviates from the spec or plan, or has an impact the plan did not foresee. The loop never fixes it; the PR body lists it.
+- `tradeoff`: the change deviates from the stated intent (the plan, or the PR description for `ship review`), or has an impact it did not foresee. The loop never fixes it; the PR body lists it.
 
 A severity line in a brief must fit these: a judgement call that is neither a defect nor a deviation is not a `tradeoff`.
 
