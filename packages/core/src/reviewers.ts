@@ -1,4 +1,4 @@
-import { Context, Effect, FileSystem, Layer, Result, Schema, Struct } from 'effect';
+import { Context, Data, Effect, FileSystem, Layer, Result, Schema, Struct } from 'effect';
 import { fileURLToPath } from 'node:url';
 import {
 	Agent,
@@ -42,15 +42,25 @@ export interface AgentContext {
 	readonly transcript?: TranscriptTarget;
 }
 
+/**
+ * What the change sets out to do, which the reviewers check it against: the plan ship
+ * implemented (`ship run`), or the description of a PR ship did not write (`ship review`).
+ */
+export type ChangeIntent = Data.TaggedEnum<{
+	/** Absolute paths of the plan's `spec.md` and `implementation-plan.md`. */
+	Plan: { readonly specPath: string; readonly planPath: string };
+	/** The PR's title and body. */
+	Description: { readonly title: string; readonly body: string };
+}>;
+export const ChangeIntent = Data.taggedEnum<ChangeIntent>();
+
 /** What reviewers and the verifier are told about the work under review. */
 export interface ReviewSubject {
 	/** The unified diff of the reviewed range. */
 	readonly diff: string;
 	/** Commits in the reviewed range, oldest first. */
 	readonly commits: ReadonlyArray<Commit>;
-	/** Absolute paths of the plan's `spec.md` and `implementation-plan.md`. */
-	readonly specPath: string;
-	readonly planPath: string;
+	readonly intent: ChangeIntent;
 	/** The conventions that apply to the repo and the change; reviewers and the verifier may read its dir. */
 	readonly conventions: ConventionScope;
 }
@@ -239,6 +249,26 @@ export interface VerifierOutput extends Schema.Schema.Type<typeof VerifierOutput
 /** Reviewers get the whole diff up to this size; beyond it they read the files themselves. */
 const MAX_REVIEW_DIFF_CHARS = 200_000;
 
+/** The stated intent: the plan's files to read, or the PR's description quoted in full. */
+const intentLines = (intent: ChangeIntent): ReadonlyArray<string> =>
+	ChangeIntent.$match(intent, {
+		Plan: ({ specPath, planPath }) => [
+			`- Spec: ${specPath}`,
+			`- Implementation plan: ${planPath}`
+		],
+		Description: ({ title, body }) => [
+			'The stated intent is the pull request description:',
+			'',
+			`Title: ${title}`,
+			'',
+			'Body:',
+			'',
+			'````markdown',
+			body.trim() === '' ? '(empty)' : body,
+			'````'
+		]
+	});
+
 const subjectSection = (subject: ReviewSubject) => {
 	const commits =
 		subject.commits.length === 0
@@ -249,8 +279,7 @@ const subjectSection = (subject: ReviewSubject) => {
 	return [
 		'## The change',
 		'',
-		`- Spec: ${subject.specPath}`,
-		`- Implementation plan: ${subject.planPath}`,
+		...intentLines(subject.intent),
 		'',
 		'Commits:',
 		'',
@@ -276,7 +305,7 @@ const REVIEWER_RULES = `## Rules
 - Severity:
   - \`must-fix\`: a defect shown by concrete evidence, such as a traced failing path, a quoted requirement or a quoted written project rule. Suspicion, preference or a missing best practice is never must-fix.
   - \`nit\`: style or wording with no effect on behaviour.
-  - \`tradeoff\`: the change deviates from the spec or plan, or has an impact the plan did not foresee. State what it gives up, and its cost.
+  - \`tradeoff\`: the change deviates from the stated intent (the plan, or the PR description), or has an impact it did not foresee. State what it gives up, and its cost.
 
 ## Output
 
@@ -360,8 +389,14 @@ export const verifierPrompt = (
 		'Give one verdict per finding, by index: `confirmed`, `disproved` or `duplicate` (with `duplicateOf`, the index of the finding it repeats), and a reason. Mark a duplicate only between findings of the same kind: a tradeoff with a tradeoff, or a must-fix or nit with a must-fix or nit. For a confirmed finding that is the same problem as a previous finding, or the same tradeoff as a known one, set `repeats` to that id. Set `severity` to `nit` only to lower a must-fix that is a formatter, linter or taste remark; never move a finding into or out of `tradeoff`. A kept finding takes the highest severity among the duplicates merged into it; its `severity` lowers that merged result. Then give each previous finding, by id, a status, `fixed` or `unfixed`, with evidence.'
 	].join('\n');
 
-/** What reviewers and the verifier may read outside the repo: the plan and the conventions. */
-const readableDirs = (subject: ReviewSubject) => [...planDirs(subject), subject.conventions.dir];
+/**
+ * What reviewers and the verifier may read outside the repo: the plan, when the intent is
+ * one, and the conventions.
+ */
+const readableDirs = (subject: ReviewSubject) => [
+	...(subject.intent._tag === 'Plan' ? planDirs(subject.intent) : []),
+	subject.conventions.dir
+];
 
 // --- Severity ---
 

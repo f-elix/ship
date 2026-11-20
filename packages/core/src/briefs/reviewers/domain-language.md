@@ -1,6 +1,6 @@
 ---
 name: domain-language
-description: Names of domain concepts against the project's glossary (CONTEXT.md, ADRs, the spec); one name per concept, one concept per name.
+description: Names of domain concepts against the project's glossary (CONTEXT.md, ADRs, the stated intent); one name per concept, one concept per name.
 model: haiku
 triggers:
     paths:
@@ -13,7 +13,7 @@ triggers:
 
 Check that the change names domain concepts the way the project does.
 
-Read the glossary first: `CONTEXT.md` or `CONTEXT-MAP.md` (and the context files it points to), `docs/adr/`, then the spec. Without a glossary, use the terms the spec and the existing code already use.
+Read the glossary first: `CONTEXT.md` or `CONTEXT-MAP.md` (and the context files it points to), `docs/adr/`, then the stated intent (the plan, or the PR description). Without a glossary, use the terms the stated intent and the existing code already use.
 
 - Synonyms: a new name for a concept that already has one (`job` where the code says `run`).
 - Overloading: an existing term reused for a different concept.

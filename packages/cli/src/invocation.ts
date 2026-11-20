@@ -1,5 +1,5 @@
 import type { Env } from '@ship/core/contract';
-import { shipHomeDir } from '@ship/daemon/client';
+import { processEnv, shipHomeDir } from '@ship/daemon/client';
 import { Context, Effect, Layer, Schema } from 'effect';
 import { resolve } from 'node:path';
 
@@ -27,11 +27,7 @@ export class Invocation extends Context.Service<
 			this,
 			Effect.gen(function* () {
 				const home = resolve(yield* shipHomeDir);
-				const env: Record<string, string> = {};
-				for (const [key, value] of Object.entries(process.env)) {
-					if (value !== undefined) env[key] = value;
-				}
-				return { version, home, cwd: process.cwd(), env };
+				return { version, home, cwd: process.cwd(), env: processEnv() };
 			})
 		);
 }

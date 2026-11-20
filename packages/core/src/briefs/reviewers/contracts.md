@@ -23,6 +23,6 @@ Check that contracts the change touches stay coherent and compatible: exported f
 - Partial migration: some callers updated to the new contract and others not.
 - Leaks: internal representation exposed through a public type, so callers come to depend on it.
 
-A traced break of a real caller is `must-fix`. An intended break the plan calls for is not a finding unless the migration is incomplete. Naming and shape preferences are `nit`.
+A traced break of a real caller is `must-fix`. An intended break the stated intent (the plan, or the PR description) calls for is not a finding unless the migration is incomplete. Naming and shape preferences are `nit`.
 
 Out of scope: data the program persists, its schemas, migrations and file formats (data), whether the contract is the right abstraction (design), package manifests' dependency lists (deps).

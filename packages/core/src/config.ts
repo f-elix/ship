@@ -134,7 +134,8 @@ export const Timeout = Schema.String.check(
 );
 
 // Every step has a timeout except the deterministic `triage` and `route`, whose Clef call
-// has a fixed one (`CLEF_TIMEOUT`).
+// has a fixed one (`CLEF_TIMEOUT`), and `ship review`'s `prepare` and `post`, which only
+// run git and gh.
 const timeoutFields = {
 	baseline: Timeout,
 	implement: Timeout,
@@ -145,7 +146,7 @@ const timeoutFields = {
 	fix: Timeout,
 	escalate: Timeout,
 	pr: Timeout
-} satisfies Record<Exclude<Step, 'triage' | 'route'>, typeof Timeout>;
+} satisfies Record<Exclude<Step, 'triage' | 'route' | 'prepare' | 'post'>, typeof Timeout>;
 
 export const Timeouts = Schema.Struct(
 	Struct.evolve(timeoutFields, {

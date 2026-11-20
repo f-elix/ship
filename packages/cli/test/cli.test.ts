@@ -1,9 +1,10 @@
 import { describe, expect, it } from '@effect/vitest';
-import { DaemonBusy, RunStatus, shipPaths } from '@ship/core';
+import { DaemonBusy, FindingId, RunId, RunStatus, shipPaths } from '@ship/core';
 import { AgentFake, GhFake } from '@ship/core/testing';
 import {
 	addsFeature,
 	client,
+	cloneOfExample,
 	daemon,
 	daemonProcess,
 	eventually,
@@ -14,6 +15,7 @@ import {
 	scriptHappyRun,
 	tempDir,
 	VERSION,
+	type Fakes,
 	type Fixture
 } from '@ship/daemon/testing';
 import { ConfigProvider, Context, Duration, Effect, Exit, Fiber, Scope } from 'effect';
@@ -21,7 +23,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { busyMessage } from '../src/connection.ts';
 import { Invocation } from '../src/invocation.ts';
-import { DETACHED_EXIT_CODE, exitCodeFor } from '../src/render.ts';
+import { DETACHED_EXIT_CODE, exitCodeFor, exitCodeForSummary } from '../src/render.ts';
 import { cli, fakeDaemonLauncher, testTimeouts, type Captured } from './support.ts';
 
 const TIMEOUT = 60_000;
@@ -54,6 +56,41 @@ describe('exit codes', () => {
 			interrupted: 1
 		});
 		expect(DETACHED_EXIT_CODE).toBe(130);
+	});
+
+	it('exits a finished review 2 when it verified must-fix findings and 0 otherwise', () => {
+		const mustFix = {
+			id: FindingId.make('r1-1'),
+			round: 1,
+			alsoReportedBy: [],
+			reviewer: 'standards',
+			file: 'src/a.ts',
+			line: 1,
+			severity: 'must-fix' as const,
+			claim: 'Broken',
+			evidence: 'a'
+		};
+		const review = (
+			status: 'done' | 'failed' | 'cancelled',
+			found: ReadonlyArray<typeof mustFix>
+		) =>
+			exitCodeForSummary({
+				kind: 'review',
+				runId: RunId.make('20261117-120000-abcdef'),
+				status,
+				prUrl: 'https://github.com/f-elix/example/pull/1',
+				reviewUrl: null,
+				costUsd: 0,
+				mustFix: found,
+				tradeoffs: [],
+				nits: [],
+				error: null
+			});
+
+		expect(review('done', [])).toBe(0);
+		expect(review('done', [mustFix])).toBe(2);
+		expect(review('failed', [mustFix])).toBe(1);
+		expect(review('cancelled', [])).toBe(1);
 	});
 });
 
@@ -106,6 +143,7 @@ describe('command parsing', () => {
 			expect(help.code).toBe(0);
 			for (const command of [
 				'run',
+				'review',
 				'resume',
 				'cancel',
 				'status',
@@ -173,6 +211,7 @@ describe('ship run', () => {
 				});
 				expect(Object.keys(summary).sort()).toEqual(
 					[
+						'kind',
 						'runId',
 						'status',
 						'prUrl',
@@ -365,6 +404,134 @@ describe('ship run', () => {
 	);
 });
 
+/** PR 1 of `github.com/f-elix/example`, which the GitHub fake answers for. */
+const PR = 'https://github.com/f-elix/example/pull/1';
+
+/**
+ * Adds PR 1 to the GitHub fake and scripts one finding of `severity`, which the verifier
+ * confirms.
+ */
+const scriptReview = (services: Fakes, severity: 'must-fix' | 'nit') =>
+	Effect.gen(function* () {
+		yield* Context.get(services, GhFake).addPr({
+			base: 'main',
+			head: 'feature',
+			title: 'Add the feature',
+			body: 'Adds src/feature.ts.',
+			draft: false
+		});
+		const agent = Context.get(services, AgentFake);
+		yield* agent.script(
+			{ step: 'review', label: 'standards' },
+			{
+				output: {
+					findings: [
+						{
+							file: 'src/feature.ts',
+							line: 1,
+							severity,
+							claim: 'The feature is unused',
+							evidence: 'export const feature = 1;'
+						}
+					]
+				},
+				costUsd: 0.25
+			}
+		);
+		yield* agent.script(
+			{ step: 'verify' },
+			{
+				output: {
+					verdicts: [{ index: 0, verdict: 'confirmed', reason: 'Seen' }],
+					previous: []
+				},
+				costUsd: 0.5
+			}
+		);
+	});
+
+describe('ship review', () => {
+	it.live(
+		'posts with --post, prints the review summary on stdout and exits 2 on a must-fix finding',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const { env } = cloneOfExample(fx);
+				const services = yield* fakes;
+				yield* scriptReview(services, 'must-fix');
+				yield* daemon(fx.home, services);
+
+				const result = yield* cli(['review', PR, '--post'], {
+					home: fx.home,
+					cwd: fx.work,
+					env
+				});
+
+				expect(result.code).toBe(2);
+				const reviews = yield* Context.get(services, GhFake).reviews;
+				expect(reviews).toMatchObject([{ event: 'REQUEST_CHANGES' }]);
+				expect(parseSummary(result.stdout)).toMatchObject({
+					kind: 'review',
+					status: 'done',
+					prUrl: PR,
+					reviewUrl: reviews[0]?.url,
+					costUsd: 0.75,
+					mustFix: [{ file: 'src/feature.ts', line: 1 }],
+					nits: []
+				});
+				expect(result.stderr.split('\n')[0]).toMatch(/^ship: run \S+ started$/u);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'posts nothing without --post and exits 0 when no finding is must-fix',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const { env } = cloneOfExample(fx);
+				const services = yield* fakes;
+				yield* scriptReview(services, 'nit');
+				yield* daemon(fx.home, services);
+
+				const result = yield* cli(['review', '1'], { home: fx.home, cwd: fx.work, env });
+
+				expect(result.code).toBe(0);
+				expect(yield* Context.get(services, GhFake).reviews).toEqual([]);
+				expect(parseSummary(result.stdout)).toMatchObject({
+					kind: 'review',
+					status: 'done',
+					reviewUrl: null,
+					mustFix: [],
+					nits: [{ file: 'src/feature.ts', line: 1 }]
+				});
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'reports a failed precondition, exits 1 and starts nothing',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				yield* scriptReview(services, 'must-fix');
+				yield* daemon(fx.home, services);
+
+				// The fake's PRs belong to github.com/f-elix/example, not to this repo's origin.
+				const result = yield* shipIn(fx, ['review', PR, '--post']);
+
+				expect(result.code).toBe(1);
+				expect(result.stdout).toBe('');
+				expect(result.stderr).toMatch(
+					/^ship: cannot start the run \(pr-other-repo\): https:\/\/github\.com\/f-elix\/example\/pull\/1 belongs to /u
+				);
+				expect(JSON.parse((yield* shipIn(fx, ['list', '--json'])).stdout)).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
 describe('ship resume', () => {
 	it.live(
 		"streams only the resumed run's events and exits like ship run",
@@ -427,10 +594,10 @@ describe('ship cancel, status, list and logs', () => {
 				const active = yield* shipIn(fx, ['status']);
 				expect(active.code).toBe(0);
 				expect(active.stdout.split('\n')[0]).toMatch(
-					/^RUN\s+STATUS\s+STATE\s+BRANCH\s+UPDATED\s+PR$/u
+					/^RUN\s+KIND\s+STATUS\s+STATE\s+SUBJECT\s+UPDATED\s+PR$/u
 				);
 				expect(active.stdout).toMatch(
-					new RegExp(`^${runId}\\s+running\\s+implement\\s+feature\\s`, 'mu')
+					new RegExp(`^${runId}\\s+ship\\s+running\\s+implement\\s+feature\\s`, 'mu')
 				);
 
 				expect(yield* shipIn(fx, ['cancel', runId])).toEqual({
@@ -446,7 +613,7 @@ describe('ship cancel, status, list and logs', () => {
 
 				expect((yield* shipIn(fx, ['status'])).stdout).toBe('No active runs.');
 				const details = yield* shipIn(fx, ['status', runId]);
-				expect(details.stdout).toContain(`run: ${runId}\nstatus: cancelled\n`);
+				expect(details.stdout).toContain(`run: ${runId}\nkind: ship\nstatus: cancelled\n`);
 				const asJson = JSON.parse((yield* shipIn(fx, ['status', runId, '--json'])).stdout);
 				expect(asJson).toMatchObject({
 					runId,
@@ -485,9 +652,9 @@ describe('ship cancel, status, list and logs', () => {
 				const table = (yield* shipIn(fx, ['list'])).stdout.split('\n');
 				expect(table).toHaveLength(3);
 				expect(table[1]).toMatch(
-					new RegExp(`^${second}\\s+done\\s+done\\s+feature\\s.*/pull/1$`, 'u')
+					new RegExp(`^${second}\\s+ship\\s+done\\s+done\\s+feature\\s.*/pull/1$`, 'u')
 				);
-				expect(table[2]).toMatch(new RegExp(`^${first}\\s+done\\s`, 'u'));
+				expect(table[2]).toMatch(new RegExp(`^${first}\\s+ship\\s+done\\s`, 'u'));
 				const limited = JSON.parse(
 					(yield* shipIn(fx, ['list', '--limit', '1', '--json'])).stdout
 				);

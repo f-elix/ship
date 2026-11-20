@@ -17,7 +17,10 @@ export const AbsolutePath = Schema.String.check(
 	Schema.isPattern(/^\//u, { expected: 'an absolute path' })
 );
 
-/** The caller's environment (`PATH`, etc.); checks and agents run with it, not the daemon's. */
+/**
+ * A process environment (`PATH`, etc.). Checks and agents run with the caller's, not the
+ * daemon's.
+ */
 export const Env = Schema.Record(Schema.String, Schema.String);
 export type Env = typeof Env.Type;
 
@@ -52,6 +55,8 @@ export const Step = Schema.Literals([
 	'triage',
 	'fix',
 	'escalate',
-	'pr'
+	'pr',
+	'prepare',
+	'post'
 ]);
 export type Step = typeof Step.Type;

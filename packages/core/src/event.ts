@@ -49,6 +49,21 @@ export const RunEvent = Schema.TaggedUnion({
 		branch: Schema.NonEmptyString,
 		baseSha: GitSha
 	},
+	/**
+	 * A `ship review` run was created for a pull request: `repoDir` is the checkout it was
+	 * started in, where its worktree is added and removed, and the run reviews
+	 * `baseSha..headSha`, pinned at creation. `baseSha` is the merge base of the PR's base
+	 * branch and its head.
+	 */
+	ReviewRunCreated: {
+		...at,
+		projectKey: ProjectKey,
+		repoDir: AbsolutePath,
+		prUrl: Url,
+		prNumber: PositiveInt,
+		baseSha: GitSha,
+		headSha: GitSha
+	},
 	/** Machine state values as dotted paths, e.g. `checks.waiting`. */
 	StateChanged: { ...at, from: Schema.String, to: Schema.String },
 	StepStarted: { ...at, step: Step },
@@ -115,6 +130,17 @@ export const RunEvent = Schema.TaggedUnion({
 	},
 	CommitCreated: { ...at, sha: GitSha, message: Schema.String },
 	PrOpened: { ...at, url: Url, draft: Schema.Boolean },
+	/**
+	 * `ship review --post` posted its review: `inline` findings as comments on diff lines,
+	 * `inBody` findings listed in the review body.
+	 */
+	PrReviewPosted: {
+		...at,
+		url: Url,
+		event: Schema.Literals(['COMMENT', 'REQUEST_CHANGES']),
+		inline: NonNegativeInt,
+		inBody: NonNegativeInt
+	},
 	RunFinished: { ...at, summary: Summary },
 	/** The daemon stopped while the run was active; `ship resume` continues it. */
 	RunInterrupted: { ...at },

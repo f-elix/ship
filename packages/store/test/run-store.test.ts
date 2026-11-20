@@ -1,9 +1,10 @@
-import { SqliteClient } from '@effect/sql-sqlite-node';
+import { SqliteClient, SqliteMigrator } from '@effect/sql-sqlite-node';
 import { assert, describe, expect, it } from '@effect/vitest';
 import {
 	configParseOptions,
 	GitSha,
 	GlobalConfig,
+	initialReviewRunState,
 	ProjectConfig,
 	ProjectKey,
 	resolveConfig,
@@ -21,6 +22,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RunStore } from '../src/index.ts';
+import { migrations } from '../src/migrations.ts';
 
 /** A database file path in a temp dir that is deleted when the scope closes. */
 const tempDbFile = Effect.map(
@@ -388,6 +390,127 @@ describe('RunStore', () => {
 			expect(ids(yield* store.list({ status: ['running'] }))).toEqual([a.runId, b.runId]);
 			expect(yield* store.list({ status: [] })).toEqual([]);
 		}).pipe(Effect.provide(TestLayer))
+	);
+
+	describe('review runs', () => {
+		const prUrl = 'https://github.com/f-elix/ship/pull/7';
+		const headSha = GitSha.make('b'.repeat(40));
+		const newReview = { projectKey, repoDir: '/repo', prUrl, prNumber: 7, baseSha, headSha };
+
+		it.effect('creates a review run whose log starts with ReviewRunCreated', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const run = yield* store.createReview(newReview);
+
+				expect(run).toMatchObject({
+					kind: 'review',
+					status: 'running',
+					prUrl,
+					reviewUrl: null,
+					summary: null
+				});
+				const events = yield* store.events(run.runId);
+				expect(events.map((envelope) => envelope.event)).toMatchObject([
+					{ _tag: 'ReviewRunCreated', prUrl, prNumber: 7, headSha }
+				]);
+				expect(yield* store.get(run.runId)).toEqual(run);
+			}).pipe(Effect.provide(TestLayer))
+		);
+
+		it.effect('records the posted review from its snapshot and restores its context', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const { runId } = yield* store.createReview(newReview);
+				const reviewUrl = `${prUrl}#pullrequestreview-1`;
+				const context = {
+					...initialReviewRunState({
+						runId,
+						projectKey,
+						cwd: '/home/reviews/run',
+						env: secretEnv,
+						config: resolveConfig(
+							decodeGlobalConfigSync({}),
+							decodeProjectConfigSync({})
+						),
+						pr: { number: 7, url: prUrl, title: 'T', body: '', baseSha, headSha },
+						post: true,
+						repoDir: '/repo'
+					}),
+					reviewUrl
+				};
+
+				yield* store.saveSnapshot({ status: 'active', value: 'post', context });
+
+				expect(yield* store.get(runId)).toMatchObject({ state: 'post', prUrl, reviewUrl });
+				const load = yield* store.loadSnapshot(runId, secretEnv);
+				assert(load._tag === 'Found');
+				expect(load.snapshot.context).toEqual(context);
+			}).pipe(Effect.provide(TestLayer))
+		);
+	});
+
+	it.effect('keeps the runs of a database from before review runs as ship runs', () =>
+		Effect.gen(function* () {
+			const filename = yield* tempDbFile;
+			const runId = RunId.make('20261117-120000-abcdef');
+			const created = Schema.encodeSync(RunEvent)(
+				RunEvent.cases.RunCreated.make({ at, ...newRun })
+			);
+			// A database as the first migration left it, with one run in it.
+			yield* Effect.gen(function* () {
+				const sql = yield* SqlClient.SqlClient;
+				yield* sql`INSERT INTO runs ${sql.insert({
+					id: runId,
+					project_key: projectKey,
+					cwd: '/repo',
+					plan_dir: '/plans/feature',
+					branch: 'feature',
+					status: 'running',
+					state: 'implement',
+					round: 0,
+					pr_url: null,
+					created_at: 1,
+					updated_at: 1,
+					summary: null
+				})}`;
+				yield* sql`INSERT INTO events ${sql.insert({
+					run_id: runId,
+					seq: 1,
+					type: 'RunCreated',
+					payload: JSON.stringify(created)
+				})}`;
+			}).pipe(
+				Effect.provide(
+					SqliteMigrator.layer({
+						loader: Effect.map(migrations, (all) => all.filter(([id]) => id === 1))
+					}).pipe(Layer.provideMerge(SqliteClient.layer({ filename })))
+				)
+			);
+
+			yield* Effect.gen(function* () {
+				const store = yield* RunStore;
+				expect(yield* store.get(runId)).toMatchObject({
+					kind: 'ship',
+					planDir: '/plans/feature',
+					branch: 'feature',
+					state: 'implement'
+				});
+				expect(tagsOf(yield* store.events(runId))).toEqual(['RunCreated']);
+				const review = yield* store.createReview({
+					projectKey,
+					repoDir: '/repo',
+					prUrl: 'https://github.com/f-elix/ship/pull/7',
+					prNumber: 7,
+					baseSha,
+					headSha: baseSha
+				});
+				expect((yield* store.list()).map((run) => run.kind).toSorted()).toEqual([
+					'review',
+					'ship'
+				]);
+				expect(review.kind).toBe('review');
+			}).pipe(Effect.provide(RunStore.layerFile(filename)));
+		}).pipe(Effect.scoped)
 	);
 
 	it.effect('refuses a database migrated by a newer ship', () =>

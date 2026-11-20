@@ -6,6 +6,7 @@ import {
 	AgentOutputMismatch,
 	AgentSdkError,
 	BUILTIN_BRIEFS_DIR,
+	ChangeIntent,
 	ClefError,
 	FindingId,
 	reviewChanges,
@@ -75,8 +76,10 @@ const context = { cwd: '/repo', env: { PATH: '/bin' } };
 const subject: ReviewSubject = {
 	diff: 'diff --git a/src/a.ts b/src/a.ts\n+const a = 1;',
 	commits: [{ sha: fakeSha(1), subject: 'Add a' }],
-	specPath: '/plans/feature/spec.md',
-	planPath: '/plans/feature/implementation-plan.md',
+	intent: ChangeIntent.Plan({
+		specPath: '/plans/feature/spec.md',
+		planPath: '/plans/feature/implementation-plan.md'
+	}),
 	conventions: { dir: '/conventions', topics: [] }
 };
 
@@ -340,8 +343,40 @@ describe('Reviewers.review', () => {
 				expect(standards?.prompt).toContain('The standards brief.');
 				expect(standards?.prompt).toContain(subject.diff);
 				expect(standards?.prompt).toContain('Add a');
-				expect(standards?.prompt).toContain(subject.specPath);
+				expect(standards?.prompt).toContain('/plans/feature/spec.md');
 				expect(standards?.prompt).not.toContain('The security brief.');
+			})
+		)
+	);
+
+	it.effect('checks a PR against its description, without reading any plan', () =>
+		withReviewers(() =>
+			Effect.gen(function* () {
+				const fake = yield* AgentFake;
+				yield* fake.script(
+					{ step: 'review', label: 'standards' },
+					{ output: { findings: [] }, costUsd: 0.1 }
+				);
+
+				yield* (yield* Reviewers).review({
+					...subject,
+					intent: ChangeIntent.Description({
+						title: 'Cache the config',
+						body: 'Reads the config once per run.'
+					}),
+					reviewers: [def('standards', { always: true })],
+					model: 'sonnet',
+					timeoutMs: 60_000,
+					context,
+					onReport: () => Effect.void
+				});
+
+				const [call] = yield* fake.calls;
+				expect(call?.additionalDirectories).toEqual(['/conventions']);
+				expect(call?.prompt).toContain('pull request description');
+				expect(call?.prompt).toContain('Title: Cache the config');
+				expect(call?.prompt).toContain('Reads the config once per run.');
+				expect(call?.prompt).not.toContain('spec.md');
 			})
 		)
 	);

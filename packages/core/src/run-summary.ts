@@ -5,7 +5,7 @@ import type {
 	CheckResult,
 	CheckRound,
 	EscalationReason,
-	Summary,
+	ShipSummary,
 	TerminalRunStatus
 } from './run.ts';
 
@@ -18,9 +18,11 @@ export interface SummaryInput {
 	readonly error: string | null;
 }
 
-type EventOf<Tag extends RunEvent['_tag']> = Extract<RunEvent, { readonly _tag: Tag }>;
+/** The event of `RunEvent` tagged `Tag`. */
+export type EventOf<Tag extends RunEvent['_tag']> = Extract<RunEvent, { readonly _tag: Tag }>;
 
-const ofTag = <Tag extends RunEvent['_tag']>(
+/** The events tagged `tag`, in log order. */
+export const ofTag = <Tag extends RunEvent['_tag']>(
 	events: ReadonlyArray<RunEvent>,
 	tag: Tag
 ): ReadonlyArray<EventOf<Tag>> =>
@@ -88,8 +90,8 @@ const checkRounds = (events: ReadonlyArray<RunEvent>): ReadonlyArray<CheckRound>
 		}));
 };
 
-/** The run's summary, built from its event log. */
-export const buildSummary = (input: SummaryInput): Summary => {
+/** A `ship run`'s summary, built from its event log. */
+export const buildSummary = (input: SummaryInput): ShipSummary => {
 	const { events } = input;
 	const verified = new Map<FindingId, VerifiedFinding>(
 		ofTag(events, 'FindingsVerified').flatMap((event) =>
@@ -104,6 +106,7 @@ export const buildSummary = (input: SummaryInput): Summary => {
 	const triaged = ofTag(events, 'FindingsTriaged').at(-1);
 	const escalation: EscalationReason | null = ofTag(events, 'Escalated').at(-1)?.reason ?? null;
 	return {
+		kind: 'ship',
 		runId: input.runId,
 		status: input.status,
 		prUrl: ofTag(events, 'PrOpened').at(-1)?.url ?? null,

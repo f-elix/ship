@@ -29,7 +29,9 @@ export const shipPaths = (home: string) => {
 		daemonLog: `${home}/daemon.log`,
 		runs,
 		run,
-		transcripts: (runId: RunId) => `${run(runId)}/transcripts`
+		transcripts: (runId: RunId) => `${run(runId)}/transcripts`,
+		/** The detached worktree a `ship review` run reviews the PR in. */
+		reviewWorktree: (runId: RunId) => `${home}/reviews/${runId}`
 	};
 };
 export type ShipPaths = ReturnType<typeof shipPaths>;

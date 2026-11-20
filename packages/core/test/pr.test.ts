@@ -5,7 +5,9 @@ import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import {
 	FindingId,
 	Gh,
+	parsePrUrl,
 	Pr,
+	prRepoKey,
 	renderPrBody,
 	type OpenPrInput,
 	type VerifiedFinding
@@ -206,7 +208,46 @@ describe('renderPrBody', () => {
 	});
 });
 
+describe('parsePrUrl and prRepoKey', () => {
+	it('reads a PR URL, with or without a trailing path, query or fragment', () => {
+		const parts = { host: 'github.com', owner: 'f-elix', name: 'ship', number: 3 };
+		for (const url of [
+			'https://github.com/f-elix/ship/pull/3',
+			'https://GitHub.com/f-elix/ship/pull/3/files',
+			'https://github.com/f-elix/ship/pull/3#discussion_r1',
+			'https://github.com/f-elix/ship/pull/3?w=1',
+			' https://github.com/f-elix/ship/pull/3\n'
+		]) {
+			expect(parsePrUrl(url), url).toEqual(parts);
+			expect(prRepoKey(url), url).toBe('github.com/f-elix/ship');
+		}
+	});
+
+	it('keys a PR of another repository or host apart from the project', () => {
+		expect(prRepoKey('https://github.com/someone/ship/pull/3')).toBe('github.com/someone/ship');
+		expect(prRepoKey('https://ghe.example.com/f-elix/ship/pull/3')).toBe(
+			'ghe.example.com/f-elix/ship'
+		);
+	});
+
+	it('refuses URLs that are not a pull request', () => {
+		for (const url of [
+			'https://github.com/f-elix/ship/issues/3',
+			'https://github.com/f-elix/ship/pull/',
+			'https://github.com/f-elix/ship',
+			'https://github.com/f-elix/ship/pull/3x',
+			'3',
+			'git@github.com:f-elix/ship.git'
+		]) {
+			expect(parsePrUrl(url), url).toBeNull();
+			expect(prRepoKey(url), url).toBeNull();
+		}
+	});
+});
+
 describe('Gh', () => {
+	const HEAD_SHA = fakeSha(0xc);
+
 	/** A stub `gh` that logs its argv and stdin, and answers like the real one. */
 	const stubGh = Effect.gen(function* () {
 		const dir = yield* tempDir;
@@ -219,6 +260,8 @@ case "$1 $2" in
   "pr create") cat > "${dir}/stdin.log"; echo "Creating pull request"; echo "https://github.com/o/r/pull/8" ;;
   "pr edit") cat > "${dir}/stdin.log" ;;
   "pr ready") ;;
+  "pr view") echo '{"baseRefName":"main","body":"Adds a.","headRefOid":"${HEAD_SHA}","number":7,"title":"Add a","url":"https://github.com/o/r/pull/7"}' ;;
+  "api --hostname") cat > "${dir}/stdin.log"; echo '{"id":80,"node_id":"PRR_kwDOAbc","user":{"login":"octocat","id":1},"body":"Body.","state":"CHANGES_REQUESTED","html_url":"https://github.com/o/r/pull/7#pullrequestreview-80","pull_request_url":"https://api.github.com/repos/o/r/pulls/7","author_association":"OWNER","_links":{"html":{"href":"https://github.com/o/r/pull/7#pullrequestreview-80"}},"submitted_at":"2026-11-19T12:00:00Z","commit_id":"${HEAD_SHA}"}' ;;
   *) echo "unknown" >&2; exit 1 ;;
 esac
 `
@@ -258,6 +301,68 @@ esac
 				'pr edit https://github.com/o/r/pull/8 --title Add b --body-file -',
 				'pr ready https://github.com/o/r/pull/8 --undo'
 			]);
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('views a PR by number or URL, decoding what gh pr view prints', () =>
+		Effect.gen(function* () {
+			const { repo, read } = yield* stubGh;
+			const gh = yield* Gh;
+			const expected = {
+				number: 7,
+				url: 'https://github.com/o/r/pull/7',
+				title: 'Add a',
+				body: 'Adds a.',
+				baseRef: 'main',
+				headSha: HEAD_SHA
+			};
+			expect(yield* gh.viewPr(repo, '7')).toEqual(expected);
+			expect(yield* gh.viewPr(repo, 'https://github.com/o/r/pull/7')).toEqual(expected);
+			expect(read('argv.log').trim().split('\n')).toEqual([
+				'pr view 7 --json number,url,title,body,baseRefName,headRefOid',
+				'pr view https://github.com/o/r/pull/7 --json number,url,title,body,baseRefName,headRefOid'
+			]);
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('posts a review through the API of the PR host, comments on the new side', () =>
+		Effect.gen(function* () {
+			const { repo, read } = yield* stubGh;
+			const gh = yield* Gh;
+			const url = yield* gh.submitReview(repo, {
+				prUrl: 'https://github.example.com/o/r/pull/7',
+				commitId: HEAD_SHA,
+				event: 'REQUEST_CHANGES',
+				body: 'Body.',
+				comments: [{ path: 'src/a.ts', line: 3, body: 'Broken.' }]
+			});
+			expect(url).toBe('https://github.com/o/r/pull/7#pullrequestreview-80');
+			expect(read('argv.log').trim()).toBe(
+				'api --hostname github.example.com --method POST repos/o/r/pulls/7/reviews --input -'
+			);
+			expect(JSON.parse(read('stdin.log'))).toEqual({
+				commit_id: HEAD_SHA,
+				event: 'REQUEST_CHANGES',
+				body: 'Body.',
+				comments: [{ path: 'src/a.ts', line: 3, body: 'Broken.', side: 'RIGHT' }]
+			});
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('fails with GhError when gh pr view prints something other than a PR', () =>
+		Effect.gen(function* () {
+			const dir = yield* tempDir;
+			writeFileSync(
+				`${dir}/gh`,
+				`#!/bin/sh\necho '{"baseRefName":"main","body":"","headRefOid":"${HEAD_SHA}","number":7,"title":"Issue","url":"https://github.com/o/r/issues/7"}'\n`
+			);
+			chmodSync(`${dir}/gh`, 0o755);
+			const gh = yield* Gh;
+			const failed = yield* Effect.flip(
+				gh.viewPr({ cwd: dir, env: { PATH: `${dir}:/bin` } }, '7')
+			);
+			expect(failed).toMatchObject({ _tag: 'GhError', exitCode: 0 });
+			expect(failed.stderr).toMatch(/a pull request URL/u);
 		}).pipe(Effect.scoped, Effect.provide(GhLive))
 	);
 

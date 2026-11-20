@@ -21,6 +21,6 @@ Check the change's dependency edits.
 - Need: a new package for something the standard library or an existing dependency already does; a package added but never imported; one removed but still imported.
 - Risk: an abandoned, very new or typo-squatted name, an install script, or a large transitive footprint for a small use. You cannot query a registry; flag only what the name, version and lockfile show.
 
-A manifest out of sync with its lockfile, or a runtime import missing from runtime dependencies, is `must-fix`. A package the plan did not call for is `tradeoff`: say what it costs.
+A manifest out of sync with its lockfile, or a runtime import missing from runtime dependencies, is `must-fix`. A package the stated intent (the plan, or the PR description) did not call for is `tradeoff`: say what it costs.
 
 Out of scope: how the dependency is used in code (other reviewers), whether a new dependency changes the architecture (design).

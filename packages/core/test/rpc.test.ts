@@ -9,6 +9,7 @@ const notUsed = () => Effect.die('not used in this test');
 /** Stub handlers: `run` always fails its precondition, `events` replays two events. */
 const Handlers = ShipRpcs.toLayer({
 	handshake: notUsed,
+	review: notUsed,
 	run: () => Effect.fail(new PreconditionFailed({ reason: 'on-default-branch', detail: 'main' })),
 	resume: notUsed,
 	cancel: notUsed,

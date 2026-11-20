@@ -31,7 +31,15 @@ import {
 	type ClefPickInput,
 	type ClefShape
 } from './clef.ts';
-import { Gh, GhError, type CreatePrInput, type GhShape } from './gh.ts';
+import {
+	Gh,
+	GhError,
+	parsePrUrl,
+	prRepoKey,
+	type CreatePrInput,
+	type GhShape,
+	type SubmitReviewInput
+} from './gh.ts';
 import {
 	Git,
 	GitError,
@@ -72,6 +80,12 @@ export interface FakeGitState {
 	readonly addedLines: Readonly<Record<string, ReadonlyArray<string>>>;
 	readonly pushes: ReadonlyArray<string>;
 	readonly excluded: ReadonlyArray<string>;
+	/** What `fetchRef` resolves each ref to; an unlisted ref resolves to `headSha`. */
+	readonly remoteRefs: Readonly<Record<string, GitSha>>;
+	/** Every ref fetched, in order. */
+	readonly fetches: ReadonlyArray<string>;
+	/** The worktrees added and not removed yet. */
+	readonly worktrees: ReadonlyArray<{ readonly path: string; readonly sha: GitSha }>;
 	/** Methods that fail, with their error, until removed. */
 	readonly failures: Partial<Record<keyof GitShape, GitError>>;
 }
@@ -113,6 +127,9 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 			addedLines: {},
 			pushes: [],
 			excluded: [],
+			remoteRefs: {},
+			fetches: [],
+			worktrees: [],
 			failures: {},
 			...initial
 		});
@@ -192,7 +209,30 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 					if (current.excluded.includes(path)) return false;
 					yield* Ref.set(state, { ...current, excluded: [...current.excluded, path] });
 					return true;
-				})
+				}),
+			fetchRef: (_repo, ref) =>
+				Effect.gen(function* () {
+					const current = yield* read('fetchRef');
+					yield* Ref.set(state, { ...current, fetches: [...current.fetches, ref] });
+					return current.remoteRefs[ref] ?? current.headSha;
+				}),
+			mergeBase: () => Effect.map(read('mergeBase'), (s) => s.baseSha),
+			addWorktree: (_repo, worktree) =>
+				Effect.flatMap(read('addWorktree'), (current) =>
+					current.worktrees.some((added) => added.path === worktree.path)
+						? Effect.void
+						: Ref.set(state, {
+								...current,
+								worktrees: [...current.worktrees, worktree]
+							})
+				),
+			removeWorktree: (_repo, path) =>
+				Effect.flatMap(read('removeWorktree'), (current) =>
+					Ref.set(state, {
+						...current,
+						worktrees: current.worktrees.filter((added) => added.path !== path)
+					})
+				)
 		};
 
 		const fake: GitFakeShape = {
@@ -445,11 +485,20 @@ export class AgentFake extends Context.Service<AgentFake, AgentFakeShape>()(
 export interface FakePr extends CreatePrInput {
 	readonly url: string;
 	readonly number: number;
+	/** The head `viewPr` reports; `GitFake`'s default base sha when absent. */
+	readonly headSha?: GitSha;
+}
+
+/** A review posted through the fake, with the URL it got. */
+export interface FakeReview extends SubmitReviewInput {
+	readonly url: string;
 }
 
 export interface GhFakeShape {
 	/** Every PR ever opened, open or not, oldest first. */
 	readonly prs: Effect.Effect<ReadonlyArray<FakePr>>;
+	/** Every review posted, oldest first. */
+	readonly reviews: Effect.Effect<ReadonlyArray<FakeReview>>;
 	/** Adds an open PR, as if a previous attempt had opened it. */
 	readonly addPr: (pr: Omit<FakePr, 'url' | 'number'>) => Effect.Effect<FakePr>;
 	/** Makes `method` fail with a `GhError` carrying `stderr`, until cleared with `succeed`. */
@@ -462,6 +511,7 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 	static readonly layer: Layer.Layer<Gh | GhFake> = Layer.effectContext(
 		Effect.gen(function* () {
 			const prs = yield* Ref.make<ReadonlyArray<FakePr>>([]);
+			const reviews = yield* Ref.make<ReadonlyArray<FakeReview>>([]);
 			const failures = yield* Ref.make<Partial<Record<keyof GhShape, GhError>>>({});
 
 			const guard = (method: keyof GhShape) =>
@@ -503,10 +553,48 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 				markDraft: (_repo, url) =>
 					Effect.andThen(guard('markDraft'), () =>
 						update(url, (pr) => ({ ...pr, draft: true }))
+					),
+				viewPr: (_repo, ref) =>
+					Effect.andThen(guard('viewPr'), () =>
+						Effect.flatMap(Ref.get(prs), (current) => {
+							// Like `gh`, a URL names a PR of its own repository; a number, one of this repo's.
+							const asUrl = parsePrUrl(ref);
+							const pr = current.find((candidate) =>
+								asUrl === null
+									? candidate.number === Number(ref)
+									: candidate.number === asUrl.number &&
+										prRepoKey(candidate.url) === prRepoKey(ref)
+							);
+							return pr === undefined
+								? Effect.fail(
+										new GhError({
+											args: ['pr', 'view', ref],
+											cwd: '/repo',
+											exitCode: 1,
+											stderr: `no pull requests found for ${ref}`
+										})
+									)
+								: Effect.succeed({
+										number: pr.number,
+										url: pr.url,
+										title: pr.title,
+										body: pr.body,
+										baseRef: pr.base,
+										headSha: pr.headSha ?? DEFAULT_BASE
+									});
+						})
+					),
+				submitReview: (_repo, input) =>
+					Effect.andThen(guard('submitReview'), () =>
+						Ref.modify(reviews, (current): [string, ReadonlyArray<FakeReview>] => {
+							const url = `${input.prUrl}#pullrequestreview-${current.length + 1}`;
+							return [url, [...current, { ...input, url }]];
+						})
 					)
 			};
 			const fake: GhFakeShape = {
 				prs: Ref.get(prs),
+				reviews: Ref.get(reviews),
 				addPr: (pr) => add(pr),
 				fail: (method, stderr) =>
 					Ref.update(failures, (current) => ({

@@ -2,7 +2,7 @@ import { NodeRuntime, NodeServices } from '@effect/platform-node';
 import { Agent, Clef, Gh, shipPaths } from '@ship/core';
 import { Effect, FileSystem, Layer, Logger } from 'effect';
 import { serveDaemon } from './daemon.ts';
-import { shipHomeDir } from './home.ts';
+import { processEnv, shipHomeDir } from './home.ts';
 
 /** The real Agent SDK, `gh` and Cloudflare Clef. */
 export const productionServices: Layer.Layer<Agent | Gh | Clef> = Layer.mergeAll(
@@ -27,7 +27,12 @@ export const runDaemon = (version: string): void =>
 			]);
 			// Another failure is reported by `runMain` on stdout, which the CLI, like stderr,
 			// points at the same log file.
-			yield* serveDaemon({ home, version, services: productionServices }).pipe(
+			yield* serveDaemon({
+				home,
+				version,
+				services: productionServices,
+				env: processEnv()
+			}).pipe(
 				// Two commands auto-started a daemon at once and the other one won: not an error.
 				Effect.catchTag('DaemonAlreadyRunning', (error) => Effect.logInfo(error.message)),
 				Effect.provide(logger)

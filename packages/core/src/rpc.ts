@@ -11,7 +11,7 @@ import {
 	Timestamp,
 	Url
 } from './primitives.ts';
-import { RunStatus, Summary } from './run.ts';
+import { ReviewSummary, RunStatus, ShipSummary } from './run.ts';
 
 // --- Errors ---
 
@@ -27,7 +27,9 @@ export const PreconditionReason = Schema.Literals([
 	'missing-plan-files',
 	'dirty-tree',
 	'unknown-project-config',
-	'invalid-config'
+	'invalid-config',
+	'pr-not-found',
+	'pr-other-repo'
 ]);
 export type PreconditionReason = typeof PreconditionReason.Type;
 
@@ -84,23 +86,51 @@ export class VersionMismatch extends Schema.TaggedError<VersionMismatch>()('Vers
 
 // --- Payloads and results ---
 
-export const RunInfo = Schema.Struct({
+const runInfoFields = {
 	runId: RunId,
 	projectKey: ProjectKey,
+	/**
+	 * The directory the run was started from: where a `ship run` works, and the checkout a
+	 * `ship review` run adds its worktree to.
+	 */
 	cwd: AbsolutePath,
-	planDir: AbsolutePath,
-	branch: Schema.NonEmptyString,
 	status: RunStatus,
 	/** Machine state value as a dotted path, e.g. `checks.waiting`. */
 	state: Schema.String,
 	round: NonNegativeInt,
-	prUrl: Schema.NullOr(Url),
 	createdAt: Timestamp,
-	updatedAt: Timestamp,
+	updatedAt: Timestamp
+};
+
+/** A `ship run`: it implements a plan on a branch and opens a PR. */
+export const ShipRunInfo = Schema.Struct({
+	...runInfoFields,
+	kind: Schema.Literal('ship'),
+	planDir: AbsolutePath,
+	branch: Schema.NonEmptyString,
+	/** The PR the run opened; `null` until it opens one. */
+	prUrl: Schema.NullOr(Url),
 	/** `null` until the run reaches a terminal status. */
-	summary: Schema.NullOr(Summary)
+	summary: Schema.NullOr(ShipSummary)
 });
-export interface RunInfo extends Schema.Schema.Type<typeof RunInfo> {}
+export interface ShipRunInfo extends Schema.Schema.Type<typeof ShipRunInfo> {}
+
+/** A `ship review` run: it reviews a PR and may post a review on it. */
+export const ReviewRunInfo = Schema.Struct({
+	...runInfoFields,
+	kind: Schema.Literal('review'),
+	/** The reviewed PR. */
+	prUrl: Url,
+	/** The review the run posted; `null` until it posts one. */
+	reviewUrl: Schema.NullOr(Url),
+	/** `null` until the run reaches a terminal status. */
+	summary: Schema.NullOr(ReviewSummary)
+});
+export interface ReviewRunInfo extends Schema.Schema.Type<typeof ReviewRunInfo> {}
+
+/** A run as `status` and `list` report it, by its kind. */
+export const RunInfo = Schema.Union([ShipRunInfo, ReviewRunInfo]);
+export type RunInfo = typeof RunInfo.Type;
 
 const runIdPayload = { runId: RunId };
 
@@ -115,6 +145,22 @@ export class ShipRpcs extends RpcGroup.make(
 	}),
 	Rpc.make('run', {
 		payload: { planDir: AbsolutePath, cwd: AbsolutePath, env: Env },
+		success: Schema.Struct({ runId: RunId }),
+		error: PreconditionFailed
+	}),
+	/**
+	 * Starts a `ship review` run of the GitHub PR `pr` (a number or a PR URL) from `cwd`, a
+	 * clone of the PR's base repository. The PR is resolved and its head fetched before the
+	 * run is created, so a PR that cannot be reviewed never becomes a run. `post` posts the
+	 * findings as one review on the PR.
+	 */
+	Rpc.make('review', {
+		payload: {
+			pr: Schema.NonEmptyString,
+			post: Schema.Boolean,
+			cwd: AbsolutePath,
+			env: Env
+		},
 		success: Schema.Struct({ runId: RunId }),
 		error: PreconditionFailed
 	}),

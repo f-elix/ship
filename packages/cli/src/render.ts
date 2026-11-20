@@ -1,4 +1,12 @@
-import type { RunEvent, RunInfo, RunStatus, Summary, UnknownEvent } from '@ship/core/contract';
+import type {
+	ReviewSummary,
+	RunEvent,
+	RunInfo,
+	RunStatus,
+	ShipSummary,
+	Summary,
+	UnknownEvent
+} from '@ship/core/contract';
 import { DateTime } from 'effect';
 
 export const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
@@ -20,6 +28,8 @@ export const makeEventFormatter = () => {
 		switch (event._tag) {
 			case 'RunCreated':
 				return `run created on ${event.branch} at ${shortSha(event.baseSha)}`;
+			case 'ReviewRunCreated':
+				return `review of ${event.prUrl} created for ${shortSha(event.baseSha)}..${shortSha(event.headSha)}`;
 			case 'StateChanged':
 				return `state ${event.from} -> ${event.to}`;
 			case 'StepStarted':
@@ -61,8 +71,13 @@ export const makeEventFormatter = () => {
 				return `commit ${shortSha(event.sha)} ${firstLine(event.message)}`;
 			case 'PrOpened':
 				return `${event.draft ? 'draft ' : ''}PR opened: ${event.url}`;
-			case 'RunFinished':
-				return `run ${event.summary.status}${event.summary.prUrl === null ? '' : `: ${event.summary.prUrl}`}`;
+			case 'PrReviewPosted':
+				return `review posted (${event.event === 'REQUEST_CHANGES' ? 'changes requested' : 'comment'}, ${plural(event.inline, 'inline comment')}, ${event.inBody} in the body): ${event.url}`;
+			case 'RunFinished': {
+				const url =
+					event.summary.kind === 'review' ? event.summary.reviewUrl : event.summary.prUrl;
+				return `run ${event.summary.status}${url === null ? '' : `: ${url}`}`;
+			}
 			case 'RunInterrupted':
 				return 'run interrupted';
 			case 'RunResumed':
@@ -101,59 +116,87 @@ export const table = (rows: ReadonlyArray<ReadonlyArray<string>>): string => {
 
 const when = (at: DateTime.Utc) => DateTime.formatIso(at).slice(0, 19).replace('T', ' ');
 
+/** What a run works on: a `ship run`'s branch, or the PR a review run reviews. */
+const subject = (run: RunInfo): string => (run.kind === 'review' ? run.prUrl : run.branch);
+
+/** What a run produced: the PR a `ship run` opened, or the review a review run posted. */
+const output = (run: RunInfo): string | null => (run.kind === 'review' ? run.reviewUrl : run.prUrl);
+
 /** One row per run, most recent first, as the daemon lists them. */
 export const runTable = (runs: ReadonlyArray<RunInfo>): string =>
 	table([
-		['RUN', 'STATUS', 'STATE', 'BRANCH', 'UPDATED', 'PR'],
+		['RUN', 'KIND', 'STATUS', 'STATE', 'SUBJECT', 'UPDATED', 'PR'],
 		...runs.map((run) => [
 			run.runId,
+			run.kind,
 			run.status,
 			run.state,
-			run.branch,
+			subject(run),
 			when(run.updatedAt),
-			run.prUrl ?? '-'
+			output(run) ?? '-'
 		])
 	]);
 
-const summaryLines = (summary: Summary): Array<string> => {
-	const lines = [`cost: ${usd(summary.costUsd)}`, `review rounds: ${summary.rounds}`];
-	if (summary.escalationReason !== null) lines.push(`escalated: ${summary.escalationReason}`);
-	if (summary.error !== null) lines.push(`error: ${summary.error}`);
-	const findings = (label: string, list: Summary['nits']) => {
-		if (list.length === 0) return;
-		lines.push(`${label}:`);
-		for (const finding of list) {
-			lines.push(
-				`  ${finding.file}${finding.line === undefined ? '' : `:${finding.line}`} ${finding.claim}`
-			);
-		}
-	};
-	findings('unresolved must-fix', summary.unresolvedMustFix);
-	findings('tradeoffs', summary.tradeoffs);
-	findings('unresolved nits', summary.nits);
-	return lines;
-};
+/** `label:` and one line per finding; nothing when there are none. */
+const findingLines = (label: string, list: Summary['nits']): Array<string> =>
+	list.length === 0
+		? []
+		: [
+				`${label}:`,
+				...list.map(
+					(finding) =>
+						`  ${finding.file}${finding.line === undefined ? '' : `:${finding.line}`} ${finding.claim}`
+				)
+			];
+
+const shipSummaryLines = (summary: ShipSummary): Array<string> => [
+	`cost: ${usd(summary.costUsd)}`,
+	`review rounds: ${summary.rounds}`,
+	...(summary.escalationReason === null ? [] : [`escalated: ${summary.escalationReason}`]),
+	...(summary.error === null ? [] : [`error: ${summary.error}`]),
+	...findingLines('unresolved must-fix', summary.unresolvedMustFix),
+	...findingLines('tradeoffs', summary.tradeoffs),
+	...findingLines('unresolved nits', summary.nits)
+];
+
+const reviewSummaryLines = (summary: ReviewSummary): Array<string> => [
+	`cost: ${usd(summary.costUsd)}`,
+	...(summary.error === null ? [] : [`error: ${summary.error}`]),
+	...findingLines('must-fix', summary.mustFix),
+	...findingLines('tradeoffs', summary.tradeoffs),
+	...findingLines('nits', summary.nits)
+];
 
 /** A run's details for `ship status <id>`. */
 export const runDetails = (run: RunInfo): string =>
 	[
 		`run: ${run.runId}`,
+		`kind: ${run.kind}`,
 		`status: ${run.status}`,
 		`state: ${run.state}`,
 		`project: ${run.projectKey}`,
-		`branch: ${run.branch}`,
 		`cwd: ${run.cwd}`,
-		`plan: ${run.planDir}`,
-		`round: ${run.round}`,
-		`pr: ${run.prUrl ?? '-'}`,
+		...(run.kind === 'review'
+			? [`pr: ${run.prUrl}`, `review: ${run.reviewUrl ?? '-'}`]
+			: [
+					`branch: ${run.branch}`,
+					`plan: ${run.planDir}`,
+					`round: ${run.round}`,
+					`pr: ${run.prUrl ?? '-'}`
+				]),
 		`created: ${when(run.createdAt)}`,
 		`updated: ${when(run.updatedAt)}`,
-		...(run.summary === null ? [] : summaryLines(run.summary))
+		...(run.summary === null
+			? []
+			: run.summary.kind === 'review'
+				? reviewSummaryLines(run.summary)
+				: shipSummaryLines(run.summary))
 	].join('\n');
 
 /**
- * The exit code of `ship run` and `ship resume` for the status the run ended with: 0 done,
- * 2 escalated (a draft PR is up), 1 otherwise. A run still active when its event stream
+ * The exit code for the status a run ended with: 0 done, 2 escalated (a draft PR is
+ * up), 1 otherwise. A review run that is done exits by its findings instead; see
+ * {@link exitCodeForSummary}. A run still active when its event stream
  * ended did not end at all, so that is 1 too.
  */
 export const exitCodeFor = (status: RunStatus): number => {
@@ -172,8 +215,20 @@ export const exitCodeFor = (status: RunStatus): number => {
 };
 
 /**
+ * The exit code for the summary a run ended with. A `ship review` run that is done exits 2
+ * when it verified must-fix findings and 0 otherwise; anything else exits with the code
+ * {@link exitCodeFor} gives its status.
+ */
+export const exitCodeForSummary = (summary: Summary): number =>
+	summary.kind === 'review' && summary.status === 'done'
+		? summary.mustFix.length > 0
+			? 2
+			: 0
+		: exitCodeFor(summary.status);
+
+/**
  * Exit code when Ctrl-C (or SIGTERM) ends a command: 130, the shell convention for a command
- * ended by SIGINT, distinct from the run outcomes 0, 1 and 2. `ship run` and `ship resume`
- * detach from a run that already started, so it keeps going.
+ * ended by SIGINT, distinct from the run outcomes 0, 1 and 2. `ship run`, `ship review`
+ * and `ship resume` detach from a run that already started, so it keeps going.
  */
 export const DETACHED_EXIT_CODE = 130;

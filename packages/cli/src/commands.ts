@@ -28,7 +28,13 @@ import {
 import { setExitCode } from './exit-code.ts';
 import { init } from './init.ts';
 import { Invocation } from './invocation.ts';
-import { exitCodeFor, makeEventFormatter, runDetails, runTable } from './render.ts';
+import {
+	exitCodeFor,
+	exitCodeForSummary,
+	makeEventFormatter,
+	runDetails,
+	runTable
+} from './render.ts';
 
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 const encodeSummary = Schema.encodeSync(Summary);
@@ -41,7 +47,7 @@ const runNotFound = (error: RunNotFound) => cliError(`no run ${error.runId}`);
 const invalidStatus = (action: string) => (error: InvalidRunStatus) =>
 	cliError(`cannot ${action} run ${error.runId}: it is ${error.status}`);
 
-/** A precondition `ship run` checks failed: nothing was started. */
+/** A precondition `ship run` or `ship review` checks failed: nothing was started. */
 export const preconditionMessage = (error: PreconditionFailed) =>
 	`cannot start the run (${error.reason}): ${error.detail}`;
 
@@ -85,7 +91,7 @@ const detachedMessage = (runId: RunId) =>
 
 /**
  * Streams the run's events from `fromSeq` to stderr until the run ends or is interrupted,
- * then prints its summary on stdout and sets the exit code from its status. Interrupting
+ * then prints its summary on stdout and sets the exit code from it. Interrupting
  * this (Ctrl-C) detaches: the run keeps going, and how to get back to it goes to stderr.
  */
 const follow = (
@@ -116,21 +122,41 @@ const follow = (
 					return yield* setExitCode(exitCodeFor('interrupted'));
 				case 'RunFinished':
 					yield* Console.log(json(encodeSummary(last.summary)));
-					return yield* setExitCode(exitCodeFor(last.summary.status));
+					return yield* setExitCode(exitCodeForSummary(last.summary));
 			}
 		}
 		// The replay of a run that was not running ended without such an event.
 		const info = yield* rpc.status({ runId });
 		if (info.summary === null) {
 			yield* Console.error(`ship: run ${runId} is ${info.status}`);
-		} else {
-			yield* Console.log(json(encodeSummary(info.summary)));
+			return yield* setExitCode(exitCodeFor(info.status));
 		}
-		yield* setExitCode(exitCodeFor(info.status));
+		yield* Console.log(json(encodeSummary(info.summary)));
+		yield* setExitCode(exitCodeForSummary(info.summary));
 	}).pipe(
 		Effect.catchTag('RunNotFound', (error) => Effect.fail(runNotFound(error))),
 		Effect.onInterrupt(() => Console.error(detachedMessage(runId)))
 	);
+
+/**
+ * Starts a run with `create` and follows it like {@link follow}. A failed precondition
+ * fails the command: nothing was started.
+ */
+const startAndFollow = (connection: Connection, create: ReturnType<Rpc['run' | 'review']>) =>
+	Effect.gen(function* () {
+		const { runId } = yield* create.pipe(
+			Effect.catchTag('PreconditionFailed', (error) =>
+				Effect.fail(cliError(preconditionMessage(error)))
+			),
+			Effect.onInterrupt(() =>
+				Console.error(
+					'ship: interrupted before the daemon answered; `ship status` shows the run if it started'
+				)
+			)
+		);
+		yield* Console.error(`ship: run ${runId} started`);
+		yield* follow(connection, runId, 1);
+	});
 
 const run = Command.make(
 	'run',
@@ -142,28 +168,45 @@ const run = Command.make(
 	Effect.fn('ship.run')(function* ({ planDir }) {
 		const invocation = yield* Invocation;
 		const connection = yield* connectDaemon();
-		const { runId } = yield* connection.rpc
-			.run({
+		yield* startAndFollow(
+			connection,
+			connection.rpc.run({
 				planDir: resolve(invocation.cwd, planDir),
 				cwd: invocation.cwd,
 				env: invocation.env
 			})
-			.pipe(
-				Effect.catchTag('PreconditionFailed', (error) =>
-					Effect.fail(cliError(preconditionMessage(error)))
-				),
-				Effect.onInterrupt(() =>
-					Console.error(
-						'ship: interrupted before the daemon answered; `ship status` shows the run if it started'
-					)
-				)
-			);
-		yield* Console.error(`ship: run ${runId} started`);
-		yield* follow(connection, runId, 1);
+		);
 	}, Effect.scoped)
 ).pipe(
 	Command.withDescription(
 		'Start a run on the current branch: implement the plan, run checks, review, fix and open a PR. Events stream to stderr; the summary JSON goes to stdout. Exit code 0 done, 2 escalated, 1 failed, cancelled or interrupted, 130 interrupted by Ctrl-C (a started run keeps going).'
+	)
+);
+
+const review = Command.make(
+	'review',
+	{
+		pr: Argument.String('pr').pipe(
+			Argument.withDescription('The pull request: its number or its GitHub URL')
+		),
+		post: Flag.Boolean('post').pipe(
+			Flag.withDescription(
+				'Post the findings as one review on the PR: changes requested when there are must-fix findings, a comment otherwise. Nothing is posted when there are no findings'
+			),
+			Flag.withDefault(false)
+		)
+	},
+	Effect.fn('ship.review')(function* ({ pr, post }) {
+		const invocation = yield* Invocation;
+		const connection = yield* connectDaemon();
+		yield* startAndFollow(
+			connection,
+			connection.rpc.review({ pr, post, cwd: invocation.cwd, env: invocation.env })
+		);
+	}, Effect.scoped)
+).pipe(
+	Command.withDescription(
+		"Review a pull request of the current repository: one round of ship's reviewers and verifier over its diff, in a worktree at its head, checked against its title and description. Events stream to stderr; the summary JSON goes to stdout. Exit code 0 no must-fix findings, 2 must-fix findings, 1 failed, cancelled or interrupted, 130 interrupted by Ctrl-C (a started run keeps going)."
 	)
 );
 
@@ -197,7 +240,7 @@ const resume = Command.make(
 	}, Effect.scoped)
 ).pipe(
 	Command.withDescription(
-		'Continue an interrupted run with the current env, streaming and exiting like `ship run`.'
+		'Continue an interrupted run with the current env, streaming and exiting like the command that started it: `ship run` or `ship review`.'
 	)
 );
 
@@ -345,5 +388,5 @@ export const ship = Command.make('ship').pipe(
 	Command.withDescription(
 		'Run the scripted part of a coding-agent workflow: implement, checks, review, fix, PR.'
 	),
-	Command.withSubcommands([run, resume, cancel, status, list, logs, daemon, init, auth])
+	Command.withSubcommands([run, review, resume, cancel, status, list, logs, daemon, init, auth])
 );
