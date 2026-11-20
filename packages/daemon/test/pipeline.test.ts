@@ -73,7 +73,9 @@ interface Save {
 	readonly events: ReadonlyArray<AppendableEvent>;
 }
 
-type OtherKind = { readonly kind: 'review' | 'fix' | 'recheck' };
+type OtherKind = {
+	readonly kind: 'review' | 'fix' | 'recheck' | 'implement' | 'checks' | 'pr' | 'post';
+};
 
 /** `value`, which must come from a `ship run` rather than a run of another kind. */
 const shipRun = <T extends { readonly kind?: 'ship' | OtherKind['kind'] }>(

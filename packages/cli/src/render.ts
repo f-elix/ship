@@ -1,5 +1,6 @@
 import type {
 	FixSummary,
+	PrimitiveSummary,
 	RecheckSummary,
 	ReviewSummary,
 	RunEvent,
@@ -39,6 +40,8 @@ export const makeEventFormatter = () => {
 				return `review of ${event.prUrl} created for ${shortSha(event.baseSha)}..${shortSha(event.headSha)}`;
 			case 'PrRunCreated':
 				return `${event.kind} of ${plural(event.findings.length, 'finding')} on ${event.prUrl} created at ${shortSha(event.headSha)}${ignoredNote(event.ignoredThreads)}`;
+			case 'PrimitiveRunCreated':
+				return `${event.kind} created${event.branch === null ? '' : ` on ${event.branch}`} at ${shortSha(event.baseSha)}${event.review === null ? '' : ` for review ${event.review}`}`;
 			case 'StateChanged':
 				return `state ${event.from} -> ${event.to}`;
 			case 'StepStarted':
@@ -93,8 +96,7 @@ export const makeEventFormatter = () => {
 			case 'BranchPushed':
 				return `pushed ${shortSha(event.sha)} to ${event.ref}`;
 			case 'RunFinished': {
-				const url =
-					event.summary.kind === 'review' ? event.summary.reviewUrl : event.summary.prUrl;
+				const url = summaryUrl(event.summary);
 				return `run ${event.summary.status}${url === null ? '' : `: ${url}`}`;
 			}
 			case 'RunInterrupted':
@@ -135,8 +137,37 @@ export const table = (rows: ReadonlyArray<ReadonlyArray<string>>): string => {
 
 const when = (at: DateTime.Utc) => DateTime.formatIso(at).slice(0, 19).replace('T', ' ');
 
-/** What a run works on: a `ship run`'s branch, or the PR any other run is about. */
-const subject = (run: RunInfo): string => (run.kind === 'ship' ? run.branch : run.prUrl);
+/** The URL a finished run points to: the review it posted, or its PR. */
+const summaryUrl = (summary: Summary): string | null => {
+	switch (summary.kind) {
+		case 'review':
+			return summary.reviewUrl;
+		case 'implement':
+		case 'checks':
+		case 'pr':
+		case 'post':
+			return summary.reviewUrl ?? summary.prUrl;
+		default:
+			return summary.prUrl;
+	}
+};
+
+/**
+ * What a run works on: a `ship run`'s branch, the PR a review, fix or recheck is about,
+ * the branch of `ship implement`, `ship checks` and `ship pr`, or the review `ship post` posts.
+ */
+const subject = (run: RunInfo): string => {
+	switch (run.kind) {
+		case 'ship':
+			return run.branch;
+		case 'review':
+		case 'fix':
+		case 'recheck':
+			return run.prUrl;
+		default:
+			return run.branch ?? run.review ?? '-';
+	}
+};
 
 /**
  * What a run produced: the PR a `ship run` opened, or the review a review run posted.
@@ -151,6 +182,8 @@ const output = (run: RunInfo): string | null => {
 		case 'fix':
 		case 'recheck':
 			return null;
+		default:
+			return run.url;
 	}
 };
 
@@ -229,6 +262,22 @@ const recheckSummaryLines = (summary: RecheckSummary): Array<string> => {
 	];
 };
 
+const primitiveSummaryLines = (summary: PrimitiveSummary): Array<string> => {
+	const last = summary.checks.at(-1);
+	return [
+		`cost: ${usd(summary.costUsd)}`,
+		...(summary.error === null ? [] : [`error: ${summary.error}`]),
+		`commits: ${summary.commits.length === 0 ? '-' : summary.commits.map(shortSha).join(', ')}`,
+		...(last === undefined
+			? []
+			: [
+					`checks: ${last.results.map((result) => `${result.name} ${result.exitCode === 0 ? 'passed' : 'failed'}`).join(', ')}`
+				]),
+		...(summary.prUrl === null ? [] : [`pr: ${summary.prUrl}`]),
+		...(summary.reviewUrl === null ? [] : [`review: ${summary.reviewUrl}`])
+	];
+};
+
 const summaryLines = (summary: Summary): Array<string> => {
 	switch (summary.kind) {
 		case 'review':
@@ -237,6 +286,11 @@ const summaryLines = (summary: Summary): Array<string> => {
 			return fixSummaryLines(summary);
 		case 'recheck':
 			return recheckSummaryLines(summary);
+		case 'implement':
+		case 'checks':
+		case 'pr':
+		case 'post':
+			return primitiveSummaryLines(summary);
 		default:
 			return shipSummaryLines(summary);
 	}
@@ -256,6 +310,13 @@ const kindLines = (run: RunInfo): Array<string> => {
 				`plan: ${run.planDir}`,
 				`round: ${run.round}`,
 				`pr: ${run.prUrl ?? '-'}`
+			];
+		default:
+			return [
+				...(run.branch === null ? [] : [`branch: ${run.branch}`]),
+				...(run.planDir === null ? [] : [`plan: ${run.planDir}`]),
+				...(run.review === null ? [] : [`review: ${run.review}`]),
+				...(run.url === null ? [] : [`url: ${run.url}`])
 			];
 	}
 };
@@ -317,6 +378,6 @@ export const exitCodeForSummary = (summary: Summary): number => {
 /**
  * Exit code when Ctrl-C (or SIGTERM) ends a command: 130, the shell convention for a command
  * ended by SIGINT, distinct from the run outcomes 0, 1 and 2. `ship run`, `ship review`,
- * `ship fix`, `ship recheck` and `ship resume` detach from a run that already started, so it keeps going.
+ * `ship fix`, `ship recheck`, `ship implement`, `ship checks`, `ship pr`, `ship post` and `ship resume` detach from a run that already started, so it keeps going.
  */
 export const DETACHED_EXIT_CODE = 130;

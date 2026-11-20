@@ -60,6 +60,16 @@ const events: ReadonlyArray<RunEventType> = [
 		findings: [verifiedFinding],
 		ignoredThreads: ['https://github.com/f-elix/ship/pull/7#discussion_r2']
 	}),
+	RunEvent.cases.PrimitiveRunCreated.make({
+		at,
+		kind: 'implement',
+		projectKey,
+		repoDir: '/repo',
+		baseSha: headSha,
+		branch: 'feature',
+		planDir: '/plans/feature',
+		review: null
+	}),
 	RunEvent.cases.StateChanged.make({ at, from: 'checks.running', to: 'checks.waiting' }),
 	RunEvent.cases.StepStarted.make({ at, step: 'implement' }),
 	RunEvent.cases.StepEnded.make({

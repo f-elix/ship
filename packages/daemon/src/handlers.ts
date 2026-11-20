@@ -6,6 +6,7 @@ import {
 	DaemonBusy,
 	Git,
 	initialFixRunState,
+	initialPrimitiveRunState,
 	initialRecheckRunState,
 	initialReviewRunState,
 	initialRunState,
@@ -16,6 +17,7 @@ import {
 	RunJournal,
 	ShipRpcs,
 	startFix,
+	startPrimitiveRun,
 	startRecheck,
 	startReview,
 	startRun,
@@ -24,6 +26,8 @@ import {
 	type CheckEvent,
 	type CheckSpawnError,
 	type CheckTimeout,
+	type Env,
+	type NewPrimitiveRunState,
 	type RunId,
 	type RunInfo,
 	type RunNotFound,
@@ -34,7 +38,9 @@ import { RunStore, type StoredRunStatus } from '@ship/store';
 import { Context, Deferred, Effect, Queue, Ref, Schema, Stream } from 'effect';
 import type { Rpc, RpcGroup } from 'effect/rpc';
 import {
+	checkBranchPreconditions,
 	checkFixPreconditions,
+	checkPostPreconditions,
 	checkPreconditions,
 	checkRecheckPreconditions,
 	checkReviewPreconditions,
@@ -80,13 +86,15 @@ export const handlers = ShipRpcs.toLayer(
 		const control = yield* DaemonControl;
 		const store = yield* RunStore;
 		const host = yield* RunHost;
-		// The services the preconditions use, captured once for every `run`, `review`, `fix`,
-		// `recheck` and `runChecks` call.
+		// The services the preconditions use, captured once for every call that starts a run
+		// and every `runChecks` call.
 		const preconditions = yield* Effect.context<
 			| Effect.Services<ReturnType<typeof checkPreconditions>>
 			| Effect.Services<ReturnType<typeof checkReviewPreconditions>>
 			| Effect.Services<ReturnType<typeof checkFixPreconditions>>
 			| Effect.Services<ReturnType<typeof checkRecheckPreconditions>>
+			| Effect.Services<ReturnType<typeof checkBranchPreconditions>>
+			| Effect.Services<ReturnType<typeof checkPostPreconditions>>
 		>();
 		const git = yield* Git;
 		const checks = yield* Checks;
@@ -109,6 +117,42 @@ export const handlers = ShipRpcs.toLayer(
 				.filter((info) => wanted === undefined || wanted.includes(info.status));
 			return filter.limit === undefined ? live : live.slice(0, filter.limit);
 		});
+
+		/**
+		 * Creates and launches a primitive run as one step, like `run`, once its
+		 * preconditions held.
+		 */
+		const launchPrimitiveRun = (
+			request: { readonly cwd: string; readonly env: Env },
+			start: Omit<NewPrimitiveRunState, 'runId' | 'cwd' | 'env'>
+		) =>
+			Effect.gen(function* () {
+				if (!(yield* host.accepting)) return yield* Effect.interrupt;
+				const runId = yield* Effect.uninterruptible(
+					Effect.gen(function* () {
+						const { runId } = yield* store.createPrimitiveRun({
+							kind: start.kind,
+							projectKey: start.projectKey,
+							repoDir: request.cwd,
+							baseSha: start.baseSha,
+							branch: start.branch,
+							planDir: start.planDir,
+							review: start.review
+						});
+						const state = initialPrimitiveRunState({
+							...start,
+							runId,
+							cwd: request.cwd,
+							env: request.env
+						});
+						yield* host
+							.launch(runId, startPrimitiveRun(state))
+							.pipe(Effect.catchTag('InvalidRunStatus', Effect.die));
+						return runId;
+					})
+				);
+				return { runId };
+			});
 
 		const cancelRun: (runId: RunId) => Effect.Effect<void, RunNotFound | InvalidRunStatus> =
 			Effect.fn('Daemon.cancel')(function* (runId: RunId) {
@@ -302,6 +346,60 @@ export const handlers = ShipRpcs.toLayer(
 					})
 				);
 				return { runId };
+			}),
+
+			implement: Effect.fn('Daemon.implement')(function* (request) {
+				const start = yield* checkPreconditions(request).pipe(
+					Effect.provide(preconditions)
+				);
+				return yield* launchPrimitiveRun(request, {
+					...start,
+					kind: 'implement',
+					planDir: request.planDir,
+					runChecks: request.checks,
+					review: null
+				});
+			}),
+
+			checks: Effect.fn('Daemon.checks')(function* (request) {
+				const start = yield* checkBranchPreconditions('checks', {
+					...request,
+					planDir: null
+				}).pipe(Effect.provide(preconditions));
+				return yield* launchPrimitiveRun(request, {
+					...start,
+					kind: 'checks',
+					planDir: null,
+					runChecks: true,
+					review: null
+				});
+			}),
+
+			pr: Effect.fn('Daemon.pr')(function* (request) {
+				const start = yield* checkBranchPreconditions('pr', request).pipe(
+					Effect.provide(preconditions)
+				);
+				return yield* launchPrimitiveRun(request, {
+					...start,
+					kind: 'pr',
+					planDir: request.planDir,
+					runChecks: false,
+					review: null
+				});
+			}),
+
+			post: Effect.fn('Daemon.post')(function* (request) {
+				const start = yield* checkPostPreconditions(request).pipe(
+					Effect.provide(preconditions)
+				);
+				return yield* launchPrimitiveRun(request, {
+					...start,
+					kind: 'post',
+					planDir: null,
+					branch: null,
+					runChecks: false,
+					review: request.review
+				});
 			}),
 
 			resume: Effect.fn('Daemon.resume')(function* ({ runId, env }) {

@@ -5,6 +5,9 @@ import {
 	FixRunState,
 	InvalidRunStatus,
 	NonNegativeInt,
+	PrimitiveRunInfo,
+	PrimitiveRunKind,
+	PrimitiveRunState,
 	ProjectKey,
 	RecheckRunInfo,
 	RecheckRunState,
@@ -65,6 +68,9 @@ export type NewReviewRun = Omit<typeof RunEvent.cases.ReviewRunCreated.Type, '_t
 /** What a new fix or recheck run starts from: its `PrRunCreated` event without the timestamp. */
 export type NewPrRun = Omit<typeof RunEvent.cases.PrRunCreated.Type, '_tag' | 'at'>;
 
+/** What a new primitive run starts from: its `PrimitiveRunCreated` event without the timestamp. */
+export type NewPrimitiveRun = Omit<typeof RunEvent.cases.PrimitiveRunCreated.Type, '_tag' | 'at'>;
+
 /** Statuses the store records; `waiting` is derived by the daemon from the live machine. */
 export type StoredRunStatus = Exclude<RunStatus, 'waiting'>;
 
@@ -94,6 +100,11 @@ export interface RunStoreShape extends RunJournalShape {
 	 * appends its `PrRunCreated` event (seq 1).
 	 */
 	readonly createPrRun: (run: NewPrRun) => Effect.Effect<FixRunInfo | RecheckRunInfo>;
+	/**
+	 * Creates a `ship implement`, `ship checks`, `ship pr` or `ship post` run, by
+	 * `run.kind`, with status `running` and appends its `PrimitiveRunCreated` event (seq 1).
+	 */
+	readonly createPrimitiveRun: (run: NewPrimitiveRun) => Effect.Effect<PrimitiveRunInfo>;
 	/** Appends an event with the run's next seq. Fails with `InvalidRunStatus` once the run finished. */
 	readonly append: (
 		runId: RunId,
@@ -129,18 +140,24 @@ export interface RunStoreShape extends RunJournalShape {
 
 const RunRow = Schema.Struct({
 	id: RunId,
-	kind: Schema.Literals(['ship', 'review', 'fix', 'recheck']),
+	kind: Schema.Literals(['ship', 'review', 'fix', 'recheck', ...PrimitiveRunKind.literals]),
 	project_key: ProjectKey,
 	cwd: Schema.String,
-	/** A `ship run`'s plan dir and branch; `null` for the other kinds. */
+	/** A run's plan dir and branch; `null` for the kinds without one. */
 	plan_dir: Schema.NullOr(Schema.String),
 	branch: Schema.NullOr(Schema.String),
-	/** The PR a review, fix or recheck run works on; `null` for a `ship run`. */
+	/**
+	 * The PR a review, fix or recheck run works on, or the review a `post` run posts; `null`
+	 * for the other kinds.
+	 */
 	subject: Schema.NullOr(Schema.String),
 	status: RunStatus,
 	state: Schema.String,
 	round: NonNegativeInt,
-	/** The PR a `ship run` opened, or the review a review run posted; `null` for the other kinds. */
+	/**
+	 * The PR a `ship run` or `pr` run opened, or the review a review or `post` run posted;
+	 * `null` for the other kinds.
+	 */
 	pr_url: Schema.NullOr(Schema.String),
 	created_at: Schema.Number,
 	updated_at: Schema.Number,
@@ -154,6 +171,7 @@ const decodeRunInfo = Schema.decodeUnknownEffect(RunInfo);
 const decodeShipRunInfo = Schema.decodeUnknownEffect(ShipRunInfo);
 const decodeReviewRunInfo = Schema.decodeUnknownEffect(ReviewRunInfo);
 const decodePrRunInfo = Schema.decodeUnknownEffect(Schema.Union([FixRunInfo, RecheckRunInfo]));
+const decodePrimitiveRunInfo = Schema.decodeUnknownEffect(PrimitiveRunInfo);
 
 /** A row as `RunInfo`, still to be decoded; its fields depend on the run's kind. */
 const runInfoFields = (row: RunRow) => {
@@ -177,6 +195,14 @@ const runInfoFields = (row: RunRow) => {
 			return { ...common, prUrl: row.subject };
 		case 'ship':
 			return { ...common, planDir: row.plan_dir, branch: row.branch, prUrl: row.pr_url };
+		default:
+			return {
+				...common,
+				planDir: row.plan_dir,
+				branch: row.branch,
+				review: row.subject,
+				url: row.pr_url
+			};
 	}
 };
 
@@ -193,6 +219,11 @@ const snapshotColumns = (
 		case 'fix':
 		case 'recheck':
 			return { round: 1, pr_url: null };
+		case 'implement':
+		case 'checks':
+		case 'pr':
+		case 'post':
+			return { round: 0, pr_url: context.url };
 		default:
 			return { round: context.round, pr_url: context.prUrl };
 	}
@@ -210,7 +241,7 @@ const decodeSnapshotObject = Schema.decodeUnknownEffect(
 	Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 );
 const decodeRunState = Schema.decodeUnknownEffect(
-	Schema.Union([ReviewRunState, FixRunState, RecheckRunState, RunState])
+	Schema.Union([ReviewRunState, FixRunState, RecheckRunState, PrimitiveRunState, RunState])
 );
 const encodeReview = Schema.encodeEffect(Schema.fromJsonString(StoredReview));
 const decodeReview = Schema.decodeUnknownEffect(Schema.fromJsonString(StoredReview));
@@ -401,6 +432,23 @@ const make = Effect.gen(function* () {
 			(_runId, at) => RunEvent.cases.PrRunCreated.make({ ...run, at })
 		);
 		return yield* decodePrRunInfo(runInfoFields(row));
+	}, orDieStorage);
+
+	const createPrimitiveRun = Effect.fn('RunStore.createPrimitiveRun')(function* (
+		run: NewPrimitiveRun
+	) {
+		const row = yield* insertRun(
+			{
+				kind: run.kind,
+				project_key: run.projectKey,
+				cwd: run.repoDir,
+				plan_dir: run.planDir,
+				branch: run.branch,
+				subject: run.review
+			},
+			(_runId, at) => RunEvent.cases.PrimitiveRunCreated.make({ ...run, at })
+		);
+		return yield* decodePrimitiveRunInfo(runInfoFields(row));
 	}, orDieStorage);
 
 	const append = Effect.fn('RunStore.append')(function* (runId: RunId, event: AppendableEvent) {
@@ -686,6 +734,7 @@ const make = Effect.gen(function* () {
 		create,
 		createReview,
 		createPrRun,
+		createPrimitiveRun,
 		append,
 		events,
 		follow,

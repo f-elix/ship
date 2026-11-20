@@ -738,6 +738,50 @@ describe('ship fix and ship recheck', () => {
 	);
 });
 
+describe('ship implement, ship checks, ship pr and ship post', () => {
+	it.live(
+		'implements a plan with --no-checks, commits it and exits 0',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				yield* Context.get(services, AgentFake).script({ step: 'implement' }, addsFeature);
+				yield* daemon(fx.home, services);
+
+				const result = yield* shipIn(fx, ['implement', '.plans/feature', '--no-checks']);
+
+				expect(result.code).toBe(0);
+				expect(parseSummary(result.stdout)).toMatchObject({
+					kind: 'implement',
+					status: 'done',
+					commits: [fx.git('rev-parse', 'HEAD')],
+					checks: []
+				});
+				expect(fx.git('log', '-1', '--format=%s')).toBe('Implement feature');
+				expect(result.stderr).toContain('implement created on feature');
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
+		'reports a refused post, exits 1 and starts nothing',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				yield* daemon(fx.home, yield* fakes);
+
+				const result = yield* shipIn(fx, ['post', 'no-such-review']);
+
+				expect(result.code).toBe(1);
+				expect(result.stderr).toMatch(
+					/^ship: cannot start the run \(review-not-found\): /u
+				);
+				expect(JSON.parse((yield* shipIn(fx, ['list', '--json'])).stdout)).toEqual([]);
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+});
+
 describe('ship resume', () => {
 	it.live(
 		"streams only the resumed run's events and exits like ship run",

@@ -19,15 +19,18 @@ export const PrInput = Schema.Struct({
 	/** The plan the change implements, whose spec and plan the PR agent reads; `null` without one. */
 	planDir: Schema.NullOr(AbsolutePath),
 	branch: Schema.NonEmptyString,
-	/** The message of the single commit a squash leaves, when `pr.squash` is on. */
-	squashMessage: Schema.NonEmptyString,
+	/**
+	 * The message of the single commit a squash leaves, when `pr.squash` is on. `null`
+	 * never squashes: the branch's commits are not all ship's to rewrite.
+	 */
+	squashMessage: Schema.NullOr(Schema.NonEmptyString),
 	/** Every check pass, for the body's evidence. */
 	checks: Schema.Array(CheckRound),
 	unresolved: UnresolvedFindings
 });
 export interface PrInput extends Schema.Schema.Type<typeof PrInput> {}
 
-/** Squashes when configured, pushes, then opens or updates the PR. Returns its URL. */
+/** Squashes when configured and allowed, pushes, then opens or updates the PR. Returns its URL. */
 const publish = (
 	step: Extract<Step, 'pr' | 'escalate'>,
 	input: PrInput,
@@ -37,8 +40,13 @@ const publish = (
 	Effect.gen(function* () {
 		const git = yield* Git;
 		const pr = yield* Pr;
-		if (input.config.pr.squash && (yield* git.headSha(input)) !== input.baseSha) {
-			yield* git.squash(input, { base: input.baseSha, message: input.squashMessage });
+		const { squashMessage } = input;
+		if (
+			input.config.pr.squash &&
+			squashMessage !== null &&
+			(yield* git.headSha(input)) !== input.baseSha
+		) {
+			yield* git.squash(input, { base: input.baseSha, message: squashMessage });
 		}
 		yield* git.push(input, input.branch);
 		const base = yield* git.defaultBranch(input);

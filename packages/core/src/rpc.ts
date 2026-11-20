@@ -8,11 +8,20 @@ import {
 	NonNegativeInt,
 	PositiveInt,
 	ProjectKey,
+	ReviewId,
 	RunId,
 	Timestamp,
 	Url
 } from './primitives.ts';
-import { FixSummary, RecheckSummary, ReviewSummary, RunStatus, ShipSummary } from './run.ts';
+import {
+	FixSummary,
+	PrimitiveRunKind,
+	PrimitiveSummary,
+	RecheckSummary,
+	ReviewSummary,
+	RunStatus,
+	ShipSummary
+} from './run.ts';
 
 // --- Errors ---
 
@@ -159,8 +168,31 @@ export const RecheckRunInfo = Schema.Struct({
 });
 export interface RecheckRunInfo extends Schema.Schema.Type<typeof RecheckRunInfo> {}
 
+/** A `ship implement`, `ship checks`, `ship pr` or `ship post` run, by `kind`. */
+export const PrimitiveRunInfo = Schema.Struct({
+	...runInfoFields,
+	kind: PrimitiveRunKind,
+	/** The plan `implement` works through, or `pr` describes; `null` without one. */
+	planDir: Schema.NullOr(AbsolutePath),
+	/** The branch the run works on; `null` for `post`. */
+	branch: Schema.NullOr(Schema.NonEmptyString),
+	/** The review `post` posts; `null` for the other kinds. */
+	review: Schema.NullOr(ReviewId),
+	/** The PR `pr` opened, or the review `post` posted; `null` until then. */
+	url: Schema.NullOr(Url),
+	/** `null` until the run reaches a terminal status. */
+	summary: Schema.NullOr(PrimitiveSummary)
+});
+export interface PrimitiveRunInfo extends Schema.Schema.Type<typeof PrimitiveRunInfo> {}
+
 /** A run as `status` and `list` report it, by its kind. */
-export const RunInfo = Schema.Union([ShipRunInfo, ReviewRunInfo, FixRunInfo, RecheckRunInfo]);
+export const RunInfo = Schema.Union([
+	ShipRunInfo,
+	ReviewRunInfo,
+	FixRunInfo,
+	RecheckRunInfo,
+	PrimitiveRunInfo
+]);
 export type RunInfo = typeof RunInfo.Type;
 
 const runIdPayload = { runId: RunId };
@@ -224,6 +256,46 @@ export class ShipRpcs extends RpcGroup.make(
 			cwd: AbsolutePath,
 			env: Env
 		},
+		success: Schema.Struct({ runId: RunId }),
+		error: PreconditionFailed
+	}),
+	/**
+	 * Starts a `ship implement` run from `cwd`, on its branch: the baseline, the
+	 * implementer working through the plan in `planDir`, then the checks, which commit the
+	 * work. With `checks: false` the work is committed without the baseline and the checks.
+	 * The preconditions are `run`'s.
+	 */
+	Rpc.make('implement', {
+		payload: { planDir: AbsolutePath, checks: Schema.Boolean, cwd: AbsolutePath, env: Env },
+		success: Schema.Struct({ runId: RunId }),
+		error: PreconditionFailed
+	}),
+	/**
+	 * Starts a `ship checks` run from `cwd`, on a clean branch other than the default one:
+	 * the checks on the files changed since the merge base with the default branch, fixing
+	 * failing ones, then one commit of the fixes.
+	 */
+	Rpc.make('checks', {
+		payload: { cwd: AbsolutePath, env: Env },
+		success: Schema.Struct({ runId: RunId }),
+		error: PreconditionFailed
+	}),
+	/**
+	 * Starts a `ship pr` run from `cwd`, on a clean branch other than the default one: it
+	 * pushes the branch and opens or updates its PR, which describes the plan in `planDir`
+	 * when one is given.
+	 */
+	Rpc.make('pr', {
+		payload: { planDir: Schema.NullOr(AbsolutePath), cwd: AbsolutePath, env: Env },
+		success: Schema.Struct({ runId: RunId }),
+		error: PreconditionFailed
+	}),
+	/**
+	 * Starts a `ship post` run from `cwd`: it posts the stored review `review` on its PR.
+	 * `HEAD` must be the head the review reviewed, and the review must have findings.
+	 */
+	Rpc.make('post', {
+		payload: { review: ReviewId, cwd: AbsolutePath, env: Env },
 		success: Schema.Struct({ runId: RunId }),
 		error: PreconditionFailed
 	}),

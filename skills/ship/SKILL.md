@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Hand a planned change to ship, which implements it, runs the checks, reviews, fixes and opens the PR unattended, or have ship review a pull request. Use when the user wants to ship planned work (`ship run`), review a PR with ship (`ship review`), or fix or recheck the findings on a PR (`ship fix`, `ship recheck`).
+description: Hand a planned change to ship, which implements it, runs the checks, reviews, fixes and opens the PR unattended, or have ship review a pull request. Use when the user wants to ship planned work (`ship run`), review a PR with ship (`ship review`), fix or recheck the findings on a PR (`ship fix`, `ship recheck`), or run one part of the loop on its own (`ship implement`, `ship checks`, `ship pr`, `ship post`).
 ---
 
 # ship
@@ -43,3 +43,12 @@ ship runs the whole loop in its daemon: baseline checks → implement → checks
 3. **Report**:
     - `ship fix`: 0 means done; give the commits and whether they were pushed. 1 reads as for `ship run`; failing checks leave the commits local. Offer `ship recheck` afterwards.
     - `ship recheck`: 0 means every finding is fixed, 2 means some are not; list the unfixed ones with the verifier's evidence and the threads resolved. 1 and 130 read as for `ship run`.
+
+## Running one part of the loop
+
+When the user wants only one part of `ship run`, use the matching command from the repo root. Each needs a feature branch and a clean tree, streams like `ship run`, and exits 0 done, 1 failed, 130 detached; hand the user the logs command the same way.
+
+- `ship implement <plan-dir> [--no-checks]`: implement a plan and commit it, with the baseline and the checks unless `--no-checks`. No review, no PR. Report the commit.
+- `ship checks`: run the checks on the branch's changes, fix failing ones and commit the fixes. Report the commit, or the checks that still fail.
+- `ship pr [--plan <dir>]`: push the branch and open or update its PR. It never squashes. Report the PR URL.
+- `ship post <review-id>`: post a stored review on its PR; needs `HEAD` at the reviewed head (`gh pr checkout <n>`). Report the review URL.

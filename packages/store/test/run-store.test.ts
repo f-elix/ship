@@ -421,6 +421,36 @@ describe('RunStore', () => {
 		}).pipe(Effect.provide(TestLayer))
 	);
 
+	it.effect('creates a primitive run whose log starts with PrimitiveRunCreated', () =>
+		Effect.gen(function* () {
+			const store = yield* RunStore;
+			const run = yield* store.createPrimitiveRun({
+				kind: 'implement',
+				projectKey,
+				repoDir: '/repo',
+				baseSha,
+				branch: 'feature',
+				planDir: '/plans/feature',
+				review: null
+			});
+
+			expect(run).toMatchObject({
+				kind: 'implement',
+				status: 'running',
+				branch: 'feature',
+				planDir: '/plans/feature',
+				review: null,
+				url: null,
+				summary: null
+			});
+			const events = yield* store.events(run.runId);
+			expect(events.map((envelope) => envelope.event)).toMatchObject([
+				{ _tag: 'PrimitiveRunCreated', kind: 'implement', branch: 'feature' }
+			]);
+			expect(yield* store.get(run.runId)).toEqual(run);
+		}).pipe(Effect.provide(TestLayer))
+	);
+
 	describe('review runs', () => {
 		const prUrl = 'https://github.com/f-elix/ship/pull/7';
 		const headSha = GitSha.make('b'.repeat(40));
