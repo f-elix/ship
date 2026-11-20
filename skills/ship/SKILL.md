@@ -14,6 +14,11 @@ ship runs the whole loop in its daemon: baseline checks → implement → checks
     - **Config**: when the run fails with an unknown project config, run the `ship-init` skill, then start over.
 
 2. **Run.** From the repo root, start `ship run <plan-dir>` in the background and wait for it to exit. stderr streams the run's events; stdout is the summary JSON. A run takes minutes to an hour. Ctrl-C only detaches; `ship cancel <id>` stops a run.
+    - **Hand the user the logs command**: as soon as stderr prints `ship: run <id> started`, send the user the follow command with the real id, alone in a one-line shell code block, so they can run it in their own terminal (some clients add a run button to such blocks):
+
+        ```sh
+        ship logs <id> --follow
+        ```
 
 3. **Report** from the summary and the exit code:
     - **0, done**: the PR URL, the cost, and the tradeoffs listed in the PR body, one line each.
