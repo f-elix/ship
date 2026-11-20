@@ -18,11 +18,11 @@ import {
 	type VerifiedFinding
 } from './finding.ts';
 import { Git, type Commit, type CommitRange, type GitRepo } from './git.ts';
-import { NonNegativeInt, type Env } from './primitives.ts';
 import { planDirs, truncateDiff } from './prompt.ts';
 import { parseReviewerMarkdown, ReviewerFileError } from './reviewer-markdown.ts';
 import type { ReviewerDef } from './reviewer.ts';
 import { routeDeterministic, type ReviewChanges, type RoutedReviewer } from './router.ts';
+import { NonNegativeInt, type Env } from './values.ts';
 
 // --- Built-in briefs ---
 

@@ -1,17 +1,17 @@
 /**
- * Primitives that put work on a PR's branch: `commit` commits the work as it is, and
+ * Steps that put work on a PR's branch: `commit` commits the work as it is, and
  * `push` pushes `HEAD` to the PR's head ref.
  */
 import { Effect, Schema } from 'effect';
 import { Checkpoint } from './checkpoint.ts';
 import { Git } from './git.ts';
-import { primitiveScopeFields } from './primitive-scope.ts';
-import type { Primitive } from './primitive.ts';
-import { GitSha } from './primitives.ts';
 import { StepNotReady } from './run-step.ts';
+import { stepScopeFields } from './step-scope.ts';
+import type { Step } from './step.ts';
+import { GitSha } from './values.ts';
 
 export const CommitInput = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	message: Schema.NonEmptyString
 });
 export interface CommitInput extends Schema.Schema.Type<typeof CommitInput> {}
@@ -21,7 +21,7 @@ export interface CommitInput extends Schema.Schema.Type<typeof CommitInput> {}
  * reports `CommitCreated`. Returns the commit, or `null` when there was nothing to commit,
  * as on a resumed `commit` that already committed.
  */
-export const commitPrimitive = {
+export const commitStep = {
 	name: 'commit',
 	input: CommitInput,
 	output: Schema.NullOr(GitSha),
@@ -34,7 +34,7 @@ export const commitPrimitive = {
 			}
 			return sha;
 		})
-} satisfies Primitive<CommitInput, GitSha | null, unknown>;
+} satisfies Step<CommitInput, GitSha | null, unknown>;
 
 /** Where `push` sends `HEAD`: branch `ref` of `remote`, a remote name or URL. */
 export const PushTarget = Schema.Struct({
@@ -44,7 +44,7 @@ export const PushTarget = Schema.Struct({
 export interface PushTarget extends Schema.Schema.Type<typeof PushTarget> {}
 
 export const PushInput = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	/** The PR's head when the run started; `HEAD` must descend from it. */
 	pinnedSha: GitSha,
 	target: PushTarget
@@ -60,7 +60,7 @@ export interface PushInput extends Schema.Schema.Type<typeof PushInput> {}
  * work since the run started. The push is checkpointed (`push`); one that reached the
  * remote just before a crash is pushed again, which git takes as a no-op.
  */
-export const pushPrimitive = {
+export const pushStep = {
 	name: 'push',
 	input: PushInput,
 	output: Schema.NullOr(GitSha),
@@ -90,4 +90,4 @@ export const pushPrimitive = {
 				})
 			);
 		})
-} satisfies Primitive<PushInput, GitSha | null, unknown>;
+} satisfies Step<PushInput, GitSha | null, unknown>;

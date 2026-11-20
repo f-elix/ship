@@ -1,6 +1,7 @@
 import { Schema } from 'effect';
 import { VerifiedFinding } from './finding.ts';
-import { primitiveScopeFields } from './primitive-scope.ts';
+import { ReviewerName } from './reviewer.ts';
+import { stepScopeFields } from './step-scope.ts';
 import {
 	AbsolutePath,
 	CostUsd,
@@ -12,8 +13,7 @@ import {
 	RunId,
 	SessionId,
 	Url
-} from './primitives.ts';
-import { ReviewerName } from './reviewer.ts';
+} from './values.ts';
 
 /** `waiting` means the run is blocked on a check lock. */
 export const RunStatus = Schema.Literals([
@@ -104,7 +104,7 @@ export type CommitSubject = typeof CommitSubject.Type;
  * `null` so the context always has the same keys.
  */
 export const RunState = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	/**
 	 * Tells a `ship run` context from a `ship review` one. Optional so that snapshots saved
 	 * before review runs existed still load: an absent kind is `ship`.

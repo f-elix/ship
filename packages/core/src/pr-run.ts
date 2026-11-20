@@ -5,8 +5,6 @@
 import { Schema } from 'effect';
 import { VerifiedFinding } from './finding.ts';
 import { PushTarget } from './pr-branch.ts';
-import { primitiveScopeFields } from './primitive-scope.ts';
-import { CostUsd, GitSha, PositiveInt, Url } from './primitives.ts';
 import { ChangeIntent } from './reviewers.ts';
 import { checkRounds, ofTag, type SummaryInput } from './run-summary.ts';
 import {
@@ -16,6 +14,8 @@ import {
 	type FixSummary,
 	type RecheckSummary
 } from './run.ts';
+import { stepScopeFields } from './step-scope.ts';
+import { CostUsd, GitSha, PositiveInt, Url } from './values.ts';
 
 /** The pull request a run works on, as it was when the run was created. */
 export const TargetPr = Schema.Struct({
@@ -31,7 +31,7 @@ export interface TargetPr extends Schema.Schema.Type<typeof TargetPr> {}
  * caller's checkout; `baseSha` is `pr.headSha`, so the checks see only the fix's changes.
  */
 export const FixRunState = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	kind: Schema.Literal('fix'),
 	pr: TargetPr,
 	/** The must-fix findings and nits the fix agent works through. */
@@ -72,7 +72,7 @@ export const initialFixRunState = (start: NewFixRunState): FixRunState => ({
  * `baseSha` is the merge base of the PR's base branch and its head, as for `ship review`.
  */
 export const RecheckRunState = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	kind: Schema.Literal('recheck'),
 	pr: TargetPr,
 	/** What the change sets out to do; the verifier reads the findings against it. */

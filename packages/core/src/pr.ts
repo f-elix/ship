@@ -6,9 +6,9 @@ import { baselineFailures } from './checks.ts';
 import type { VerifiedFinding } from './finding.ts';
 import { Gh, type GhError } from './gh.ts';
 import type { GitRepo } from './git.ts';
-import type { GitSha } from './primitives.ts';
 import { planDirs } from './prompt.ts';
 import type { CheckRound, EscalationReason, UnresolvedFindings } from './run.ts';
+import type { GitSha } from './values.ts';
 
 // --- Public types ---
 

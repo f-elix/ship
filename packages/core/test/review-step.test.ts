@@ -3,15 +3,15 @@ import { Effect } from 'effect';
 import {
 	ChangeIntent,
 	FindingId,
-	reviewPrimitive,
-	type ReviewPrimitiveInput,
+	reviewStep,
+	type ReviewStepInput,
 	type VerifiedFinding
 } from '../src/index.ts';
 import { AgentFake, fakeSha } from '../src/testing.ts';
 import { baseSha, verifiedFinding } from './fixtures.ts';
-import { CheckpointValues, recordingKit, scopeWith, withPrimitives } from './primitive-harness.ts';
+import { CheckpointValues, recordingKit, scopeWith, withSteps } from './step-harness.ts';
 
-const input = (followUp: ReviewPrimitiveInput['followUp'] = null): ReviewPrimitiveInput => ({
+const input = (followUp: ReviewStepInput['followUp'] = null): ReviewStepInput => ({
 	...scopeWith(),
 	round: followUp === null ? 1 : 2,
 	intent: ChangeIntent.cases.Description.make({ title: 'Add a', body: 'Adds a.' }),
@@ -55,16 +55,16 @@ const callLabels = Effect.gen(function* () {
 	return calls.map((call) => call.label ?? call.step);
 });
 
-describe('reviewPrimitive', () => {
+describe('reviewStep', () => {
 	it.effect('runs the reviewers routing picks and verifies what they report', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
 				yield* agent.script({ step: 'review', label: 'standards' }, reports('Injection.'));
 				yield* agent.script({ step: 'verify' }, confirms(1));
 				const recorded = yield* recordingKit;
 
-				const round = yield* reviewPrimitive.run(input(), recorded.kit);
+				const round = yield* reviewStep.run(input(), recorded.kit);
 
 				expect(round).toMatchObject({
 					round: 1,
@@ -85,7 +85,7 @@ describe('reviewPrimitive', () => {
 	);
 
 	it.effect('resumes by running only the reviewers that had not reported', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const values = yield* CheckpointValues;
 				values.set('route', { toSha: baseSha, reviewers: ['security', 'standards'] });
@@ -95,7 +95,7 @@ describe('reviewPrimitive', () => {
 				yield* agent.script({ step: 'verify' }, confirms(1));
 				const recorded = yield* recordingKit;
 
-				const round = yield* reviewPrimitive.run(input(), recorded.kit);
+				const round = yield* reviewStep.run(input(), recorded.kit);
 
 				expect(round.reviewers).toEqual(['security', 'standards']);
 				expect(yield* callLabels).toEqual(['security', 'verify']);
@@ -107,7 +107,7 @@ describe('reviewPrimitive', () => {
 	);
 
 	it.effect('after a fix, brings back reviewers of must-fix findings and rechecks them', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const previous: VerifiedFinding = {
 					...verifiedFinding,
@@ -124,7 +124,7 @@ describe('reviewPrimitive', () => {
 				);
 				const recorded = yield* recordingKit;
 
-				const round = yield* reviewPrimitive.run(
+				const round = yield* reviewStep.run(
 					input({ previous: [previous], knownTradeoffs: [], routedFromSha: fakeSha(9) }),
 					recorded.kit
 				);

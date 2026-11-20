@@ -1,15 +1,15 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
 import {
-	escalatePrimitive,
+	escalateStep,
 	FindingId,
-	prPrimitive,
+	prStep,
 	type PrInput,
 	type VerifiedFinding
 } from '../src/index.ts';
 import { AgentFake, fakeSha, GhFake, GitFake, opensPr } from '../src/testing.ts';
 import { resolvedConfig } from './fixtures.ts';
-import { recordingKit, scopeWith, withPrimitives } from './primitive-harness.ts';
+import { recordingKit, scopeWith, withSteps } from './step-harness.ts';
 
 const tradeoff: VerifiedFinding = {
 	id: FindingId.make('r1-2'),
@@ -47,14 +47,14 @@ const scriptText = Effect.gen(function* () {
 	yield* (yield* AgentFake).script({ step: 'escalate' }, yield* opensPr(text));
 });
 
-describe('prPrimitive', () => {
+describe('prStep', () => {
 	it.effect('squashes, pushes and opens the PR with the tradeoffs listed', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* scriptText;
 				const recorded = yield* recordingKit;
 
-				const url = yield* prPrimitive.run(
+				const url = yield* prStep.run(
 					prInput({ squash: true, draft: false }),
 					recorded.kit
 				);
@@ -73,7 +73,7 @@ describe('prPrimitive', () => {
 	);
 
 	it.effect('updates the branch PR a previous attempt opened instead of opening another', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* scriptText;
 				const gh = yield* GhFake;
@@ -86,7 +86,7 @@ describe('prPrimitive', () => {
 				});
 				const recorded = yield* recordingKit;
 
-				const url = yield* prPrimitive.run(prInput({ squash: false }), recorded.kit);
+				const url = yield* prStep.run(prInput({ squash: false }), recorded.kit);
 
 				expect(url).toBe(existing.url);
 				const prs = yield* gh.prs;
@@ -100,14 +100,14 @@ describe('prPrimitive', () => {
 	);
 });
 
-describe('escalatePrimitive', () => {
+describe('escalateStep', () => {
 	it.effect('commits unfinished work and opens a draft that says why', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* scriptText;
 				const recorded = yield* recordingKit;
 
-				yield* escalatePrimitive.run(
+				yield* escalateStep.run(
 					{ ...prInput({ squash: false, draft: false }), reason: 'review-cap' },
 					recorded.kit
 				);
@@ -125,12 +125,12 @@ describe('escalatePrimitive', () => {
 	);
 
 	it.effect('refuses to escalate without a reason, publishing nothing', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const recorded = yield* recordingKit;
 
 				const error = yield* Effect.flip(
-					escalatePrimitive.run({ ...prInput(), reason: null }, recorded.kit)
+					escalateStep.run({ ...prInput(), reason: null }, recorded.kit)
 				);
 
 				expect(error._tag).toBe('StepNotReady');

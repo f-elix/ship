@@ -1,9 +1,9 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
-import { baselinePrimitive, checksPrimitive, type ChecksInput } from '../src/index.ts';
+import { baselineStep, checksStep, type ChecksInput } from '../src/index.ts';
 import { AgentFake, ChecksFake, exitCodesByCheck, GitFake } from '../src/testing.ts';
 import { resolvedConfig } from './fixtures.ts';
-import { CheckpointValues, recordingKit, scopeWith, withPrimitives } from './primitive-harness.ts';
+import { CheckpointValues, recordingKit, scopeWith, withSteps } from './step-harness.ts';
 
 const checksInput = (
 	checkFixAttempts = 3,
@@ -19,14 +19,14 @@ const checksInput = (
 
 const dirty = { dirty: true, changedFiles: [{ path: 'src/a.ts', status: 'added' as const }] };
 
-describe('baselinePrimitive', () => {
+describe('baselineStep', () => {
 	it.effect('runs every check once on the base, without fixing failures', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1] }));
 				const recorded = yield* recordingKit;
 
-				const output = yield* baselinePrimitive.run(
+				const output = yield* baselineStep.run(
 					{ ...scopeWith(), planDir: '/plans/feature' },
 					recorded.kit
 				);
@@ -41,15 +41,12 @@ describe('baselinePrimitive', () => {
 	);
 
 	it.effect('refuses a dirty tree before running any check', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const recorded = yield* recordingKit;
 
 				const error = yield* Effect.flip(
-					baselinePrimitive.run(
-						{ ...scopeWith(), planDir: '/plans/feature' },
-						recorded.kit
-					)
+					baselineStep.run({ ...scopeWith(), planDir: '/plans/feature' }, recorded.kit)
 				);
 
 				expect(error._tag).toBe('StepNotReady');
@@ -60,13 +57,13 @@ describe('baselinePrimitive', () => {
 	);
 });
 
-describe('checksPrimitive', () => {
+describe('checksStep', () => {
 	it.effect('commits the work when the first pass passes', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const recorded = yield* recordingKit;
 
-				const output = yield* checksPrimitive.run(checksInput(), recorded.kit);
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
 
 				expect(output.passed).toBe(true);
 				expect(output.passes).toHaveLength(1);
@@ -79,14 +76,14 @@ describe('checksPrimitive', () => {
 	);
 
 	it.effect('has the implementer fix a failing pass, then runs the checks again', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1] }));
 				const agent = yield* AgentFake;
 				yield* agent.script({ step: 'fixChecks' }, { costUsd: 0.2 });
 				const recorded = yield* recordingKit;
 
-				const output = yield* checksPrimitive.run(checksInput(), recorded.kit);
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
 
 				expect(output.passed).toBe(true);
 				expect(output.passes.map((pass) => pass.attempt)).toEqual([0, 1]);
@@ -100,7 +97,7 @@ describe('checksPrimitive', () => {
 	);
 
 	it.effect('neither fails on nor fixes a check that failed before the change', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* (yield* ChecksFake).respond(
 					yield* exitCodesByCheck({ lint: [1, 0], test: [1, 1] })
@@ -109,7 +106,7 @@ describe('checksPrimitive', () => {
 				yield* agent.script({ step: 'fixChecks' }, { costUsd: 0.2 });
 				const recorded = yield* recordingKit;
 
-				const output = yield* checksPrimitive.run(checksInput(3, ['test']), recorded.kit);
+				const output = yield* checksStep.run(checksInput(3, ['test']), recorded.kit);
 
 				expect(output.passed).toBe(true);
 				expect(output.passes).toHaveLength(2);
@@ -124,14 +121,14 @@ describe('checksPrimitive', () => {
 	);
 
 	it.effect('stops without committing once the fixes reach the cap', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1, 1, 1] }));
 				const agent = yield* AgentFake;
 				yield* agent.script({ step: 'fixChecks' }, { costUsd: 0.2 });
 				const recorded = yield* recordingKit;
 
-				const output = yield* checksPrimitive.run(checksInput(1), recorded.kit);
+				const output = yield* checksStep.run(checksInput(1), recorded.kit);
 
 				expect(output.passed).toBe(false);
 				expect(output.passes).toHaveLength(2);
@@ -143,7 +140,7 @@ describe('checksPrimitive', () => {
 	);
 
 	it.effect('resumes after its finished passes and fixes without redoing them', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const values = yield* CheckpointValues;
 				values.set('pass/0', {
@@ -155,7 +152,7 @@ describe('checksPrimitive', () => {
 				values.set('fix/0', { sessionId: 'restored', cumulativeCostUsd: 0.2 });
 				const recorded = yield* recordingKit;
 
-				const output = yield* checksPrimitive.run(checksInput(), recorded.kit);
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
 
 				expect(output.passes.map((pass) => pass.attempt)).toEqual([0, 1]);
 				expect(output.passed).toBe(true);

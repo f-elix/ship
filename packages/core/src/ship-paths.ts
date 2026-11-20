@@ -1,6 +1,6 @@
 import { Context, Layer } from 'effect';
-import type { ProjectKey, RunId } from './primitives.ts';
 import { projectKeySegments } from './project-key.ts';
+import type { ProjectKey, RunId } from './values.ts';
 
 /** The files a plan dir holds; `ship run` requires both. */
 export const PLAN_FILES = { spec: 'spec.md', plan: 'implementation-plan.md' } as const;

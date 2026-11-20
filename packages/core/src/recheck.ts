@@ -1,5 +1,5 @@
 /**
- * The `recheck` primitive: asks the verifier whether earlier findings are fixed in the
+ * The `recheck` step: asks the verifier whether earlier findings are fixed in the
  * code as it is now. It is the verifier `review` uses, given the findings to check again
  * and no new ones.
  */
@@ -8,15 +8,15 @@ import { agentContext } from './agent-context.ts';
 import { Checkpoint } from './checkpoint.ts';
 import { VerifiedFinding } from './finding.ts';
 import { Git } from './git.ts';
-import { primitiveScopeFields } from './primitive-scope.ts';
-import type { Primitive } from './primitive.ts';
-import { reviewSubject } from './review-primitive.ts';
+import { reviewSubject } from './review-step.ts';
 import { ChangeIntent, Reviewers } from './reviewers.ts';
 import { StepTimeout } from './run-step.ts';
 import { RecheckedFinding } from './run.ts';
+import { stepScopeFields } from './step-scope.ts';
+import type { Step } from './step.ts';
 
 export const RecheckInput = Schema.Struct({
-	...primitiveScopeFields,
+	...stepScopeFields,
 	/** What the change sets out to do; the verifier reads the findings against it. */
 	intent: ChangeIntent,
 	/** The findings to check again. */
@@ -30,9 +30,9 @@ export interface RecheckInput extends Schema.Schema.Type<typeof RecheckInput> {}
  * `FindingsRechecked`. A finding the verifier gives no status counts as unfixed.
  *
  * The verdicts are checkpointed (`verify`), so a resumed recheck does not ask again. The
- * verifier call has its own timeout, so the primitive has none.
+ * verifier call has its own timeout, so the step has none.
  */
-export const recheckPrimitive = {
+export const recheckStep = {
 	name: 'recheck',
 	input: RecheckInput,
 	output: Schema.Array(RecheckedFinding),
@@ -79,4 +79,4 @@ export const recheckPrimitive = {
 				)
 			);
 		})
-} satisfies Primitive<RecheckInput, ReadonlyArray<RecheckedFinding>, unknown>;
+} satisfies Step<RecheckInput, ReadonlyArray<RecheckedFinding>, unknown>;

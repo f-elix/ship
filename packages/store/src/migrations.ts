@@ -114,7 +114,7 @@ const byName = {
 		yield* sql`CREATE INDEX runs_by_status ON runs (status)`;
 	}),
 	/**
-	 * Adds primitives' checkpoints and stored reviews. A checkpoint belongs to its run and
+	 * Adds steps' checkpoints and stored reviews. A checkpoint belongs to its run and
 	 * goes with it. A review outlives its run, so it keeps its `run_id` without a foreign
 	 * key; `pr_url` is `null` for a review of a branch with no PR.
 	 */

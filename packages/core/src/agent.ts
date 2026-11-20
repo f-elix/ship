@@ -15,8 +15,8 @@ import {
 	Stream,
 	Struct
 } from 'effect';
-import { CostUsd, SessionId, Step, type Env } from './primitives.ts';
 import { AgentSession } from './run.ts';
+import { CostUsd, SessionId, StepName, type Env } from './values.ts';
 
 // --- Public types ---
 
@@ -42,7 +42,7 @@ export interface TranscriptTarget {
 
 export interface AgentRunInput {
 	/** The pipeline step making the call. Names the transcript and the fake's script. */
-	readonly step: Step;
+	readonly step: StepName;
 	/** Tells apart calls within one step, e.g. the reviewer's name. */
 	readonly label?: string;
 	readonly prompt: string;
@@ -78,7 +78,7 @@ export interface AgentResult<A> {
  * the call's own step and model, so callers never re-supply them.
  */
 export const AgentCallCost = Schema.Struct({
-	step: Step,
+	step: StepName,
 	model: Schema.String,
 	sessionId: SessionId,
 	/** Excludes earlier calls in a resumed session. */
@@ -97,7 +97,7 @@ export const AgentSpend = Schema.Struct({
 export interface AgentSpend extends Schema.Schema.Type<typeof AgentSpend> {}
 
 export class AgentTimeout extends Schema.TaggedError<AgentTimeout>()('AgentTimeout', {
-	step: Step,
+	step: StepName,
 	timeoutMs: Schema.Number
 }) {
 	override get message(): string {
@@ -110,7 +110,7 @@ export class AgentTimeout extends Schema.TaggedError<AgentTimeout>()('AgentTimeo
  * error result or without one, or the transcript file could not be opened.
  */
 export class AgentSdkError extends Schema.TaggedError<AgentSdkError>()('AgentSdkError', {
-	step: Step,
+	step: StepName,
 	/**
 	 * The result's subtype (e.g. `error_max_turns`), `exception` when the SDK threw,
 	 * `no-result`, or `transcript`; `AgentFake` adds `unscripted`.
@@ -129,7 +129,7 @@ export class AgentSdkError extends Schema.TaggedError<AgentSdkError>()('AgentSdk
 export class AgentOutputMismatch extends Schema.TaggedError<AgentOutputMismatch>()(
 	'AgentOutputMismatch',
 	{
-		step: Step,
+		step: StepName,
 		detail: Schema.String,
 		/** The output as JSON text, for the event log. */
 		output: Schema.String,
@@ -280,7 +280,7 @@ export const billedTo =
 		});
 
 /** Decodes an agent's structured output, failing with `AgentOutputMismatch`. */
-export const decodeOutput = <A>(step: Step, schema: OutputSchema<A>, output: unknown) =>
+export const decodeOutput = <A>(step: StepName, schema: OutputSchema<A>, output: unknown) =>
 	Schema.decodeUnknownEffect(schema)(output).pipe(
 		Effect.mapError(
 			(error) =>

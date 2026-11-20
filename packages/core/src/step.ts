@@ -1,27 +1,27 @@
 /**
- * The primitive contract. A primitive is one of ship's steps as a typed Effect: its input
+ * The step contract. A step is one unit of ship's work as a typed Effect: its input
  * holds everything it reads, so a pipeline state, a test or a later command can call it
- * the same way. Pipelines invoke primitives through {@link invokePrimitive}, which reports
+ * the same way. Pipelines invoke steps through {@link invokeStep}, which reports
  * the step and turns its errors into an outcome the machine settles.
  *
- * A primitive that keeps sub-work in `Checkpoint.once` makes that value's schema part of
+ * A step that keeps sub-work in `Checkpoint.once` makes that value's schema part of
  * the stored run format: changing it requires bumping `SNAPSHOT_VERSION`.
  */
 import type { Effect, Schema } from 'effect';
 import type { ResolvedConfig } from './config.ts';
-import type { PrimitiveScope } from './primitive-scope.ts';
-import type { Step } from './primitives.ts';
 import { runStep, type StepError, type StepKit } from './run-step.ts';
+import type { StepScope } from './step-scope.ts';
+import type { StepName } from './values.ts';
 
 /** One of ship's steps as a typed Effect. */
-export interface Primitive<I extends PrimitiveScope, O, R> {
+export interface Step<I extends StepScope, O, R> {
 	/** The step it reports as, in `StepStarted`, `StepEnded` and its failures. */
-	readonly name: Step;
+	readonly name: StepName;
 	readonly input: Schema.Schema<I>;
 	readonly output: Schema.Schema<O>;
 	/**
 	 * The limit for the whole call, or `null` when its own calls have their limits, e.g.
-	 * a primitive that waits for a check lock or runs several agent calls.
+	 * a step that waits for a check lock or runs several agent calls.
 	 */
 	readonly timeoutMs: (config: ResolvedConfig) => number | null;
 	/** Does the work; `kit` reports events and records what it spends. */
@@ -29,13 +29,10 @@ export interface Primitive<I extends PrimitiveScope, O, R> {
 }
 
 /**
- * Runs `primitive` on `input` as a step: reports `StepStarted` and `StepEnded`, applies its
+ * Runs `step` on `input`: reports `StepStarted` and `StepEnded`, applies its
  * timeout, and returns its outcome with what it spent. See `runStep`.
  */
-export const invokePrimitive = <I extends PrimitiveScope, O, R>(
-	primitive: Primitive<I, O, R>,
-	input: I
-) =>
-	runStep(primitive.name, input, { timeoutMs: primitive.timeoutMs(input.config) }, (kit) =>
-		primitive.run(input, kit)
+export const invokeStep = <I extends StepScope, O, R>(step: Step<I, O, R>, input: I) =>
+	runStep(step.name, input, { timeoutMs: step.timeoutMs(input.config) }, (kit) =>
+		step.run(input, kit)
 	);

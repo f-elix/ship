@@ -1,5 +1,5 @@
 /**
- * The `review` primitive: route, review, verify. It picks the reviewers for the change,
+ * The `review` step: route, review, verify. It picks the reviewers for the change,
  * runs them, and verifies what they report, so a review's findings are always verified.
  * `ship run` calls it once per round with a `followUp` for the rounds after the first;
  * `ship review` calls it once over a PR.
@@ -11,9 +11,6 @@ import { Conventions } from './conventions.ts';
 import { readCredentials, type Credentials } from './credentials.ts';
 import { Finding, VerifiedFinding } from './finding.ts';
 import { Git, type CommitRange } from './git.ts';
-import { primitiveScopeFields, type PrimitiveScope } from './primitive-scope.ts';
-import type { Primitive } from './primitive.ts';
-import { GitSha, PositiveInt } from './primitives.ts';
 import { ReviewerName } from './reviewer.ts';
 import {
 	ChangeIntent,
@@ -25,6 +22,9 @@ import {
 import { StepTimeout, type StepKit } from './run-step.ts';
 import { ReviewRound } from './run.ts';
 import { ShipHome } from './ship-paths.ts';
+import { stepScopeFields, type StepScope } from './step-scope.ts';
+import type { Step } from './step.ts';
+import { GitSha, PositiveInt } from './values.ts';
 
 /**
  * What a review after a fix carries over from the round before: the findings the fix was
@@ -44,15 +44,15 @@ export const ReviewFollowUp = Schema.Struct({
 });
 export interface ReviewFollowUp extends Schema.Schema.Type<typeof ReviewFollowUp> {}
 
-export const ReviewPrimitiveInput = Schema.Struct({
-	...primitiveScopeFields,
+export const ReviewStepInput = Schema.Struct({
+	...stepScopeFields,
 	round: PositiveInt,
 	/** What the change sets out to do; the reviewers and the verifier check it against this. */
 	intent: ChangeIntent,
 	/** `null` for a first review: routing looks at the whole range and nothing carries over. */
 	followUp: Schema.NullOr(ReviewFollowUp)
 });
-export interface ReviewPrimitiveInput extends Schema.Schema.Type<typeof ReviewPrimitiveInput> {}
+export interface ReviewStepInput extends Schema.Schema.Type<typeof ReviewStepInput> {}
 
 /** The reviewed head and the reviewers routing picked, checkpointed as `route`. */
 const Routed = Schema.Struct({ toSha: GitSha, reviewers: Schema.Array(ReviewerName) });
@@ -60,7 +60,7 @@ interface Routed extends Schema.Schema.Type<typeof Routed> {}
 
 /** What reviewers and the verifier see of `range`, with the conventions that apply to it. */
 export const reviewSubject = Effect.fnUntraced(function* (
-	scope: PrimitiveScope,
+	scope: StepScope,
 	intent: ChangeIntent,
 	range: CommitRange
 ) {
@@ -74,7 +74,7 @@ export const reviewSubject = Effect.fnUntraced(function* (
 	} satisfies ReviewSubject;
 });
 
-const loadReviewers = Effect.fnUntraced(function* (scope: PrimitiveScope) {
+const loadReviewers = Effect.fnUntraced(function* (scope: StepScope) {
 	const reviewers = yield* Reviewers;
 	const home = yield* ShipHome;
 	return yield* reviewers.load({
@@ -87,7 +87,7 @@ const loadReviewers = Effect.fnUntraced(function* (scope: PrimitiveScope) {
  * The Clef input for routing: the saved Cloudflare credentials, or `null` when the project
  * turned Clef off, none are saved, or the file cannot be read, which logs a warning.
  */
-const clefRouting = Effect.fnUntraced(function* (scope: PrimitiveScope) {
+const clefRouting = Effect.fnUntraced(function* (scope: StepScope) {
 	if (!scope.config.reviewers.clef) return null;
 	const home = yield* ShipHome;
 	const credentials: Credentials = yield* readCredentials(home.home).pipe(
@@ -110,7 +110,7 @@ const clefRouting = Effect.fnUntraced(function* (scope: PrimitiveScope) {
  * after a fix, when every reviewer with a must-fix finding in `followUp.previous` runs
  * again too. Reports `ReviewStarted`.
  */
-const route = (input: ReviewPrimitiveInput, kit: StepKit) =>
+const route = (input: ReviewStepInput, kit: StepKit) =>
 	Effect.gen(function* () {
 		const git = yield* Git;
 		const reviewers = yield* Reviewers;
@@ -165,11 +165,11 @@ const route = (input: ReviewPrimitiveInput, kit: StepKit) =>
  * Routing, each reviewer's report and the verdicts are checkpointed (`route`,
  * `reviewer/<name>`, `verify`), so a resumed review re-runs only the reviewers that had
  * not finished. Reviewer calls and the verifier have their own timeouts, so the
- * primitive has none.
+ * step has none.
  */
-export const reviewPrimitive = {
+export const reviewStep = {
 	name: 'review',
-	input: ReviewPrimitiveInput,
+	input: ReviewStepInput,
 	output: ReviewRound,
 	timeoutMs: () => null,
 	run: (input, kit) =>
@@ -255,4 +255,4 @@ export const reviewPrimitive = {
 				findings: verified
 			};
 		})
-} satisfies Primitive<ReviewPrimitiveInput, ReviewRound, unknown>;
+} satisfies Step<ReviewStepInput, ReviewRound, unknown>;

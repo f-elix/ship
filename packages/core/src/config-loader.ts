@@ -8,9 +8,9 @@ import {
 	type ProjectConfig,
 	type ResolvedConfig
 } from './config.ts';
-import type { ProjectKey } from './primitives.ts';
 import { PreconditionReason } from './rpc.ts';
 import { shipPaths, type ShipPaths } from './ship-paths.ts';
+import type { ProjectKey } from './values.ts';
 
 /**
  * A config file is missing or invalid. `reason` uses the `PreconditionFailed` reasons, so

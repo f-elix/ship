@@ -49,8 +49,8 @@ import {
 } from './git.ts';
 import type { Locks } from './locks.ts';
 import { parsePrUrl, prRepoKey } from './pr-url.ts';
-import { GitSha, ProjectKey, SessionId, type Step } from './primitives.ts';
 import { projectKeyOf } from './project-key.ts';
+import { GitSha, ProjectKey, SessionId, type StepName } from './values.ts';
 
 // --- Git ---
 
@@ -357,7 +357,7 @@ export type AgentScript =
 
 /** Which calls a script answers: every call of `step`, or only those with `label`. */
 export interface AgentScriptKey {
-	readonly step: Step;
+	readonly step: StepName;
 	readonly label?: string;
 }
 

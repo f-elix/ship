@@ -1,7 +1,7 @@
 import { Duration, Record, Schema, SchemaGetter, SchemaTransformation, Struct } from 'effect';
 import { withDefault } from './defaults.ts';
-import { Millis, ModelId, NonNegativeInt, PositiveInt, type Step } from './primitives.ts';
 import { ReviewerName } from './reviewer.ts';
+import { Millis, ModelId, NonNegativeInt, PositiveInt, type StepName } from './values.ts';
 
 /** Decode options for config files: unknown keys are errors, so typos do not pass silently. */
 export const configParseOptions = { onExcessProperty: 'error' } as const;
@@ -151,7 +151,7 @@ const timeoutFields = {
 	pr: Timeout
 } satisfies Record<
 	Exclude<
-		Step,
+		StepName,
 		'triage' | 'route' | 'prepare' | 'post' | 'recheck' | 'resolve' | 'commit' | 'push'
 	>,
 	typeof Timeout

@@ -1,4 +1,4 @@
-import { ProjectKey } from './primitives.ts';
+import { ProjectKey } from './values.ts';
 
 // `user@host:path`, the scp-like syntax git accepts for ssh remotes.
 const SCP_LIKE = /^(?:[^@/]+@)?([^:/]+):(?!\/)(.+)$/u;

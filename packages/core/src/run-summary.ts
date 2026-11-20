@@ -1,6 +1,5 @@
 import type { RunEvent } from './event.ts';
 import type { FindingId, VerifiedFinding } from './finding.ts';
-import type { RunId } from './primitives.ts';
 import type {
 	CheckResult,
 	CheckRound,
@@ -8,6 +7,7 @@ import type {
 	ShipSummary,
 	TerminalRunStatus
 } from './run.ts';
+import type { RunId } from './values.ts';
 
 export interface SummaryInput {
 	readonly runId: RunId;

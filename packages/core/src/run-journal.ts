@@ -2,10 +2,10 @@ import { Context, Data, type Effect, type Option } from 'effect';
 import type { RunEvent, RunEventEnvelope } from './event.ts';
 import type { FixRunState, RecheckRunState } from './pr-run.ts';
 import type { PrimitiveRunState } from './primitive-run.ts';
-import type { Env, RunId } from './primitives.ts';
 import type { ReviewRunState } from './review-run.ts';
 import type { InvalidRunStatus, RunNotFound } from './rpc.ts';
 import type { RunState, Summary } from './run.ts';
+import type { Env, RunId } from './values.ts';
 
 /**
  * A persisted machine snapshot, as XState's `getPersistedSnapshot()` returns it, around a

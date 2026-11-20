@@ -18,7 +18,7 @@ import {
 } from '../src/index.ts';
 import { GhFake } from '../src/testing.ts';
 import { baseSha, projectKey, runId } from './fixtures.ts';
-import { withPrimitives } from './primitive-harness.ts';
+import { withSteps } from './step-harness.ts';
 
 const repo = { cwd: '/repo', env: {} };
 const PR_URL = 'https://github.com/f-elix/example/pull/1';
@@ -161,7 +161,7 @@ const comment = (body: string, line = 1, trusted = true) =>
 
 describe('loadFindings', () => {
 	it.effect("reads a PR's open threads, taking a thread ship posted as its stored finding", () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* addPr;
 				yield* storeReview([findingOf(1, 'must-fix'), findingOf(2, 'tradeoff')]);
@@ -201,7 +201,7 @@ describe('loadFindings', () => {
 	);
 
 	it.effect('reads a marked thread from its comment when this machine lacks the review', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* addPr;
 				const posted = yield* comment(
@@ -219,7 +219,7 @@ describe('loadFindings', () => {
 	);
 
 	it.effect("reads a stored review's must-fix findings and nits with the threads it posted", () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* addPr;
 				yield* storeReview([
@@ -254,7 +254,7 @@ describe('loadFindings', () => {
 	);
 
 	it.effect("keeps a finding's id when an earlier thread is resolved", () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* addPr;
 				const first = yield* comment('Rename this.');
@@ -273,7 +273,7 @@ describe('loadFindings', () => {
 	);
 
 	it.effect('ignores threads by authors who may not push, forged markers included', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* addPr;
 				yield* storeReview([findingOf(1, 'must-fix'), findingOf(2, 'tradeoff')]);
@@ -304,7 +304,7 @@ describe('loadFindings', () => {
 	);
 
 	it.effect('gives an unposted review no threads', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				yield* addPr;
 				yield* storeReview([findingOf(1, 'must-fix')], { postedUrl: null });
@@ -321,7 +321,7 @@ describe('loadFindings', () => {
 	);
 
 	it.effect('fails for an unknown review, a review without a PR and an unknown PR', () =>
-		withPrimitives(
+		withSteps(
 			Effect.gen(function* () {
 				const unknown = yield* Effect.flip(
 					loadFindings(repo, FindingsSource.cases.Review.make({ reviewId }))

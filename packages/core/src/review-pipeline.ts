@@ -1,26 +1,26 @@
 /**
  * The `ship review` machine: one review over a pull request, in the caller's checkout at
- * the PR's head. `review` runs the review primitive and stores the review; `post` posts
+ * the PR's head. `review` runs the review step and stores the review; `post` posts
  * it as one GitHub review when the run was started with `--post`.
  */
 import { createEffectLogic, setupEffect } from '@xstate/effect';
 import { DateTime, Effect, Schema } from 'effect';
 import { withCheckpointScope } from './checkpoint.ts';
 import { addCost, fail, machineKit, stepInput, type Next } from './machine-kit.ts';
-import { postPrimitive } from './post.ts';
-import type { PrimitiveScope } from './primitive-scope.ts';
-import { invokePrimitive } from './primitive.ts';
-import { reviewPrimitive, type ReviewPrimitiveInput } from './review-primitive.ts';
+import { postStep } from './post.ts';
 import { ReviewRunState } from './review-run.ts';
+import { reviewStep, type ReviewStepInput } from './review-step.ts';
 import { ChangeIntent } from './reviewers.ts';
 import { RunReporter, type StepOutcome } from './run-step.ts';
 import type { ReviewRound } from './run.ts';
+import type { StepScope } from './step-scope.ts';
+import { invokeStep } from './step.ts';
 import { reviewIdFor, Reviews } from './stored-review.ts';
 
 /** A review run reviews once, as round 1. */
 const ROUND = 1;
 
-const scopeOf = (state: ReviewRunState): PrimitiveScope => ({
+const scopeOf = (state: ReviewRunState): StepScope => ({
 	runId: state.runId,
 	projectKey: state.projectKey,
 	cwd: state.cwd,
@@ -33,7 +33,7 @@ const scopeOf = (state: ReviewRunState): PrimitiveScope => ({
 const reviewIdOf = (state: ReviewRunState) => reviewIdFor(state.runId, ROUND);
 
 /** The review over the PR, against its description; nothing carries over. */
-const reviewInput = (state: ReviewRunState): ReviewPrimitiveInput => ({
+const reviewInput = (state: ReviewRunState): ReviewStepInput => ({
 	...scopeOf(state),
 	round: ROUND,
 	intent: ChangeIntent.cases.Description.make({ title: state.pr.title, body: state.pr.body }),
@@ -41,16 +41,14 @@ const reviewInput = (state: ReviewRunState): ReviewPrimitiveInput => ({
 });
 
 /**
- * Runs the review primitive, then stores its review and reports `ReviewStored`. The
+ * runs the review step, then stores its review and reports `ReviewStored`. The
  * review must be of the PR's pinned head: one of another commit, after `HEAD` moved
  * during the review, fails the run before anything is stored.
  */
 const reviewAndStore = (state: ReviewRunState) =>
 	Effect.gen(function* () {
 		const input = reviewInput(state);
-		const outcome = yield* withCheckpointScope('review')(
-			invokePrimitive(reviewPrimitive, input)
-		);
+		const outcome = yield* withCheckpointScope('review')(invokeStep(reviewStep, input));
 		if (outcome._tag === 'Failed') return outcome;
 		const round = outcome.output;
 		if (round.toSha !== state.pr.headSha) {
@@ -103,7 +101,7 @@ const afterReview = (context: ReviewRunState, round: ReviewRound): ReviewNext =>
 		: { target: 'done', context };
 
 /**
- * The review machine: one state per primitive, like the pipeline. A resumed `review`
+ * The review machine: one state per step, like the pipeline. A resumed `review`
  * re-runs only the reviewers that had not reported, and a resumed `post` finds the review
  * it already posted instead of posting another.
  */
@@ -117,7 +115,7 @@ export const reviewMachine = setupEffect({
 		review: step(reviewAndStore),
 		post: step((state) =>
 			withCheckpointScope('post')(
-				invokePrimitive(postPrimitive, { ...scopeOf(state), review: reviewIdOf(state) })
+				invokeStep(postStep, { ...scopeOf(state), review: reviewIdOf(state) })
 			)
 		)
 	}

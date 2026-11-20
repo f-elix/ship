@@ -6,10 +6,10 @@ import type { GhError } from './gh.ts';
 import { Git, type GitError } from './git.ts';
 import type { UnknownLockResource } from './locks.ts';
 import type { PrPublishError } from './pr.ts';
-import { CostUsd, Step, type Env, type GitSha } from './primitives.ts';
 import type { ReviewerFileError } from './reviewer-markdown.ts';
 import type { AppendableEvent } from './run-journal.ts';
 import { AgentSession } from './run.ts';
+import { CostUsd, StepName, type Env, type GitSha } from './values.ts';
 
 /**
  * Where a step runs git, and the base a timed-out step compares `HEAD` with to tell whether
@@ -40,7 +40,7 @@ export type EventInput = AppendableEvent extends infer E
 
 /** A step ran past its configured timeout. */
 export class StepTimeout extends Schema.TaggedError<StepTimeout>()('StepTimeout', {
-	step: Step,
+	step: StepName,
 	timeoutMs: Schema.Number
 }) {
 	override get message(): string {
@@ -73,7 +73,7 @@ export type StepError =
 
 /** Why a step failed, as the machine needs it to pick the next state. */
 export const StepFailure = Schema.Struct({
-	step: Step,
+	step: StepName,
 	message: Schema.String,
 	/** The step, an agent call or a check command ran past its timeout. */
 	timedOut: Schema.Boolean,
@@ -141,7 +141,7 @@ const TIMED_OUT: Readonly<Record<StepError['_tag'], boolean>> = {
  * The steps that run the implementer, whose session the next fix step resumes: `checks`
  * runs it between passes.
  */
-const IMPLEMENTER_STEPS: ReadonlySet<Step> = new Set(['implement', 'checks', 'fix']);
+const IMPLEMENTER_STEPS: ReadonlySet<StepName> = new Set(['implement', 'checks', 'fix']);
 
 interface FailedSpend {
 	readonly cost: AgentCallCost | null;
@@ -176,7 +176,7 @@ const failedSpend = (error: StepError): FailedSpend => {
  * the cost and implementer session the step produced before failing.
  */
 export const runStep = <A, R>(
-	step: Step,
+	step: StepName,
 	state: Pick<GitRepoAt, 'cwd' | 'env' | 'baseSha'>,
 	options: RunStepOptions,
 	body: (kit: StepKit) => Effect.Effect<A, StepError, R>

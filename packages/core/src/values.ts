@@ -51,11 +51,11 @@ export const ReviewId = Schema.NonEmptyString.pipe(Schema.brand('ReviewId'));
 export type ReviewId = typeof ReviewId.Type;
 
 /**
- * Steps: the primitives and pipeline steps that report `StepStarted` and `StepEnded`, and the
+ * Step names: the steps and pipeline states that report `StepStarted` and `StepEnded`, and the
  * agent calls inside them (`fixChecks` in `checks`, `route` and `verify` in `review`). The
  * names a run no longer reports, such as `prepare`, stay so that older logs still decode.
  */
-export const Step = Schema.Literals([
+export const StepName = Schema.Literals([
 	'baseline',
 	'implement',
 	'checks',
@@ -74,4 +74,4 @@ export const Step = Schema.Literals([
 	'commit',
 	'push'
 ]);
-export type Step = typeof Step.Type;
+export type StepName = typeof StepName.Type;

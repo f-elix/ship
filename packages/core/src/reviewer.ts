@@ -1,6 +1,6 @@
 import { Schema } from 'effect';
 import { withDefault } from './defaults.ts';
-import { ModelId } from './primitives.ts';
+import { ModelId } from './values.ts';
 
 /**
  * Kebab-case reviewer name, e.g. `error-handling` or `ui-a11y`. Like lock resources and

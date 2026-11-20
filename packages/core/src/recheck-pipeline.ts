@@ -9,14 +9,14 @@ import { withCheckpointScope } from './checkpoint.ts';
 import { FindingId } from './finding.ts';
 import { addCost, fail, machineKit, stepInput, type Next } from './machine-kit.ts';
 import { RecheckRunState } from './pr-run.ts';
-import type { PrimitiveScope } from './primitive-scope.ts';
-import { invokePrimitive } from './primitive.ts';
-import { recheckPrimitive } from './recheck.ts';
-import { resolvePrimitive, type FindingThread } from './resolve.ts';
+import { recheckStep } from './recheck.ts';
+import { resolveStep, type FindingThread } from './resolve.ts';
 import type { StepOutcome } from './run-step.ts';
 import type { RecheckedFinding } from './run.ts';
+import type { StepScope } from './step-scope.ts';
+import { invokeStep } from './step.ts';
 
-const scopeOf = (state: RecheckRunState): PrimitiveScope => ({
+const scopeOf = (state: RecheckRunState): StepScope => ({
 	runId: state.runId,
 	projectKey: state.projectKey,
 	cwd: state.cwd,
@@ -72,7 +72,7 @@ export const recheckMachine = setupEffect({
 	actors: {
 		recheck: step((state) =>
 			withCheckpointScope('recheck')(
-				invokePrimitive(recheckPrimitive, {
+				invokeStep(recheckStep, {
 					...scopeOf(state),
 					intent: state.intent,
 					findings: state.findings
@@ -81,7 +81,7 @@ export const recheckMachine = setupEffect({
 		),
 		resolve: step((state) =>
 			withCheckpointScope('resolve')(
-				invokePrimitive(resolvePrimitive, {
+				invokeStep(resolveStep, {
 					...scopeOf(state),
 					prUrl: state.pr.url,
 					headSha: state.pr.headSha,

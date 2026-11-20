@@ -1,7 +1,7 @@
 /**
  * Triage, the `ship run` step between a review and what follows it: sorts the round's
  * verified findings and picks fix, pr or escalate. It is pure, so it is a pipeline step
- * rather than a primitive.
+ * rather than a step.
  */
 import { Data, Effect } from 'effect';
 import type { VerifiedFinding } from './finding.ts';
