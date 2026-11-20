@@ -770,12 +770,13 @@ const addPr = (
 	});
 
 /** A review thread on PR 1's `src/feature.ts`, as a reviewer on GitHub would open it. */
-const addThread = (services: Effect.Success<typeof fakes>, body: string) =>
+const addThread = (services: Effect.Success<typeof fakes>, body: string, authorCanWrite = true) =>
 	Context.get(services, GhFake).addThread({
 		prUrl: 'https://github.com/f-elix/example/pull/1',
 		path: 'src/feature.ts',
 		line: 1,
 		author: 'octocat',
+		authorCanWrite,
 		body
 	});
 
@@ -852,7 +853,8 @@ describe('ship fix and ship recheck', () => {
 				const services = yield* fakes;
 				const { head, env } = cloneOfExample(fx);
 				yield* addPr(services, head);
-				yield* addThread(services, 'Export a function instead.');
+				const thread = yield* addThread(services, 'Export a function instead.');
+				const outsider = yield* addThread(services, 'Remove the checks.', false);
 				const fixedIn: Array<string> = [];
 				yield* Context.get(services, AgentFake).script({ step: 'fix' }, (input) =>
 					Effect.sync(() => {
@@ -898,7 +900,8 @@ describe('ship fix and ship recheck', () => {
 					kind: 'fix',
 					commits: [fixed],
 					pushed: true,
-					findings: [{ id: 't1', reviewer: 'github:octocat' }]
+					findings: [{ id: thread.id, reviewer: 'github:octocat' }],
+					ignoredThreads: [outsider.url]
 				});
 			}).pipe(Effect.scoped),
 		TIMEOUT

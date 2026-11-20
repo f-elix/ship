@@ -121,8 +121,8 @@ const costOf = (input: SummaryInput) =>
 	ofTag(input.events, 'AgentCost').reduce((total, event) => total + event.costUsd, 0);
 
 /**
- * A fix run's summary, built from its event log: the PR and the findings from
- * `PrRunCreated`, the commits from `CommitCreated` and whether it pushed from
+ * A fix run's summary, built from its event log: the PR, the findings and the ignored
+ * threads from `PrRunCreated`, the commits from `CommitCreated` and whether it pushed from
  * `BranchPushed`.
  */
 export const buildFixSummary = (input: SummaryInput): FixSummary => {
@@ -133,6 +133,7 @@ export const buildFixSummary = (input: SummaryInput): FixSummary => {
 		status: input.status,
 		prUrl: created?.prUrl ?? '',
 		findings: created?.findings ?? [],
+		ignoredThreads: created?.ignoredThreads ?? [],
 		commits: [...new Set(ofTag(input.events, 'CommitCreated').map((event) => event.sha))],
 		pushed: ofTag(input.events, 'BranchPushed').length > 0,
 		checks: checkRounds(input.events),
@@ -142,19 +143,23 @@ export const buildFixSummary = (input: SummaryInput): FixSummary => {
 };
 
 /**
- * A recheck run's summary, built from its event log: the PR from `PrRunCreated`, each
- * finding's status from the latest `FindingsRechecked`, and the threads `ThreadResolved`
- * reports.
+ * A recheck run's summary, built from its event log: the PR and the ignored threads from
+ * `PrRunCreated`, each finding's status from the latest `FindingsRechecked`, and the
+ * threads `ThreadResolved` reports.
  */
-export const buildRecheckSummary = (input: SummaryInput): RecheckSummary => ({
-	kind: 'recheck',
-	runId: input.runId,
-	status: input.status,
-	prUrl: ofTag(input.events, 'PrRunCreated')[0]?.prUrl ?? '',
-	findings: ofTag(input.events, 'FindingsRechecked').at(-1)?.findings ?? [],
-	resolvedThreads: [
-		...new Set(ofTag(input.events, 'ThreadResolved').map((event) => event.threadId))
-	],
-	costUsd: costOf(input),
-	error: input.status === 'failed' ? input.error : null
-});
+export const buildRecheckSummary = (input: SummaryInput): RecheckSummary => {
+	const created = ofTag(input.events, 'PrRunCreated')[0];
+	return {
+		kind: 'recheck',
+		runId: input.runId,
+		status: input.status,
+		prUrl: created?.prUrl ?? '',
+		findings: ofTag(input.events, 'FindingsRechecked').at(-1)?.findings ?? [],
+		resolvedThreads: [
+			...new Set(ofTag(input.events, 'ThreadResolved').map((event) => event.threadId))
+		],
+		ignoredThreads: created?.ignoredThreads ?? [],
+		costUsd: costOf(input),
+		error: input.status === 'failed' ? input.error : null
+	};
+};

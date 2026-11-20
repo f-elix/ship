@@ -34,8 +34,9 @@ import { RunStore, type StoredRunStatus } from '@ship/store';
 import { Context, Deferred, Effect, Queue, Ref, Schema, Stream } from 'effect';
 import type { Rpc, RpcGroup } from 'effect/rpc';
 import {
-	checkFindingsPreconditions,
+	checkFixPreconditions,
 	checkPreconditions,
+	checkRecheckPreconditions,
 	checkReviewPreconditions,
 	loadProjectConfig
 } from './preconditions.ts';
@@ -84,7 +85,8 @@ export const handlers = ShipRpcs.toLayer(
 		const preconditions = yield* Effect.context<
 			| Effect.Services<ReturnType<typeof checkPreconditions>>
 			| Effect.Services<ReturnType<typeof checkReviewPreconditions>>
-			| Effect.Services<ReturnType<typeof checkFindingsPreconditions>>
+			| Effect.Services<ReturnType<typeof checkFixPreconditions>>
+			| Effect.Services<ReturnType<typeof checkRecheckPreconditions>>
 		>();
 		const git = yield* Git;
 		const checks = yield* Checks;
@@ -221,7 +223,7 @@ export const handlers = ShipRpcs.toLayer(
 			}),
 
 			fix: Effect.fn('Daemon.fix')(function* (request) {
-				const start = yield* checkFindingsPreconditions('fix', request).pipe(
+				const start = yield* checkFixPreconditions(request).pipe(
 					Effect.provide(preconditions)
 				);
 				if (!(yield* host.accepting)) return yield* Effect.interrupt;
@@ -237,7 +239,8 @@ export const handlers = ShipRpcs.toLayer(
 							baseSha: start.pr.headSha,
 							headSha: start.pr.headSha,
 							source: request.source,
-							findings: start.loaded.findings
+							findings: start.loaded.findings,
+							ignoredThreads: start.loaded.ignoredThreads
 						});
 						const state = initialFixRunState({
 							runId,
@@ -260,11 +263,9 @@ export const handlers = ShipRpcs.toLayer(
 			}),
 
 			recheck: Effect.fn('Daemon.recheck')(function* (request) {
-				const start = yield* checkFindingsPreconditions('recheck', request).pipe(
+				const start = yield* checkRecheckPreconditions(request).pipe(
 					Effect.provide(preconditions)
 				);
-				// Set for every recheck run.
-				const baseSha = start.mergeBase ?? start.pr.headSha;
 				if (!(yield* host.accepting)) return yield* Effect.interrupt;
 				// Created and launched as one step, like `run`.
 				const runId = yield* Effect.uninterruptible(
@@ -275,10 +276,11 @@ export const handlers = ShipRpcs.toLayer(
 							repoDir: request.cwd,
 							prUrl: start.pr.url,
 							prNumber: start.pr.number,
-							baseSha,
+							baseSha: start.baseSha,
 							headSha: start.pr.headSha,
 							source: request.source,
-							findings: start.loaded.findings
+							findings: start.loaded.findings,
+							ignoredThreads: start.loaded.ignoredThreads
 						});
 						const state = initialRecheckRunState({
 							runId,
@@ -286,7 +288,7 @@ export const handlers = ShipRpcs.toLayer(
 							cwd: request.cwd,
 							env: request.env,
 							config: start.config,
-							baseSha,
+							baseSha: start.baseSha,
 							pr: start.pr,
 							intent: start.loaded.intent,
 							findings: start.loaded.findings,

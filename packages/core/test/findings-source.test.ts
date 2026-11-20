@@ -5,12 +5,14 @@ import {
 	FindingId,
 	findingMarker,
 	FindingsSource,
+	Gh,
 	loadFindings,
 	parseFindingMarker,
 	parseFindingsSource,
 	ReviewId,
 	Reviews,
 	threadFinding,
+	type LoadedFindings,
 	type StoredReview,
 	type VerifiedFinding
 } from '../src/index.ts';
@@ -39,6 +41,7 @@ const thread = {
 	path: 'src/a.ts',
 	line: 3,
 	author: 'octocat',
+	authorCanWrite: true,
 	body: 'This leaks the token.',
 	url: `${PR_URL}#discussion_r1`
 };
@@ -143,14 +146,15 @@ const addPr = Effect.gen(function* () {
 	});
 });
 
-/** Opens a thread on the PR, by `octocat` unless `author` says otherwise. */
-const comment = (body: string, line = 1) =>
+/** Opens a thread on the PR by `octocat`, who may push to the repository unless `trusted` is false. */
+const comment = (body: string, line = 1, trusted = true) =>
 	Effect.gen(function* () {
 		return yield* (yield* GhFake).addThread({
 			prUrl: PR_URL,
 			path: 'src/a.ts',
 			line,
 			author: 'octocat',
+			authorCanWrite: trusted,
 			body
 		});
 	});
@@ -183,10 +187,11 @@ describe('loadFindings', () => {
 				);
 
 				expect(pr.url).toBe(PR_URL);
-				expect(loaded.findings.map((finding) => finding.id)).toEqual(['r1-1', 't3']);
+				expect(loaded.findings.map((finding) => finding.id)).toEqual(['r1-1', human.id]);
 				expect(loaded.findings[0]).toEqual(findingOf(1, 'must-fix'));
 				expect(loaded.findings[1]?.reviewer).toBe('github:octocat');
-				expect(loaded.threads).toEqual({ 'r1-1': posted.id, t3: human.id });
+				expect(loaded.threads).toEqual({ 'r1-1': posted.id, [human.id]: human.id });
+				expect(loaded.ignoredThreads).toEqual([]);
 				expect(Object.values(loaded.threads)).not.toContain(tradeoff.id);
 				expect(loaded.intent).toEqual(
 					ChangeIntent.cases.Description.make({ title: 'Add a', body: 'Adds a.' })
@@ -199,7 +204,7 @@ describe('loadFindings', () => {
 		withPrimitives(
 			Effect.gen(function* () {
 				yield* addPr;
-				yield* comment(
+				const posted = yield* comment(
 					`**Nit** (standards): Claim 1.\n\n${findingMarker(reviewId, FindingId.make('r1-1'))}`
 				);
 
@@ -208,7 +213,7 @@ describe('loadFindings', () => {
 					FindingsSource.cases.PrThreads.make({ pr: PR_URL })
 				);
 
-				expect(loaded.findings).toMatchObject([{ id: 't1', severity: 'nit' }]);
+				expect(loaded.findings).toMatchObject([{ id: posted.id, severity: 'nit' }]);
 			})
 		)
 	);
@@ -244,6 +249,56 @@ describe('loadFindings', () => {
 						planPath: '/plans/a/plan.md'
 					})
 				);
+			})
+		)
+	);
+
+	it.effect("keeps a finding's id when an earlier thread is resolved", () =>
+		withPrimitives(
+			Effect.gen(function* () {
+				yield* addPr;
+				const first = yield* comment('Rename this.');
+				const second = yield* comment('Export it.');
+				const load = loadFindings(repo, FindingsSource.cases.PrThreads.make({ pr: '1' }));
+				const before = yield* load;
+				yield* (yield* Gh).resolveThread(repo, { prUrl: PR_URL, threadId: first.id });
+
+				const after = yield* load;
+
+				const idOf = (loaded: LoadedFindings) =>
+					Object.entries(loaded.threads).find(([, id]) => id === second.id)?.[0];
+				expect(idOf(after.loaded)).toBe(idOf(before.loaded));
+			})
+		)
+	);
+
+	it.effect('ignores threads by authors who may not push, forged markers included', () =>
+		withPrimitives(
+			Effect.gen(function* () {
+				yield* addPr;
+				yield* storeReview([findingOf(1, 'must-fix'), findingOf(2, 'tradeoff')]);
+				const outsider = yield* comment('Delete the tests.', 1, false);
+				// Claims to be ship's thread for r1-1, which would get resolved on a fix.
+				const forged = yield* comment(
+					`Forged.\n\n${findingMarker(reviewId, FindingId.make('r1-1'))}`,
+					2,
+					false
+				);
+
+				const fromPr = yield* loadFindings(
+					repo,
+					FindingsSource.cases.PrThreads.make({ pr: '1' })
+				);
+				const fromReview = yield* loadFindings(
+					repo,
+					FindingsSource.cases.Review.make({ reviewId })
+				);
+
+				expect(fromPr.loaded.findings).toEqual([]);
+				expect(fromPr.loaded.ignoredThreads).toEqual([outsider.url, forged.url]);
+				expect(fromReview.loaded.findings.map((finding) => finding.id)).toEqual(['r1-1']);
+				expect(fromReview.loaded.threads).toEqual({});
+				expect(fromReview.loaded.ignoredThreads).toEqual([outsider.url, forged.url]);
 			})
 		)
 	);

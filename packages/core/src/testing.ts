@@ -533,10 +533,13 @@ export interface GhFakeShape {
 	readonly afterSubmit: (hook: Effect.Effect<void>) => Effect.Effect<void>;
 	/** Every review thread, oldest first; posting a review opens one per inline comment. */
 	readonly threads: Effect.Effect<ReadonlyArray<FakeThread>>;
-	/** Opens a review thread on a PR, as a reviewer commenting on GitHub would. */
+	/**
+	 * Opens a review thread on a PR, as a reviewer commenting on GitHub would; one who may
+	 * push to the repository unless `authorCanWrite` says otherwise.
+	 */
 	readonly addThread: (
-		thread: Omit<FakeThread, 'id' | 'url' | 'resolved' | 'outdated'> &
-			Partial<Pick<FakeThread, 'resolved' | 'outdated'>>
+		thread: Omit<FakeThread, 'id' | 'url' | 'resolved' | 'outdated' | 'authorCanWrite'> &
+			Partial<Pick<FakeThread, 'resolved' | 'outdated' | 'authorCanWrite'>>
 	) => Effect.Effect<FakeThread>;
 	/**
 	 * Runs `hook` inside every later `resolveThread`, after the thread is resolved: a hook
@@ -567,6 +570,7 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 					const created: FakeThread = {
 						resolved: false,
 						outdated: false,
+						authorCanWrite: true,
 						...thread,
 						id: `PRRT_${n}`,
 						url: `${thread.prUrl}#discussion_r${n}`

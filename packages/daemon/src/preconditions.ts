@@ -168,59 +168,17 @@ export interface ReviewStart {
  */
 export const checkReviewPreconditions = Effect.fn('checkReviewPreconditions')(
 	function* (request: ReviewRequest) {
-		const git = yield* Git;
 		const gh = yield* Gh;
-		const loader = yield* ConfigLoader;
 		const repo = { cwd: request.cwd, env: request.env };
 
-		yield* git
-			.repoRoot(repo)
-			.pipe(Effect.mapError((error) => failed('not-a-git-repo', error.message)));
-		const projectKey = yield* git.projectKey(repo);
+		const projectKey = yield* originKey(repo);
 		const pr = yield* gh
 			.viewPr(repo, request.pr)
 			.pipe(Effect.mapError((error) => failed('pr-not-found', error.message, error)));
-		const prRepo = prRepoKey(pr.url);
-		if (prRepo !== projectKey) {
-			return yield* failed(
-				'pr-other-repo',
-				`${pr.url} belongs to ${prRepo ?? 'another repository'}, but origin is ${projectKey}; run ship review from a clone of the PR's base repository`
-			);
-		}
-
-		const { resolved } = yield* loader
-			.loadOrDefaults(projectKey)
-			.pipe(
-				Effect.mapError((error) => failed(error.reason, `${error.path}: ${error.detail}`))
-			);
-
-		const checkout = `run \`gh pr checkout ${pr.number}\` first`;
-		if (!(yield* git.isClean(repo))) {
-			return yield* failed(
-				'dirty-tree',
-				`${request.cwd} has uncommitted changes; commit or stash them, then ${checkout}`
-			);
-		}
-		const headSha = pr.headSha;
-		const head = yield* git.headSha(repo);
-		if (head !== headSha) {
-			return yield* failed(
-				'pr-not-checked-out',
-				`HEAD in ${request.cwd} is ${head}, not ${pr.url}'s head ${headSha}; ${checkout}`
-			);
-		}
-		const baseTip = yield* git
-			.fetchRef(repo, `refs/heads/${pr.baseRef}`)
-			.pipe(
-				Effect.mapError((error) =>
-					failed(
-						'base-fetch-failed',
-						`Could not fetch ${pr.url}'s base branch ${pr.baseRef} from origin: ${error.message}`,
-						error
-					)
-				)
-			);
-		const baseSha = yield* git.mergeBase(repo, baseTip, headSha);
+		yield* requireOriginPr('review', pr, projectKey);
+		const config = yield* loadConfigOrDefaults(projectKey);
+		yield* requireCheckedOut(repo, pr);
+		const baseSha = yield* prMergeBase(repo, pr);
 		return {
 			projectKey,
 			pr: {
@@ -229,9 +187,9 @@ export const checkReviewPreconditions = Effect.fn('checkReviewPreconditions')(
 				title: pr.title,
 				body: pr.body,
 				baseSha,
-				headSha
+				headSha: pr.headSha
 			},
-			config: resolved
+			config
 		} satisfies ReviewStart;
 	},
 	Effect.catchTags({ GitError: Effect.die })
@@ -248,16 +206,24 @@ export interface FindingsRequest {
 	readonly env: Env;
 }
 
-/** What a fix or recheck run starts from once its preconditions hold. */
-export interface FindingsStart {
+/** What a fix run starts from once its preconditions hold. */
+export interface FixStart {
 	readonly projectKey: ProjectKey;
 	readonly pr: TargetPr;
 	readonly loaded: LoadedFindings;
 	readonly config: ResolvedConfig;
-	/** The PR's branch, where a fix run pushes; `null` with `local`. */
+	/** The PR's branch, where the run pushes; `null` with `local`. */
 	readonly push: PushTarget | null;
-	/** The merge base of the PR's base branch and its head; only a recheck run needs it. */
-	readonly mergeBase: GitSha | null;
+}
+
+/** What a recheck run starts from once its preconditions hold. */
+export interface RecheckStart {
+	readonly projectKey: ProjectKey;
+	readonly pr: TargetPr;
+	readonly loaded: LoadedFindings;
+	readonly config: ResolvedConfig;
+	/** The merge base of the PR's base branch and its head, where the run's range starts. */
+	readonly baseSha: GitSha;
 }
 
 /**
@@ -275,92 +241,22 @@ export const pushTarget = (pr: PrDetails): PushTarget | null => {
 };
 
 /**
- * Checks that `ship fix` (`kind` `fix`) or `ship recheck` can work through `source` in the
- * caller's checkout, and loads its findings: the source exists and names a PR of the
- * repository `origin` points at, the project config is valid (a fix run needs it, for its
- * checks; a recheck run takes the defaults without one), the checkout is clean with `HEAD`
- * at the PR's head, and there is at least one must-fix finding or nit. A fix run that
- * pushes also needs a PR branch it may push to; a recheck run fetches the PR's base branch
- * for the merge base, as `ship review` does.
+ * Checks that `ship fix` can work through `request.source` in the caller's checkout, and
+ * loads its findings: the source exists and names a PR of the repository `origin` points
+ * at, the project config is valid (the run needs it for its checks), the checkout is clean
+ * with `HEAD` at the PR's head, the PR's branch can be pushed to unless `local`, and there
+ * is at least one must-fix finding or nit.
  *
- * Git failures past the first check are defects, except fetching the base branch, which
- * fails as `base-fetch-failed`.
+ * Git failures past the first check are defects.
  */
-export const checkFindingsPreconditions = Effect.fn('checkFindingsPreconditions')(
-	function* (kind: 'fix' | 'recheck', request: FindingsRequest) {
-		const git = yield* Git;
-		const loader = yield* ConfigLoader;
+export const checkFixPreconditions = Effect.fn('checkFixPreconditions')(
+	function* (request: FindingsRequest) {
 		const repo = { cwd: request.cwd, env: request.env };
-
-		yield* git
-			.repoRoot(repo)
-			.pipe(Effect.mapError((error) => failed('not-a-git-repo', error.message)));
-		const projectKey = yield* git.projectKey(repo);
-		const { pr, loaded } = yield* loadFindings(repo, request.source).pipe(
-			Effect.catchTags({
-				ReviewNotFound: (error) =>
-					Effect.fail(
-						failed(
-							'review-not-found',
-							`${error.message}; \`ship list\` shows the runs that stored reviews`,
-							error
-						)
-					),
-				ReviewWithoutPr: (error) =>
-					Effect.fail(
-						failed(
-							'review-without-pr',
-							`${error.message}; open a PR and run \`ship review\` on it first`,
-							error
-						)
-					),
-				PrNotFound: (error) => Effect.fail(failed('pr-not-found', error.message, error)),
-				GhError: (error) =>
-					Effect.fail(
-						failed(
-							'github-failed',
-							`Could not read the review threads: ${error.message}`,
-							error
-						)
-					)
-			})
-		);
-		const prRepo = prRepoKey(pr.url);
-		if (prRepo !== projectKey) {
-			return yield* failed(
-				'pr-other-repo',
-				`${pr.url} belongs to ${prRepo ?? 'another repository'}, but origin is ${projectKey}; run ship ${kind} from a clone of the PR's base repository`
-			);
-		}
-
-		const config =
-			kind === 'fix'
-				? yield* loadProjectConfig(projectKey)
-				: (yield* loader
-						.loadOrDefaults(projectKey)
-						.pipe(
-							Effect.mapError((error) =>
-								failed(error.reason, `${error.path}: ${error.detail}`)
-							)
-						)).resolved;
-
-		const checkout = `run \`gh pr checkout ${pr.number}\` first`;
-		if (!(yield* git.isClean(repo))) {
-			return yield* failed(
-				'dirty-tree',
-				`${request.cwd} has uncommitted changes; commit or stash them, then ${checkout}`
-			);
-		}
-		const head = yield* git.headSha(repo);
-		if (head !== pr.headSha) {
-			return yield* failed(
-				'pr-not-checked-out',
-				`HEAD in ${request.cwd} is ${head}, not ${pr.url}'s head ${pr.headSha}; ${checkout}`
-			);
-		}
-
-		const push = kind === 'fix' && !request.local ? pushTarget(pr) : null;
-		if (kind === 'fix' && !request.local && push === null) {
+		const { projectKey, pr, loaded } = yield* loadSource('fix', repo, request.source);
+		const config = yield* loadProjectConfig(projectKey);
+		yield* requireCheckedOut(repo, pr);
+		const push = request.local ? null : pushTarget(pr);
+		if (!request.local && push === null) {
 			return yield* failed(
 				'pr-not-pushable',
 				pr.headRepository === null
@@ -368,36 +264,170 @@ export const checkFindingsPreconditions = Effect.fn('checkFindingsPreconditions'
 					: `${pr.url} comes from a fork whose maintainers may not push to it; run with --local to keep the fix local`
 			);
 		}
-		if (loaded.findings.length === 0) {
-			return yield* failed(
-				'no-findings',
-				`There are no must-fix findings or nits to ${kind} on ${pr.url}`
-			);
-		}
-
-		let mergeBase: GitSha | null = null;
-		if (kind === 'recheck') {
-			const baseTip = yield* git
-				.fetchRef(repo, `refs/heads/${pr.baseRef}`)
-				.pipe(
-					Effect.mapError((error) =>
-						failed(
-							'base-fetch-failed',
-							`Could not fetch ${pr.url}'s base branch ${pr.baseRef} from origin: ${error.message}`,
-							error
-						)
-					)
-				);
-			mergeBase = yield* git.mergeBase(repo, baseTip, pr.headSha);
-		}
+		yield* requireFindings('fix', pr, loaded);
 		return {
 			projectKey,
-			pr: { number: pr.number, url: pr.url, headSha: pr.headSha },
+			pr: targetPr(pr),
 			loaded,
 			config,
-			push,
-			mergeBase
-		} satisfies FindingsStart;
+			push
+		} satisfies FixStart;
 	},
 	Effect.catchTags({ GitError: Effect.die })
 );
+
+/**
+ * Checks that `ship recheck` can recheck `request.source` in the caller's checkout, and
+ * loads its findings: as `checkFixPreconditions`, except that the project config may be
+ * missing (the defaults apply) and nothing is pushed. It fetches the PR's base branch for
+ * the merge base, as `ship review` does.
+ *
+ * Git failures past the first check are defects, except fetching the base branch, which
+ * fails as `base-fetch-failed`.
+ */
+export const checkRecheckPreconditions = Effect.fn('checkRecheckPreconditions')(
+	function* (request: FindingsRequest) {
+		const repo = { cwd: request.cwd, env: request.env };
+		const { projectKey, pr, loaded } = yield* loadSource('recheck', repo, request.source);
+		const config = yield* loadConfigOrDefaults(projectKey);
+		yield* requireCheckedOut(repo, pr);
+		yield* requireFindings('recheck', pr, loaded);
+		const baseSha = yield* prMergeBase(repo, pr);
+		return {
+			projectKey,
+			pr: targetPr(pr),
+			loaded,
+			config,
+			baseSha
+		} satisfies RecheckStart;
+	},
+	Effect.catchTags({ GitError: Effect.die })
+);
+
+const targetPr = (pr: PrDetails): TargetPr => ({
+	number: pr.number,
+	url: pr.url,
+	headSha: pr.headSha
+});
+
+/** Loads `source` and checks that its PR belongs to the repository `origin` points at. */
+const loadSource = Effect.fnUntraced(function* (
+	command: 'fix' | 'recheck',
+	repo: Repo,
+	source: FindingsSource
+) {
+	const projectKey = yield* originKey(repo);
+	const { pr, loaded } = yield* loadFindings(repo, source).pipe(
+		Effect.catchTags({
+			ReviewNotFound: (error) =>
+				Effect.fail(
+					failed(
+						'review-not-found',
+						`${error.message}; \`ship list\` shows the runs that stored reviews`,
+						error
+					)
+				),
+			ReviewWithoutPr: (error) =>
+				Effect.fail(
+					failed(
+						'review-without-pr',
+						`${error.message}; open a PR and run \`ship review\` on it first`,
+						error
+					)
+				),
+			PrNotFound: (error) => Effect.fail(failed('pr-not-found', error.message, error)),
+			GhError: (error) =>
+				Effect.fail(
+					failed(
+						'github-failed',
+						`Could not read the review threads: ${error.message}`,
+						error
+					)
+				)
+		})
+	);
+	yield* requireOriginPr(command, pr, projectKey);
+	return { projectKey, pr, loaded };
+});
+
+/** Fails when the source has no must-fix finding or nit to work through. */
+const requireFindings = (command: 'fix' | 'recheck', pr: PrDetails, loaded: LoadedFindings) =>
+	loaded.findings.length > 0
+		? Effect.void
+		: Effect.fail(
+				failed(
+					'no-findings',
+					`There are no must-fix findings or nits to ${command} on ${pr.url}`
+				)
+			);
+
+// --- The checks `review`, `fix` and `recheck` share ---
+
+type Repo = { readonly cwd: string; readonly env: Env };
+
+/** The project `origin` points at, failing as `not-a-git-repo` outside a repo. */
+const originKey = Effect.fnUntraced(function* (repo: Repo) {
+	const git = yield* Git;
+	yield* git
+		.repoRoot(repo)
+		.pipe(Effect.mapError((error) => failed('not-a-git-repo', error.message)));
+	return yield* git.projectKey(repo);
+});
+
+/** The project config, or the defaults when the project has none. */
+const loadConfigOrDefaults = Effect.fnUntraced(function* (projectKey: ProjectKey) {
+	const loader = yield* ConfigLoader;
+	const { resolved } = yield* loader
+		.loadOrDefaults(projectKey)
+		.pipe(Effect.mapError((error) => failed(error.reason, `${error.path}: ${error.detail}`)));
+	return resolved;
+});
+
+/** Fails unless `pr` is a PR of the repository `origin` points at. */
+const requireOriginPr = (command: string, pr: PrDetails, projectKey: ProjectKey) => {
+	const prRepo = prRepoKey(pr.url);
+	return prRepo === projectKey
+		? Effect.void
+		: Effect.fail(
+				failed(
+					'pr-other-repo',
+					`${pr.url} belongs to ${prRepo ?? 'another repository'}, but origin is ${projectKey}; run ship ${command} from a clone of the PR's base repository`
+				)
+			);
+};
+
+/** Fails unless the checkout is clean with `HEAD` at `pr`'s head. */
+const requireCheckedOut = Effect.fnUntraced(function* (repo: Repo, pr: PrDetails) {
+	const git = yield* Git;
+	const checkout = `run \`gh pr checkout ${pr.number}\` first`;
+	if (!(yield* git.isClean(repo))) {
+		return yield* failed(
+			'dirty-tree',
+			`${repo.cwd} has uncommitted changes; commit or stash them, then ${checkout}`
+		);
+	}
+	const head = yield* git.headSha(repo);
+	if (head !== pr.headSha) {
+		return yield* failed(
+			'pr-not-checked-out',
+			`HEAD in ${repo.cwd} is ${head}, not ${pr.url}'s head ${pr.headSha}; ${checkout}`
+		);
+	}
+});
+
+/** Fetches `pr`'s base branch from `origin` and returns its merge base with the PR's head. */
+const prMergeBase = Effect.fnUntraced(function* (repo: Repo, pr: PrDetails) {
+	const git = yield* Git;
+	const baseTip = yield* git
+		.fetchRef(repo, `refs/heads/${pr.baseRef}`)
+		.pipe(
+			Effect.mapError((error) =>
+				failed(
+					'base-fetch-failed',
+					`Could not fetch ${pr.url}'s base branch ${pr.baseRef} from origin: ${error.message}`,
+					error
+				)
+			)
+		);
+	return yield* git.mergeBase(repo, baseTip, pr.headSha);
+});

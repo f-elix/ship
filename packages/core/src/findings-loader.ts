@@ -46,15 +46,21 @@ export const LoadedFindings = Schema.Struct({
 	findings: Schema.Array(VerifiedFinding),
 	/** The open review thread of each finding that has one, by finding id. */
 	threads: Schema.Record(Schema.String, Schema.String),
+	/**
+	 * The URLs of the open threads left out because their author may not push to the
+	 * repository: anyone can comment on a public PR, and ship would act on what they say.
+	 */
+	ignoredThreads: Schema.Array(Schema.String),
 	/** What the change sets out to do: the stored review's intent, or the PR's description. */
 	intent: ChangeIntent
 });
 export interface LoadedFindings extends Schema.Schema.Type<typeof LoadedFindings> {}
 
-/** GitHub has no PR `ref` names, or `gh` could not read it. */
+/** `ref` names no PR on GitHub, or `gh` could not read it. */
 export class PrNotFound extends Schema.TaggedError<PrNotFound>()('PrNotFound', {
 	ref: Schema.String,
-	detail: Schema.String
+	detail: Schema.String,
+	cause: Schema.optionalKey(Schema.Defect())
 }) {
 	override get message(): string {
 		return `Could not read the pull request ${this.ref}: ${this.detail}`;
@@ -82,20 +88,27 @@ const storedFinding = Effect.fnUntraced(function* (thread: ReviewThread) {
 	return review?.findings.find((finding) => finding.id === marker.findingId) ?? null;
 });
 
+/** Splits `threads` into those whose author may push to the repository and the rest's URLs. */
+const byTrust = (threads: ReadonlyArray<ReviewThread>) => ({
+	trusted: threads.filter((thread) => thread.authorCanWrite),
+	ignoredThreads: threads.filter((thread) => !thread.authorCanWrite).map((thread) => thread.url)
+});
+
 /**
  * A PR's open threads as findings. A thread ship posted is its stored finding, id
  * included, when this machine still has the review and no earlier thread took the id;
- * otherwise it keeps only its labelled severity. Other threads get ids `t1`, `t2`, ….
+ * otherwise it keeps only its labelled severity. Other threads take their GitHub id, so a
+ * finding keeps its id as threads around it are resolved.
  */
 const fromThreads = Effect.fnUntraced(function* (threads: ReadonlyArray<ReviewThread>) {
 	const findings: Array<VerifiedFinding> = [];
 	const byFinding: Record<string, string> = {};
-	for (const [index, thread] of threads.entries()) {
+	for (const thread of threads) {
 		const stored = yield* storedFinding(thread);
 		const finding =
 			stored !== null && !(stored.id in byFinding)
 				? stored
-				: threadFinding(thread, FindingId.make(`t${index + 1}`));
+				: threadFinding(thread, FindingId.make(thread.id));
 		if (!actionable(finding)) continue;
 		findings.push(finding);
 		byFinding[finding.id] = thread.id;
@@ -135,14 +148,20 @@ export const loadFindings = Effect.fn('loadFindings')(function* (
 	const viewPr = (ref: string) =>
 		gh
 			.viewPr(repo, ref)
-			.pipe(Effect.mapError((error) => new PrNotFound({ ref, detail: error.stderr.trim() })));
+			.pipe(
+				Effect.mapError(
+					(error) => new PrNotFound({ ref, detail: error.stderr.trim(), cause: error })
+				)
+			);
 	if (source._tag === 'PrThreads') {
 		const pr = yield* viewPr(source.pr);
-		const fromPr = yield* fromThreads(yield* gh.reviewThreads(repo, pr.url));
+		const { trusted, ignoredThreads } = byTrust(yield* gh.reviewThreads(repo, pr.url));
+		const fromPr = yield* fromThreads(trusted);
 		return {
 			pr,
 			loaded: {
 				...fromPr,
+				ignoredThreads,
 				intent: ChangeIntent.cases.Description.make({ title: pr.title, body: pr.body })
 			}
 		};
@@ -152,9 +171,11 @@ export const loadFindings = Effect.fn('loadFindings')(function* (
 	if (prUrl === null) return yield* new ReviewWithoutPr({ reviewId: review.id });
 	const pr = yield* viewPr(prUrl);
 	// Only a posted review has threads on the PR.
-	const threads = review.postedUrl === null ? [] : yield* gh.reviewThreads(repo, pr.url);
+	const { trusted, ignoredThreads } = byTrust(
+		review.postedUrl === null ? [] : yield* gh.reviewThreads(repo, pr.url)
+	);
 	return {
 		pr,
-		loaded: { ...fromReview(review, threads), intent: review.subject.intent }
+		loaded: { ...fromReview(review, trusted), ignoredThreads, intent: review.subject.intent }
 	};
 });

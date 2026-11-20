@@ -376,9 +376,11 @@ esac
 	const thread = (
 		id: string,
 		state: { readonly isResolved?: boolean; readonly isOutdated?: boolean } = {},
-		comments: ReadonlyArray<{ readonly login: string | null; readonly body: string }> = [
-			{ login: 'octocat', body: `Fix ${id}.` }
-		]
+		comments: ReadonlyArray<{
+			readonly login: string | null;
+			readonly body: string;
+			readonly association?: string;
+		}> = [{ login: 'octocat', body: `Fix ${id}.` }]
 	) =>
 		JSON.stringify({
 			id,
@@ -389,6 +391,7 @@ esac
 			comments: {
 				nodes: comments.map((comment, index) => ({
 					author: comment.login === null ? null : { login: comment.login },
+					authorAssociation: comment.association ?? 'MEMBER',
 					body: comment.body,
 					url: `https://github.com/o/r/pull/7#discussion_r${id}${index}`
 				}))
@@ -408,7 +411,9 @@ esac
 						thread('PRRT_resolved', { isResolved: true }),
 						thread('PRRT_outdated', { isOutdated: true }),
 						// Page 2.
-						thread('PRRT_file', {}, [{ login: null, body: 'Split this file.' }]),
+						thread('PRRT_file', {}, [
+							{ login: null, body: 'Split this file.', association: 'NONE' }
+						]),
 						thread('PRRT_empty', {}, []),
 						''
 					].join('\n')
@@ -426,6 +431,7 @@ esac
 						path: 'src/a.ts',
 						line: 3,
 						author: 'octocat',
+						authorCanWrite: true,
 						body: 'Fix this.',
 						url: 'https://github.com/o/r/pull/7#discussion_rPRRT_open0'
 					},
@@ -434,6 +440,7 @@ esac
 						path: 'src/a.ts',
 						line: null,
 						author: null,
+						authorCanWrite: false,
 						body: 'Split this file.',
 						url: 'https://github.com/o/r/pull/7#discussion_rPRRT_file0'
 					}

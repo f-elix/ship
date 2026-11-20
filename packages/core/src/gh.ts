@@ -56,6 +56,11 @@ export interface ReviewThread {
 	readonly line: number | null;
 	/** The first comment's author's login, or `null` when the account was deleted. */
 	readonly author: string | null;
+	/**
+	 * The first comment's author owns the repository or may push to it: GitHub's
+	 * `authorAssociation` is `OWNER`, `MEMBER` or `COLLABORATOR`.
+	 */
+	readonly authorCanWrite: boolean;
 	readonly body: string;
 	/** The first comment's URL. */
 	readonly url: string;
@@ -196,12 +201,15 @@ const REVIEW_THREADS_QUERY = `query($owner: String!, $name: String!, $number: In
           isOutdated
           path
           line
-          comments(first: 1) { nodes { author { login } body url } }
+          comments(first: 1) { nodes { author { login } authorAssociation body url } }
         }
       }
     }
   }
 }`;
+
+/** The `authorAssociation`s of accounts that own a repository or may push to it. */
+const WRITE_ASSOCIATIONS: ReadonlySet<string> = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 const RESOLVE_THREAD_MUTATION = `mutation($threadId: ID!) {
   resolveReviewThread(input: { threadId: $threadId }) { thread { id } }
@@ -219,6 +227,7 @@ const ListedThread = Schema.fromJsonString(
 			nodes: Schema.Array(
 				Schema.Struct({
 					author: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+					authorAssociation: Schema.String,
 					body: Schema.String,
 					url: Url
 				})
@@ -466,6 +475,7 @@ const make = Effect.gen(function* () {
 					path: thread.path,
 					line: thread.line,
 					author: first.author?.login ?? null,
+					authorCanWrite: WRITE_ASSOCIATIONS.has(first.authorAssociation),
 					body: first.body,
 					url: first.url
 				}

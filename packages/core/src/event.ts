@@ -81,7 +81,9 @@ export const RunEvent = Schema.TaggedUnion({
 		headSha: GitSha,
 		source: FindingsSource,
 		/** The must-fix findings and nits the run fixes or rechecks. */
-		findings: Schema.Array(VerifiedFinding)
+		findings: Schema.Array(VerifiedFinding),
+		/** The open review threads left out because their author may not push to the repository. */
+		ignoredThreads: Schema.Array(Url)
 	},
 	/** Machine state values as dotted paths, e.g. `checks.waiting`. */
 	StateChanged: { ...at, from: Schema.String, to: Schema.String },

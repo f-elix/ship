@@ -130,7 +130,8 @@ const created = (kind: 'fix' | 'recheck', baseSha = HEAD) =>
 			baseSha,
 			headSha: HEAD,
 			source,
-			findings: FINDINGS
+			findings: FINDINGS,
+			ignoredThreads: []
 		})
 	);
 

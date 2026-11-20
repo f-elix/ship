@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Hand a planned change to ship, which implements it, runs the checks, reviews, fixes and opens the PR unattended, or have ship review a pull request. Use when the user wants to ship planned work (`ship run`) review a PR with ship (`ship review`), or fix or recheck the findings on a PR (`ship fix`, `ship recheck`).
+description: Hand a planned change to ship, which implements it, runs the checks, reviews, fixes and opens the PR unattended, or have ship review a pull request. Use when the user wants to ship planned work (`ship run`), review a PR with ship (`ship review`), or fix or recheck the findings on a PR (`ship fix`, `ship recheck`).
 ---
 
 # ship
@@ -31,7 +31,7 @@ ship runs the whole loop in its daemon: baseline checks → implement → checks
 
 ## Fixing and rechecking a PR's findings
 
-`ship fix <source>` has ship's fix agent address the findings on a PR, run the checks, commit and push to the PR's branch. `ship recheck <source>` asks the verifier which findings are fixed and resolves their threads on GitHub. `<source>` is a PR number or URL (its open review threads) or a `reviewId` from a `ship review` summary (that review's must-fix findings and nits).
+`ship fix <source>` has ship's fix agent address the findings on a PR, run the checks, commit and push to the PR's branch. `ship recheck <source>` asks the verifier which findings are fixed and resolves their threads on GitHub. `<source>` is a PR number or URL (its open review threads, skipping those by authors who may not push to the repository, which the summary lists under `ignoredThreads`) or a `reviewId` from a `ship review` summary (that review's must-fix findings and nits).
 
 1. **Check the PR out** first, as for a review: `gh pr checkout <n>`, with a clean tree. ship refuses with `dirty-tree` or `pr-not-checked-out` otherwise; fix that and start again. `ship fix` also refuses with `pr-not-pushable` when it cannot push to the PR's branch (a fork without maintainer edits): offer `--local`, which keeps the commits in the checkout.
 2. **Run** from the repo root. Pass `--local` when the user does not want anything pushed or resolved on GitHub, and `ship fix --no-checks` only when the user asked to skip the checks. Wait for it like `ship run`.

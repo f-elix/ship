@@ -17,6 +17,11 @@ const shortSha = (sha: string) => sha.slice(0, 7);
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
 /** Keeps event lines to one line; `ship logs --json` has the full text. */
 const firstLine = (text: string) => text.split('\n', 1)[0] ?? '';
+/** Notes the review threads a fix or recheck left out, written by someone who may not push. */
+const ignoredNote = (urls: ReadonlyArray<string>) =>
+	urls.length === 0
+		? ''
+		: `; ignored ${plural(urls.length, 'thread')} by authors who may not push`;
 const clock = (at: DateTime.Utc) => DateTime.formatIso(at).slice(11, 19);
 
 /**
@@ -33,7 +38,7 @@ export const makeEventFormatter = () => {
 			case 'ReviewRunCreated':
 				return `review of ${event.prUrl} created for ${shortSha(event.baseSha)}..${shortSha(event.headSha)}`;
 			case 'PrRunCreated':
-				return `${event.kind} of ${plural(event.findings.length, 'finding')} on ${event.prUrl} created at ${shortSha(event.headSha)}`;
+				return `${event.kind} of ${plural(event.findings.length, 'finding')} on ${event.prUrl} created at ${shortSha(event.headSha)}${ignoredNote(event.ignoredThreads)}`;
 			case 'StateChanged':
 				return `state ${event.from} -> ${event.to}`;
 			case 'StepStarted':
@@ -194,12 +199,19 @@ const reviewSummaryLines = (summary: ReviewSummary): Array<string> => [
 	...findingLines('nits', summary.nits)
 ];
 
+/** The threads left out as written by someone who may not push to the repository. */
+const ignoredLines = (urls: ReadonlyArray<string>): Array<string> =>
+	urls.length === 0
+		? []
+		: ['ignored threads (author may not push):', ...urls.map((url) => `  ${url}`)];
+
 const fixSummaryLines = (summary: FixSummary): Array<string> => [
 	`cost: ${usd(summary.costUsd)}`,
 	...(summary.error === null ? [] : [`error: ${summary.error}`]),
 	`commits: ${summary.commits.length === 0 ? '-' : summary.commits.map(shortSha).join(', ')}`,
 	`pushed: ${summary.pushed ? 'yes' : 'no'}`,
-	...findingLines('findings', summary.findings)
+	...findingLines('findings', summary.findings),
+	...ignoredLines(summary.ignoredThreads)
 ];
 
 const recheckSummaryLines = (summary: RecheckSummary): Array<string> => {
@@ -212,7 +224,8 @@ const recheckSummaryLines = (summary: RecheckSummary): Array<string> => {
 		...(summary.error === null ? [] : [`error: ${summary.error}`]),
 		`resolved threads: ${summary.resolvedThreads.length}`,
 		...findingLines('fixed', withStatus('fixed')),
-		...findingLines('unfixed', withStatus('unfixed'))
+		...findingLines('unfixed', withStatus('unfixed')),
+		...ignoredLines(summary.ignoredThreads)
 	];
 };
 

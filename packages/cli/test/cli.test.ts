@@ -122,6 +122,7 @@ describe('exit codes', () => {
 				prUrl,
 				findings: statuses.map((found) => ({ finding, status: found, evidence: 'Seen' })),
 				resolvedThreads: [],
+				ignoredThreads: [],
 				costUsd: 0,
 				error: null
 			});
@@ -141,6 +142,7 @@ describe('exit codes', () => {
 				status,
 				prUrl,
 				findings: [finding],
+				ignoredThreads: [],
 				commits: [],
 				pushed: false,
 				checks: [],
@@ -685,7 +687,9 @@ describe('ship fix and ship recheck', () => {
 					{
 						output: {
 							verdicts: [],
-							previous: [{ id: 't1', status: 'unfixed', evidence: 'Still a const' }]
+							previous: [
+								{ id: 'PRRT_1', status: 'unfixed', evidence: 'Still a const' }
+							]
 						},
 						costUsd: 0.2
 					}
@@ -703,7 +707,7 @@ describe('ship fix and ship recheck', () => {
 					kind: 'recheck',
 					status: 'done',
 					findings: [
-						{ finding: { id: 't1' }, status: 'unfixed', evidence: 'Still a const' }
+						{ finding: { id: 'PRRT_1' }, status: 'unfixed', evidence: 'Still a const' }
 					],
 					resolvedThreads: []
 				});
