@@ -479,7 +479,7 @@ describe('pipeline', () => {
 		)
 	);
 
-	it.effect('keeps the session and cost of a failed implementer call', () =>
+	it.effect('keeps the cost of a failed implementer call, and the state it failed in', () =>
 		withHarness(() =>
 			Effect.gen(function* () {
 				const agent = yield* AgentFake;
@@ -511,9 +511,10 @@ describe('pipeline', () => {
 
 				expect(summary).toMatchObject({ status: 'failed', costUsd: 0.4 });
 				expect(summary.error).toContain('Ran out of turns');
-				const final = shipRun((yield* spy.saves).at(-1)?.snapshot.context);
-				expect(final?.implementerSession).toEqual(session);
-				expect(final?.costUsd).toBeCloseTo(0.4);
+				// The snapshot stays at the step that failed, for `ship resume` to run again.
+				const last = (yield* spy.saves).at(-1)?.snapshot;
+				expect(last?.value).toBe('implement');
+				expect(shipRun(last?.context)?.error).toBeNull();
 			})
 		)
 	);

@@ -31,6 +31,10 @@ export type RunStatus = typeof RunStatus.Type;
 export const TerminalRunStatus = RunStatus.pick(['done', 'escalated', 'failed', 'cancelled']);
 export type TerminalRunStatus = typeof TerminalRunStatus.Type;
 
+/** Whether `ship resume` takes a run: an interrupted one continues, a failed one retries. */
+export const isResumable = (status: RunStatus): boolean =>
+	status === 'interrupted' || status === 'failed';
+
 /** `timeout`: a step timed out after the run had already committed work. */
 export const EscalationReason = Schema.Literals([
 	'check-fix-cap',

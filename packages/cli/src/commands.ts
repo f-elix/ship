@@ -123,6 +123,11 @@ const follow = (
 					);
 					return yield* setExitCode(exitCodeFor('interrupted'));
 				case 'RunFinished':
+					if (last.summary.status === 'failed') {
+						yield* Console.error(
+							`ship: run ${runId} failed. Once the cause is fixed, \`ship resume ${runId}\` runs the failed step again`
+						);
+					}
 					yield* Console.log(json(encodeSummary(last.summary)));
 					return yield* setExitCode(exitCodeForSummary(last.summary));
 			}
@@ -414,7 +419,11 @@ const resume = Command.make(
 				RunNotFound: (error) => Effect.fail(runNotFound(error)),
 				InvalidRunStatus: (error) => Effect.fail(invalidStatus('resume')(error)),
 				SnapshotNotResumable: (error) =>
-					Effect.fail(cliError(`${error.message}; \`ship cancel ${id}\` finishes it`))
+					Effect.fail(
+						cliError(
+							`${error.message}; an interrupted run can still be finished with \`ship cancel ${id}\``
+						)
+					)
 			}),
 			Effect.onInterrupt(() =>
 				Console.error(
@@ -427,7 +436,7 @@ const resume = Command.make(
 	}, Effect.scoped)
 ).pipe(
 	Command.withDescription(
-		'Continue an interrupted run with the current env, streaming and exiting like the command that started it.'
+		'Continue an interrupted run, or retry a failed one from the step that failed, with the current env, streaming and exiting like the command that started it.'
 	)
 );
 

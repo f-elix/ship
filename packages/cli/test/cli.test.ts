@@ -1,5 +1,13 @@
 import { describe, expect, it } from '@effect/vitest';
-import { DaemonBusy, FindingId, RunId, RunStatus, shipPaths, type GitSha } from '@ship/core';
+import {
+	AgentSdkError,
+	DaemonBusy,
+	FindingId,
+	RunId,
+	RunStatus,
+	shipPaths,
+	type GitSha
+} from '@ship/core';
 import { AgentFake, GhFake, opensPr, type AgentScript } from '@ship/core/testing';
 import {
 	addsFeature,
@@ -826,6 +834,42 @@ describe('ship resume', () => {
 				});
 				const unknown = yield* shipIn(fx, ['resume', 'no-such-run']);
 				expect(unknown).toMatchObject({ code: 1, stderr: 'ship: no run no-such-run' });
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+	it.live(
+		'retries a failed run from the step that failed',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				// The reviewer fails once, as on a false-positive safeguard flag.
+				yield* Context.get(services, AgentFake).script(
+					{ step: 'review', label: 'standards' },
+					new AgentSdkError({
+						step: 'review',
+						reason: 'exception',
+						detail: 'API Error: safeguards flagged this message'
+					})
+				);
+				yield* scriptHappyRun(services);
+				yield* daemon(fx.home, services);
+
+				const failed = yield* shipIn(fx, ['run', fx.planDir]);
+
+				expect(failed.code).toBe(1);
+				const runId = String(parseSummary(failed.stdout)['runId']);
+				expect(failed.stderr).toContain(
+					`ship: run ${runId} failed. Once the cause is fixed, \`ship resume ${runId}\` runs the failed step again`
+				);
+
+				const resumed = yield* shipIn(fx, ['resume', runId]);
+
+				expect(resumed.code).toBe(0);
+				expect(parseSummary(resumed.stdout)).toMatchObject({ runId, status: 'done' });
+				// Only the review runs again: the implementation is not redone.
+				expect(resumed.stderr).not.toContain('implement cost');
+				expect(resumed.stderr).toContain('review cost $0.10 (total $0.60)');
 			}).pipe(Effect.scoped),
 		TIMEOUT
 	);

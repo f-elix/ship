@@ -1,6 +1,7 @@
 import { NodeServices } from '@effect/platform-node';
 import { describe, expect, it } from '@effect/vitest';
 import {
+	AgentSdkError,
 	cancelFromLog,
 	configParseOptions,
 	Conventions,
@@ -436,6 +437,90 @@ describe('review run', () => {
 					expect(transitions(yield* eventsOf(state))).toEqual(['post', 'done']);
 				}),
 			['standards', 'security']
+		)
+	);
+
+	it.effect('resumes a failed review, re-running only the reviewer that failed', () =>
+		withHarness(
+			() =>
+				Effect.gen(function* () {
+					const agent = yield* AgentFake;
+					const store = yield* RunStore;
+					const state = yield* newReview(false);
+					const standardsSaved = yield* Deferred.make<void>();
+					yield* checkpointed(state, 'review/reviewer/standards').pipe(
+						Effect.andThen(Deferred.succeed(standardsSaved, undefined)),
+						Effect.forkScoped
+					);
+					yield* agent.script(
+						{ step: 'review', label: 'standards' },
+						reviewerSays(finding('must-fix', 2))
+					);
+					// `security` fails once `standards` reported, as a safeguard flag would.
+					yield* agent.script(
+						{ step: 'review', label: 'security' },
+						() =>
+							Deferred.await(standardsSaved).pipe(
+								Effect.andThen(
+									Effect.fail(
+										new AgentSdkError({
+											step: 'review',
+											reason: 'exception',
+											detail: 'API Error: safeguards flagged this message'
+										})
+									)
+								)
+							),
+						reviewerSays(finding('nit', 4))
+					);
+					yield* agent.script({ step: 'verify' }, verifierConfirms(2));
+
+					const failed = yield* Effect.flatMap(
+						startReview(state),
+						(handle) => handle.await
+					);
+					expect(failed.status).toBe('failed');
+					expect(failed.error).toContain('safeguards flagged');
+
+					const summary = yield* Effect.flatMap(
+						resumeRun(state.runId, env),
+						(handle) => handle.await
+					);
+
+					if (summary.kind !== 'review') throw new Error('Expected a review summary');
+					expect(summary.status).toBe('done');
+					expect(summary.error).toBeNull();
+					expect(yield* reviewerCalls).toEqual(['security', 'security', 'standards']);
+					expect(summary.mustFix.map((finding) => finding.reviewer)).toEqual([
+						'standards'
+					]);
+					expect(summary.nits.map((finding) => finding.reviewer)).toEqual(['security']);
+					const info = yield* store.get(state.runId);
+					expect(info.status).toBe('done');
+					expect(
+						(yield* eventsOf(state)).flatMap((event) =>
+							event._tag === 'RunFinished' || event._tag === 'RunResumed'
+								? [event._tag]
+								: []
+						)
+					).toEqual(['RunFinished', 'RunResumed', 'RunFinished']);
+				}),
+			['standards', 'security']
+		)
+	);
+
+	it.effect('refuses to resume a run that finished done', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
+				yield* agent.script({ step: 'review', label: 'standards' }, reviewerSays());
+				const state = yield* newReview(false);
+				yield* Effect.flatMap(startReview(state), (handle) => handle.await);
+
+				const error = yield* Effect.flip(resumeRun(state.runId, env));
+
+				expect(error).toMatchObject({ _tag: 'InvalidRunStatus', status: 'done' });
+			})
 		)
 	);
 

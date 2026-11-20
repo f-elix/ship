@@ -93,9 +93,10 @@ export interface RunJournalShape {
 	/** Loads the run's snapshot, putting `env` back wherever `saveSnapshot` removed it. */
 	readonly loadSnapshot: (runId: RunId, env: Env) => Effect.Effect<SnapshotLoad, RunNotFound>;
 	/**
-	 * Sets an `interrupted` run back to `running` and appends `RunResumed`. Fails with
-	 * `InvalidRunStatus` for any other status. Call it only once `loadSnapshot` returned
-	 * `Found`, so a run that cannot be restored stays `interrupted`.
+	 * Sets an `interrupted` or `failed` run back to `running`, clears a failed run's summary
+	 * and appends `RunResumed`. Fails with `InvalidRunStatus` for any other status. Call it
+	 * only once `loadSnapshot` returned `Found`, so a run that cannot be restored keeps its
+	 * status.
 	 */
 	readonly markResumed: (
 		runId: RunId
