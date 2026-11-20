@@ -1,8 +1,10 @@
 import { NodeServices } from '@effect/platform-node';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
+	BUILTIN_SKILLS_DIR,
 	FindingId,
 	Gh,
 	parsePrUrl,
@@ -12,10 +14,12 @@ import {
 	type OpenPrInput,
 	type VerifiedFinding
 } from '../src/index.ts';
-import { AgentFake, fakeSha, GhFake } from '../src/testing.ts';
+import { AgentFake, fakeSha, GhFake, opensPr } from '../src/testing.ts';
 import { tempDir } from './temp-repo.ts';
 
-const PrTest = Pr.layer.pipe(Layer.provideMerge(Layer.mergeAll(AgentFake.layer, GhFake.layer)));
+const PrTest = Pr.layer.pipe(
+	Layer.provideMerge(Layer.mergeAll(AgentFake.layer, GhFake.layer, NodeServices.layer))
+);
 
 const finding = (
 	n: number,
@@ -43,10 +47,11 @@ const input: OpenPrInput = {
 	repo: { cwd: '/repo', env: { PATH: '/bin' } },
 	branch: 'feature',
 	base: 'main',
-	diff: '+const a = 1;',
-	commits: [{ sha: fakeSha(1), subject: 'Add a' }],
-	specPath: '/plans/feature/spec.md',
-	planPath: '/plans/feature/implementation-plan.md',
+	headSha: fakeSha(2),
+	plan: {
+		specPath: '/plans/feature/spec.md',
+		planPath: '/plans/feature/implementation-plan.md'
+	},
 	checks: [
 		{
 			baseline: false,
@@ -62,19 +67,16 @@ const input: OpenPrInput = {
 	timeoutMs: 60_000
 };
 
+const text = { title: 'Add a', body: '## Summary\n\nAdds a.', costUsd: 0.02 };
+
 const scriptBody = Effect.gen(function* () {
-	yield* (yield* AgentFake).script(
-		{ step: 'pr' },
-		{ output: { title: 'Add a', body: '## Summary\n\nAdds a.' }, costUsd: 0.02 }
-	);
-	yield* (yield* AgentFake).script(
-		{ step: 'escalate' },
-		{ output: { title: 'Add a', body: '## Summary\n\nAdds a.' }, costUsd: 0.02 }
-	);
+	const agent = yield* AgentFake;
+	yield* agent.script({ step: 'pr' }, yield* opensPr(text));
+	yield* agent.script({ step: 'escalate' }, yield* opensPr(text));
 });
 
 describe('Pr.open', () => {
-	it.effect('writes the body with an agent and opens a ready PR', () =>
+	it.effect('has an agent follow the pr skill, then adds the tradeoffs to the body', () =>
 		Effect.gen(function* () {
 			yield* scriptBody;
 			const result = yield* (yield* Pr).open(input);
@@ -91,25 +93,47 @@ describe('Pr.open', () => {
 				title: 'Add a',
 				draft: false
 			});
-			expect(pr?.body).toContain('## Summary\n\nAdds a.');
-			expect(pr?.body).toContain('## Tradeoffs');
+			expect(pr?.body).toMatch(
+				/^## Summary\n\nAdds a\.\n\n<!-- ship:sections -->\n## Tradeoffs/u
+			);
 			expect(pr?.body).not.toContain('Unresolved must-fix');
 			expect(pr?.body).not.toContain('Naming.');
 
 			const [call] = yield* (yield* AgentFake).calls;
-			expect(call).toMatchObject({ step: 'pr', model: 'haiku', access: 'read-only' });
-			expect(call?.prompt).toContain('## Merge Danger');
+			expect(call).toMatchObject({ step: 'pr', model: 'haiku', access: 'edit' });
+			expect(call?.prompt).toContain(join(BUILTIN_SKILLS_DIR, 'pr', 'SKILL.md'));
+			expect(call?.prompt).toContain('Open a new PR ready for review.');
+			expect(call?.prompt).toContain('- Spec: /plans/feature/spec.md');
 			expect(call?.prompt).toContain('- test: passed');
-			expect(call?.prompt).toContain('+const a = 1;');
+			expect(call?.additionalDirectories).toEqual([
+				'/plans/feature',
+				join(BUILTIN_SKILLS_DIR, 'pr')
+			]);
 		}).pipe(Effect.provide(PrTest))
 	);
 
-	it.effect('honours pr.draft', () =>
+	it.effect("follows the repository's own pr skill over ship's", () =>
+		Effect.gen(function* () {
+			const dir = yield* tempDir;
+			mkdirSync(`${dir}/.agents/skills/pr`, { recursive: true });
+			writeFileSync(`${dir}/.agents/skills/pr/SKILL.md`, '# PR\n');
+			yield* scriptBody;
+			yield* (yield* Pr).open({ ...input, repo: { cwd: dir, env: {} }, plan: null });
+			const [call] = yield* (yield* AgentFake).calls;
+			expect(call?.prompt).toContain(`skill at ${dir}/.agents/skills/pr/SKILL.md`);
+			expect(call?.prompt).toContain('There is no spec or plan');
+			expect(call?.additionalDirectories).toEqual([`${dir}/.agents/skills/pr`]);
+		}).pipe(Effect.scoped, Effect.provide(PrTest))
+	);
+
+	it.effect('asks for a draft under pr.draft', () =>
 		Effect.gen(function* () {
 			yield* scriptBody;
 			const result = yield* (yield* Pr).open({ ...input, draft: true });
 			expect(result.draft).toBe(true);
-			expect((yield* (yield* GhFake).prs)[0]?.draft).toBe(true);
+			expect((yield* (yield* AgentFake).calls)[0]?.prompt).toContain(
+				'Open a new PR as a draft.'
+			);
 		}).pipe(Effect.provide(PrTest))
 	);
 
@@ -130,7 +154,9 @@ describe('Pr.open', () => {
 				});
 				const [pr] = yield* (yield* GhFake).prs;
 				expect(pr?.draft).toBe(true);
-				expect(pr?.body).toMatch(/^> \[!WARNING\]\n> ship escalated this run/u);
+				expect(pr?.body).toMatch(
+					/^<!-- ship:notice -->\n> \[!WARNING\]\n> ship escalated this run/u
+				);
 				expect(pr?.body).toContain(
 					'## Unresolved must-fix findings\n\n- `src/a.ts:1` (security, standards): Injection.'
 				);
@@ -140,7 +166,7 @@ describe('Pr.open', () => {
 	);
 
 	it.effect(
-		'updates the open PR instead of opening a second one, turning it back into a draft when escalated',
+		'updates the open PR, replacing what ship added before and turning it back into a draft when escalated',
 		() =>
 			Effect.gen(function* () {
 				yield* scriptBody;
@@ -152,30 +178,63 @@ describe('Pr.open', () => {
 					body: 'Old body',
 					draft: false
 				});
-				const result = yield* (yield* Pr).open({
+				const first = yield* (yield* Pr).open(input);
+				const second = yield* (yield* Pr).open({
 					...input,
 					unresolved,
 					escalation: 'review-cap'
 				});
-				expect(result).toMatchObject({ url: existing.url, draft: true, created: false });
+				expect(first).toMatchObject({ url: existing.url, draft: false, created: false });
+				expect(second).toMatchObject({ url: existing.url, draft: true, created: false });
 				const prs = yield* gh.prs;
 				expect(prs).toHaveLength(1);
 				expect(prs[0]).toMatchObject({ title: 'Add a', draft: true });
+				expect(prs[0]?.body.match(/## Tradeoffs/gu)).toHaveLength(1);
 				expect(prs[0]?.body).toContain('Unresolved must-fix findings');
 			}).pipe(Effect.provide(PrTest))
 	);
 
-	it.effect('fails with the agent call’s cost when gh fails after the body is written', () =>
+	it.effect('fails with the agent call’s cost when the agent opened no PR', () =>
 		Effect.gen(function* () {
-			yield* scriptBody;
-			yield* (yield* GhFake).fail('createPr', 'no permission');
+			yield* (yield* AgentFake).script({ step: 'pr' }, { text: 'Done.', costUsd: 0.02 });
 			const error = yield* Effect.flip((yield* Pr).open(input));
-			// The body was already paid for, so the error carries its cost.
 			expect(error).toMatchObject({
 				_tag: 'PrPublishError',
-				gh: { _tag: 'GhError', stderr: 'no permission' },
+				reason: 'no PR is open for feature',
 				cost: { step: 'pr', model: 'haiku', costUsd: 0.02 }
 			});
+		}).pipe(Effect.provide(PrTest))
+	);
+
+	it.effect('refuses a PR whose head is not the commit ship pushed', () =>
+		Effect.gen(function* () {
+			// The PR's branch moved past ship's commit, and the agent left it so.
+			yield* (yield* GhFake).addPr({
+				base: 'main',
+				head: 'feature',
+				title: 'Add a',
+				body: 'Body.',
+				draft: false,
+				headSha: fakeSha(9)
+			});
+			yield* (yield* AgentFake).script({ step: 'pr' }, { text: 'Done.' });
+			const error = yield* Effect.flip((yield* Pr).open(input));
+			expect(error).toMatchObject({ _tag: 'PrPublishError' });
+			expect(error.message).toContain(`the PR's head is ${fakeSha(9)}`);
+		}).pipe(Effect.provide(PrTest))
+	);
+
+	it.effect('fails with the agent call’s cost when gh fails after the agent', () =>
+		Effect.gen(function* () {
+			yield* scriptBody;
+			const gh = yield* GhFake;
+			yield* gh.fail('editPr', 'no permission');
+			const error = yield* Effect.flip((yield* Pr).open(input));
+			expect(error).toMatchObject({
+				_tag: 'PrPublishError',
+				cost: { step: 'pr', model: 'haiku', costUsd: 0.02 }
+			});
+			expect(error.message).toContain('no permission');
 		}).pipe(Effect.provide(PrTest))
 	);
 
@@ -189,6 +248,8 @@ describe('Pr.open', () => {
 		}).pipe(Effect.provide(PrTest))
 	);
 });
+
+const none = { mustFix: [], tradeoffs: [], nits: [] };
 
 describe('renderPrBody', () => {
 	it('indents multi-line evidence under its item and leaves out empty sections', () => {
@@ -204,7 +265,10 @@ describe('renderPrBody', () => {
 			}
 		});
 		expect(body).toBe(
-			'Body.\n\n## Tradeoffs\n\n- `src/a.ts:2` (security): Extra query.\n  line one\n  line two\n'
+			'Body.\n\n<!-- ship:sections -->\n## Tradeoffs\n\n- `src/a.ts:2` (security): Extra query.\n  line one\n  line two\n\n<!-- /ship:sections -->\n'
+		);
+		expect(renderPrBody(body, { escalation: null, checks: [], unresolved: none })).toBe(
+			'Body.\n'
 		);
 	});
 });

@@ -60,7 +60,7 @@ describe('daemon', () => {
 			Effect.gen(function* () {
 				const fx = yield* fixture;
 				const services = yield* fakes;
-				yield* scriptHappyRun(Context.get(services, AgentFake));
+				yield* scriptHappyRun(services);
 				yield* daemon(fx.home, services);
 				const rpc = yield* client(fx.home);
 
@@ -214,10 +214,9 @@ describe('daemon', () => {
 			Effect.gen(function* () {
 				const fx = yield* fixture;
 				const services = yield* fakes;
-				const agent = Context.get(services, AgentFake);
 				const started = yield* Deferred.make<void>();
 				const proceed = yield* Deferred.make<void>();
-				yield* scriptHappyRun(agent, gatedImplement(started, proceed));
+				yield* scriptHappyRun(services, gatedImplement(started, proceed));
 				yield* daemon(fx.home, services);
 				const rpc = yield* client(fx.home);
 

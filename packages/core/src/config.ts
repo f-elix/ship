@@ -62,7 +62,7 @@ export interface Check extends Schema.Schema.Type<typeof Check> {}
 // and a global struct that fills every field.
 
 // `checks` runs its agent calls through `fixChecks`, which resumes the implementer
-// session with the `fix` model; `escalate` writes its PR body with the `pr` model.
+// session with the `fix` model; `escalate` opens its PR with the `pr` model.
 // `baseline`, `route` and `triage` run no agent: `route` asks Cloudflare Clef.
 const modelFields = {
 	implement: ModelId,

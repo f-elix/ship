@@ -526,6 +526,8 @@ export interface GhFakeShape {
 	readonly reviews: Effect.Effect<ReadonlyArray<FakeReview>>;
 	/** Adds an open PR, as if a previous attempt had opened it. */
 	readonly addPr: (pr: Omit<FakePr, 'url' | 'number'>) => Effect.Effect<FakePr>;
+	/** Moves a PR's head, as a push to its branch would. */
+	readonly setHead: (url: string, headSha: GitSha) => Effect.Effect<void>;
 	/**
 	 * Runs `hook` inside every later `submitReview`, after the review is recorded: a hook
 	 * that never ends stands for a crash after GitHub accepted the review.
@@ -719,6 +721,7 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 				prs: Ref.get(prs),
 				reviews: Ref.get(reviews),
 				addPr: (pr) => add(pr),
+				setHead: (url, headSha) => update(url, (pr) => ({ ...pr, headSha })),
 				afterSubmit: (hook) => Ref.set(submitHook, hook),
 				threads: Ref.get(threads),
 				addThread,
@@ -736,6 +739,55 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 		})
 	);
 }
+
+/**
+ * A PR agent's answer: like an agent following the `pr` skill, it opens the PR for the
+ * branch its prompt names, at the commit its prompt names, or updates the open one, with
+ * `title` and `body`.
+ */
+export const opensPr = (text: {
+	readonly title: string;
+	readonly body: string;
+	readonly costUsd?: number;
+}) =>
+	Effect.gen(function* () {
+		const gh = yield* Gh;
+		const fake = yield* GhFake;
+		const script: AgentScript = (input) =>
+			Effect.gen(function* () {
+				const pushed = /The branch is `([^`]+)`, already pushed at (\w+)/u.exec(
+					input.prompt
+				);
+				const base = /The base is `([^`]+)`/u.exec(input.prompt)?.[1];
+				if (pushed === null || base === undefined) {
+					return yield* Effect.die(new Error('The PR prompt names no branch or base'));
+				}
+				const [, branch = '', sha = ''] = pushed;
+				const headSha = GitSha.make(sha);
+				const repo = { cwd: input.cwd, env: input.env };
+				const existing = yield* gh.findPr(repo, branch);
+				const url =
+					existing === null
+						? (yield* fake.addPr({
+								base,
+								head: branch,
+								title: text.title,
+								body: text.body,
+								draft: input.prompt.includes('Open a new PR as a draft'),
+								headSha
+							})).url
+						: existing.url;
+				if (existing !== null) {
+					yield* gh.editPr(repo, { url, title: text.title, body: text.body });
+					yield* fake.setHead(url, headSha);
+				}
+				return {
+					text: url,
+					...(text.costUsd === undefined ? {} : { costUsd: text.costUsd })
+				};
+			}).pipe(Effect.orDie);
+		return script;
+	});
 
 // --- Clef ---
 

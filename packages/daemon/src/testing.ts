@@ -9,9 +9,17 @@ import {
 	projectKeyOf,
 	shipPaths,
 	type AgentRunInput,
+	type Gh,
 	type RunId
 } from '@ship/core';
-import { AgentFake, ClefFake, GhFake, type AgentReply, type AgentScript } from '@ship/core/testing';
+import {
+	AgentFake,
+	ClefFake,
+	GhFake,
+	opensPr,
+	type AgentReply,
+	type AgentScript
+} from '@ship/core/testing';
 import { Context, Effect, Layer, References, Schedule, Stream } from 'effect';
 import { execFileSync, spawn } from 'node:child_process';
 import {
@@ -215,20 +223,25 @@ export const addsFeature = (input: AgentRunInput): Effect.Effect<AgentReply> =>
 
 /** Implementer, reviewer and PR answers for a run that ends with a PR. */
 export const scriptHappyRun = (
-	agent: Context.Service.Shape<typeof AgentFake>,
+	services: Context.Context<AgentFake | Gh | GhFake>,
 	implement: AgentScript = addsFeature
 ) =>
-	Effect.all([
-		agent.script({ step: 'implement' }, implement),
-		agent.script(
+	Effect.gen(function* () {
+		const agent = Context.get(services, AgentFake);
+		yield* agent.script({ step: 'implement' }, implement);
+		yield* agent.script(
 			{ step: 'review', label: 'standards' },
 			{ output: { findings: [] }, costUsd: 0.1 }
-		),
-		agent.script(
+		);
+		yield* agent.script(
 			{ step: 'pr' },
-			{ output: { title: 'Add the feature', body: '## Summary\n\nAdds it.' }, costUsd: 0.05 }
-		)
-	]);
+			yield* opensPr({
+				title: 'Add the feature',
+				body: '## Summary\n\nAdds it.',
+				costUsd: 0.05
+			}).pipe(Effect.provide(services))
+		);
+	});
 
 /** Polls `check` until it holds. */
 export const eventually = <E, R>(check: Effect.Effect<boolean, E, R>) =>

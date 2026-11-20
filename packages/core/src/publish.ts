@@ -16,8 +16,8 @@ import { CheckRound, EscalationReason, UnresolvedFindings } from './run.ts';
 
 export const PrInput = Schema.Struct({
 	...primitiveScopeFields,
-	/** The plan the change implements; the PR body links its spec and plan. */
-	planDir: AbsolutePath,
+	/** The plan the change implements, whose spec and plan the PR agent reads; `null` without one. */
+	planDir: Schema.NullOr(AbsolutePath),
 	branch: Schema.NonEmptyString,
 	/** The message of the single commit a squash leaves, when `pr.squash` is on. */
 	squashMessage: Schema.NonEmptyString,
@@ -41,26 +41,18 @@ const publish = (
 			yield* git.squash(input, { base: input.baseSha, message: input.squashMessage });
 		}
 		yield* git.push(input, input.branch);
-		const range = { from: input.baseSha, to: yield* git.headSha(input) };
-		const [base, diff, commits] = yield* Effect.all([
-			git.defaultBranch(input),
-			git.diff(input, range),
-			git.commits(input, range)
-		]);
+		const base = yield* git.defaultBranch(input);
 		const context = yield* agentContext(input);
-		const intent = planIntent(input.planDir);
 		const result = yield* pr.open({
 			repo: { cwd: input.cwd, env: input.env },
 			branch: input.branch,
 			base,
-			diff,
-			commits,
-			specPath: intent.specPath,
-			planPath: intent.planPath,
+			headSha: yield* git.headSha(input),
+			plan: input.planDir === null ? null : planIntent(input.planDir),
 			checks: input.checks,
 			unresolved: input.unresolved,
 			escalation,
-			draft: escalation !== null || input.config.pr.draft,
+			draft: input.config.pr.draft,
 			model: input.config.models.pr,
 			timeoutMs: input.config.timeouts[step],
 			transcript: context.transcript

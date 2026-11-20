@@ -7,10 +7,11 @@ export default defineConfig({
 	dts: false,
 	// Workspace packages are private, so they are bundled; npm dependencies stay external.
 	deps: { alwaysBundle: [/^@ship\//] },
-	// Core resolves its built-in briefs and conventions next to the running module,
-	// `dist/briefs` and `dist/conventions` once bundled.
+	// Core resolves its built-in briefs, conventions and skills next to the running
+	// module, `dist/briefs`, `dist/conventions` and `dist/skills` once bundled.
 	copy: [
 		{ from: '../core/src/briefs', to: 'dist' },
-		{ from: '../core/src/conventions', to: 'dist' }
+		{ from: '../core/src/conventions', to: 'dist' },
+		{ from: '../core/src/skills', to: 'dist' }
 	]
 });

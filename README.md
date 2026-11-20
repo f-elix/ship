@@ -116,6 +116,12 @@ A topic applies when the repo uses its stack: a dependency in a git-tracked `pac
 
 See `packages/core/src/conventions/README.md` for the file layout and frontmatter.
 
+## The pull request
+
+ship pushes the branch, then has an agent open or update the PR by following a `pr` skill: the repo's own, at `.agents/skills/pr/SKILL.md` or `.claude/skills/pr/SKILL.md`, or ship's, in `packages/core/src/skills/pr/`. Nobody is there to answer, so ship tells the agent the branch, the base and whether to open a draft, and the agent asks nothing: where the skill would wait for an answer, it takes the default or leaves the choice out. It does every other step, including the skill's writes to GitHub, such as labels and comments. The agent may run commands, and ship refuses its PR when the head is no longer the commit ship pushed.
+
+ship then adds its own parts to the body, between `<!-- ship:… -->` comments, replacing the ones an earlier run added: a warning on top when the run escalated, and at the end the checks that failed before the change and the review findings left for a human.
+
 ## Develop
 
 ```sh

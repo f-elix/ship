@@ -170,7 +170,7 @@ const daemonServices = (options: DaemonOptions, paths: ShipPaths) => {
 		Checks.layer.pipe(Layer.provide([locks, platform])),
 		Reviewers.layer.pipe(Layer.provide([git, external, platform])),
 		Conventions.layer.pipe(Layer.provide([git, platform])),
-		Pr.layer.pipe(Layer.provide(external)),
+		Pr.layer.pipe(Layer.provide([external, platform])),
 		RunStore.journal.pipe(Layer.provide(store)),
 		RunStore.reviews.pipe(Layer.provide(store))
 	);

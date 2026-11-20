@@ -23,8 +23,8 @@ import { AgentSession } from './run.ts';
 /**
  * What the agent may do.
  *
- * - `edit`: the implementer and its fix steps. They must edit files and run commands
- *   unattended, so they run with `bypassPermissions`. `acceptEdits` would still deny every
+ * - `edit`: the implementer and its fix steps, and the PR agent, which runs the `pr`
+ *   skill's `gh` and `git` commands. They must edit files and run commands unattended, so they run with `bypassPermissions`. `acceptEdits` would still deny every
  *   shell command (nobody can answer a prompt), and an allowlist cannot predict the
  *   project's commands. The agent is confined only by its `cwd` and the caller's env, not
  *   sandboxed.

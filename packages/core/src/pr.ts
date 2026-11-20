@@ -1,16 +1,22 @@
-import { Context, Effect, Layer, Schema } from 'effect';
+import { Context, Effect, FileSystem, Layer, Schema } from 'effect';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Agent, AgentCallCost, type AgentError, type TranscriptTarget } from './agent.ts';
 import { baselineFailures } from './checks.ts';
 import type { VerifiedFinding } from './finding.ts';
-import { Gh, GhError } from './gh.ts';
-import type { Commit, GitRepo } from './git.ts';
-import { planDirs, truncateDiff } from './prompt.ts';
+import { Gh, type GhError } from './gh.ts';
+import type { GitRepo } from './git.ts';
+import type { GitSha } from './primitives.ts';
+import { planDirs } from './prompt.ts';
 import type { CheckRound, EscalationReason, UnresolvedFindings } from './run.ts';
 
-/** How much of the branch diff the PR agent sees; it has the repo to read the rest. */
-const MAX_PR_DIFF_CHARS = 100_000;
-
 // --- Public types ---
+
+/** The paths of a plan's `spec.md` and `implementation-plan.md`. */
+export interface PlanPaths {
+	readonly specPath: string;
+	readonly planPath: string;
+}
 
 export interface OpenPrInput {
 	/** The caller's repo; the branch must already be pushed (`Git.push`). */
@@ -18,13 +24,10 @@ export interface OpenPrInput {
 	readonly branch: string;
 	/** The branch to merge into, normally the default branch. */
 	readonly base: string;
-	/** The diff of the whole branch, `base..HEAD`. */
-	readonly diff: string;
-	/** The branch's commits, oldest first. */
-	readonly commits: ReadonlyArray<Commit>;
-	/** Absolute paths of the plan's `spec.md` and `implementation-plan.md`. */
-	readonly specPath: string;
-	readonly planPath: string;
+	/** The commit ship pushed; the PR's head must still be it once the agent is done. */
+	readonly headSha: GitSha;
+	/** The plan the change implements, or `null` for a change made without one. */
+	readonly plan: PlanPaths | null;
 	/** Check passes, for the body's evidence. */
 	readonly checks: ReadonlyArray<CheckRound>;
 	readonly unresolved: UnresolvedFindings;
@@ -41,28 +44,29 @@ export interface OpenPrInput {
 export interface OpenPrResult {
 	readonly url: string;
 	readonly draft: boolean;
-	/** `false` when a PR for the branch already existed and its body was updated. */
+	/** `false` when a PR for the branch already existed and was updated. */
 	readonly created: boolean;
 	readonly cost: AgentCallCost;
 }
 
 /**
- * `gh` failed after the agent wrote the PR text. Carries the agent call's cost, which was
- * paid even though no PR was opened or updated.
+ * The agent finished, but its PR is missing or has the wrong head, or adding ship's
+ * sections to it failed. Carries the agent call's cost, which was paid all the same.
  */
 export class PrPublishError extends Schema.TaggedError<PrPublishError>()('PrPublishError', {
-	gh: GhError,
+	reason: Schema.String,
 	cost: AgentCallCost
 }) {
 	override get message(): string {
-		return `The PR text was written but publishing it failed: ${this.gh.message}`;
+		return `The pr agent finished, but ${this.reason}`;
 	}
 }
 
 export interface PrShape {
 	/**
-	 * Writes the title and body with an agent, then opens the PR, or updates the open PR
-	 * for the branch so a resumed run can repeat this step. Escalated PRs are always
+	 * Has an agent open the PR, or update the open PR for the branch so a resumed run can
+	 * repeat this step, by following the `pr` skill: the repository's own when it has one,
+	 * ship's otherwise. Ship then adds its sections to the body. Escalated PRs are always
 	 * drafts, and an existing ready PR is turned back into one. Only the agent call has a
 	 * timeout; wrap the whole call in the step's timeout to bound the `gh` calls too.
 	 */
@@ -71,61 +75,60 @@ export interface PrShape {
 	) => Effect.Effect<OpenPrResult, AgentError | GhError | PrPublishError>;
 }
 
-// --- Body ---
+// --- Skill ---
 
-/** The agent's part of the PR: a title and a body following {@link PR_TEMPLATE}. */
-export const PrText = Schema.Struct({
-	title: Schema.NonEmptyString,
-	body: Schema.NonEmptyString
+/**
+ * The skills bundled with ship. The CLI build copies `src/skills` to `dist/skills`, so keep
+ * this module directly in `src/`.
+ */
+export const BUILTIN_SKILLS_DIR = fileURLToPath(new URL('./skills', import.meta.url));
+
+/** Where a repository keeps its own `pr` skill, which wins over ship's. */
+const PROJECT_PR_SKILLS = ['.agents/skills/pr/SKILL.md', '.claude/skills/pr/SKILL.md'];
+
+/** The `SKILL.md` the PR agent follows: the repository's own, or ship's. */
+export const findPrSkill = Effect.fn('findPrSkill')(function* (cwd: string) {
+	const fs = yield* FileSystem.FileSystem;
+	for (const path of PROJECT_PR_SKILLS) {
+		const absolute = join(cwd, path);
+		if (yield* fs.exists(absolute).pipe(Effect.orElseSucceed(() => false))) return absolute;
+	}
+	return join(BUILTIN_SKILLS_DIR, 'pr', 'SKILL.md');
 });
-export interface PrText extends Schema.Schema.Type<typeof PrText> {}
 
-/** The PR body template and how to fill it in. */
-export const PR_TEMPLATE = `Use this template for the body:
+// --- Prompt ---
 
-\`\`\`markdown
-## Summary
+/**
+ * Runs the skill unattended: ship settles what the skill would ask, and the agent does
+ * the rest of its steps, its writes to GitHub included.
+ */
+export const prPrompt = (input: OpenPrInput, skillPath: string): string =>
+	[
+		`Open or update the pull request for this branch by following the \`pr\` skill at ${skillPath}. Read it first, with any file it points to.`,
+		'',
+		'Nobody is there to answer, so ship has settled what the skill would ask:',
+		'',
+		`- The branch is \`${input.branch}\`, already pushed at ${input.headSha}. Do not commit, push, rebase or rename it.`,
+		`- The base is \`${input.base}\`.`,
+		`- Open a new PR ${isDraft(input) ? 'as a draft' : 'ready for review'}.`,
+		'- Ask nothing. Where the skill would wait for an answer, take its default, or leave out what it would ask for (reviewers, extra labels), and go on.',
+		'- Do every other step the skill calls for, including its writes to GitHub, such as labels and comments.',
+		'',
+		...(input.plan === null
+			? ['There is no spec or plan: the commits and the diff are the change.']
+			: [`- Spec: ${input.plan.specPath}`, `- Implementation plan: ${input.plan.planPath}`]),
+		'',
+		'Latest checks:',
+		'',
+		checksEvidence(input.checks),
+		'',
+		`Once you finish, ship adds its own sections to the body, inside \`<!-- ship:… -->\` comments: the review findings left for a human and the checks that failed before the change. Do not list those yourself, and leave such sections in the current body as they are.`,
+		'',
+		"Answer with the PR's URL."
+	].join('\n');
 
-<diagram, diff-sketch, or tree>
-
-## Evidence
-
-- **Before:** <output/failing test run>
-  **After:** <output/passing test run>
-
-## Merge Danger
-
-**Door:** <one-way or two-way>
-
-<optional: description>
-
-**Blast Radius:** <one-word description>
-
-<optional: potential ramifications of merge>
-\`\`\`
-
-Skip preambles and keep prose brief. Use the project's domain language.
-
-Summary: pick the smallest view that makes the key point clear, placed next to the short text it supports. Use one or two at most:
-- pseudocode for logic or an algorithm;
-- a call tree for runtime control flow;
-- a component tree for UI structure, with the state and module boundaries that matter;
-- a shallow file tree for file responsibilities or a broad refactor;
-- a Mermaid diagram for interaction, control flow or data flow;
-- a \`diff\` block shaped like the topic (component tree, file tree, call tree, control flow) when the point is what changes in a shape that already exists;
-- the whole block when most of it is new.
-Keep only the calls, files, props, states and boundaries needed to make the point.
-
-Evidence: concrete proof that the change works, as a before and after. Prefer execution-based evidence: name the tests that now pass, in pseudocode, and the checks that ran.
-
-Merge Danger: a two-way door is cheap to roll back; destructive or hard-to-reverse changes are one-way doors. The blast radius is what the change could affect: consumers, data, layout, and so on.`;
-
-const ESCALATION_TEXT: Record<EscalationReason, string> = {
-	'check-fix-cap': 'checks still fail after the last check-fix attempt',
-	'review-cap': 'must-fix findings or nits remain after the last review round',
-	stall: 'a fix round left a must-fix finding unresolved',
-	timeout: 'a step timed out'
-};
+const isDraft = (input: Pick<OpenPrInput, 'draft' | 'escalation'>) =>
+	input.draft || input.escalation !== null;
 
 const checksEvidence = (checks: ReadonlyArray<CheckRound>): string => {
 	const last = checks.at(-1);
@@ -138,29 +141,60 @@ const checksEvidence = (checks: ReadonlyArray<CheckRound>): string => {
 		.join('\n');
 };
 
-export const prPrompt = (input: OpenPrInput): string =>
-	[
-		'Write the title and body of a pull request for this change. You can read the spec, the plan and the repository, but the diff below is the change.',
-		'',
-		PR_TEMPLATE,
-		'',
-		'The title is one short imperative sentence. Do not list review findings; ship appends the tradeoffs after your body.',
-		'',
-		`- Spec: ${input.specPath}`,
-		`- Implementation plan: ${input.planPath}`,
-		'',
-		'Commits:',
-		'',
-		...input.commits.map((commit) => `- ${commit.subject}`),
-		'',
-		'Latest checks:',
-		'',
-		checksEvidence(input.checks),
-		'',
-		'```diff',
-		truncateDiff(input.diff, MAX_PR_DIFF_CHARS),
-		'```'
-	].join('\n');
+// --- Body ---
+
+const ESCALATION_TEXT: Record<EscalationReason, string> = {
+	'check-fix-cap': 'checks still fail after the last check-fix attempt',
+	'review-cap': 'must-fix findings or nits remain after the last review round',
+	stall: 'a fix round left a must-fix finding unresolved',
+	timeout: 'a step timed out'
+};
+
+/**
+ * `body` with ship's parts in place of any an earlier run added: an escalation notice on
+ * top; then, at the end, the checks that failed before the change and the review findings
+ * left for a human, written by ship so none is lost or reworded. A finished run lists
+ * only its tradeoffs; an escalated one also lists the must-fix findings and nits it left
+ * unresolved.
+ */
+export const renderPrBody = (
+	body: string,
+	input: Pick<OpenPrInput, 'unresolved' | 'escalation' | 'checks'>
+): string => {
+	const notice =
+		input.escalation === null
+			? []
+			: [
+					`> [!WARNING]`,
+					`> ship escalated this run: ${ESCALATION_TEXT[input.escalation]}. It needs a human before merging.`
+				];
+	const sections = [
+		...preexistingSection(input.checks),
+		...(input.escalation === null
+			? []
+			: [
+					...findingsSection('Unresolved must-fix findings', input.unresolved.mustFix),
+					...findingsSection('Unresolved nits', input.unresolved.nits)
+				]),
+		...findingsSection('Tradeoffs', input.unresolved.tradeoffs)
+	];
+	return [
+		shipPart('notice', notice),
+		body.replaceAll(SHIP_PARTS, '').trim(),
+		shipPart('sections', sections)
+	]
+		.filter((part) => part !== '')
+		.join('\n\n')
+		.concat('\n');
+};
+
+/** A part of the body ship wrote, between comments so a later run can replace it. */
+const SHIP_PARTS = /<!-- ship:(\w+) -->[\s\S]*?<!-- \/ship:\1 -->\n*/gu;
+
+const shipPart = (name: string, lines: ReadonlyArray<string>) =>
+	lines.length === 0
+		? ''
+		: [`<!-- ship:${name} -->`, ...lines, `<!-- /ship:${name} -->`].join('\n');
 
 const indent = (text: string) => text.split('\n').join('\n  ');
 
@@ -192,100 +226,67 @@ const preexistingSection = (checks: ReadonlyArray<CheckRound>) => {
 	];
 };
 
-/**
- * The full body: an escalation notice, the agent's body, the checks that failed before the
- * change, then the review findings left for a human, written by ship so none is lost or
- * reworded. A finished run lists only its tradeoffs; an escalated one also lists the
- * must-fix findings and nits it left unresolved.
- */
-export const renderPrBody = (
-	agentBody: string,
-	input: Pick<OpenPrInput, 'unresolved' | 'escalation' | 'checks'>
-): string =>
-	[
-		...(input.escalation === null
-			? []
-			: [
-					`> [!WARNING]`,
-					`> ship escalated this run: ${ESCALATION_TEXT[input.escalation]}. It needs a human before merging.`,
-					''
-				]),
-		agentBody.trim(),
-		'',
-		...preexistingSection(input.checks),
-		...(input.escalation === null
-			? []
-			: [
-					...findingsSection('Unresolved must-fix findings', input.unresolved.mustFix),
-					...findingsSection('Unresolved nits', input.unresolved.nits)
-				]),
-		...findingsSection('Tradeoffs', input.unresolved.tradeoffs)
-	]
-		.join('\n')
-		.trimEnd()
-		.concat('\n');
-
 // --- Implementation ---
 
 const make = Effect.gen(function* () {
 	const agent = yield* Agent;
 	const gh = yield* Gh;
+	const fs = yield* FileSystem.FileSystem;
 
 	const open = Effect.fn('Pr.open')(function* (input: OpenPrInput) {
-		const step = input.escalation === null ? 'pr' : 'escalate';
+		const { repo } = input;
 		// Look up the PR first, so a `gh` failure (e.g. not logged in) happens before the
 		// agent call is paid for.
-		const existing = yield* gh.findPr(input.repo, input.branch);
-		const result = yield* agent.runStructured(
-			{
-				step,
-				prompt: prPrompt(input),
-				model: input.model,
-				access: 'read-only',
-				cwd: input.repo.cwd,
-				env: input.repo.env,
-				additionalDirectories: planDirs(input),
-				timeoutMs: input.timeoutMs,
-				transcript: input.transcript
-			},
-			PrText
+		const existing = yield* gh.findPr(repo, input.branch);
+		const skillPath = yield* findPrSkill(repo.cwd).pipe(
+			Effect.provideService(FileSystem.FileSystem, fs)
 		);
-		const title = result.output.title.trim();
-		const body = renderPrBody(result.output.body, input);
-		const draft = input.draft || input.escalation !== null;
-		const { cost } = result;
+		const { cost } = yield* agent.run({
+			step: input.escalation === null ? 'pr' : 'escalate',
+			prompt: prPrompt(input, skillPath),
+			model: input.model,
+			// The skill runs `gh` and `git`, and may run the repository's own scripts.
+			access: 'edit',
+			cwd: repo.cwd,
+			env: repo.env,
+			additionalDirectories: [
+				...(input.plan === null ? [] : planDirs(input.plan)),
+				join(skillPath, '..')
+			],
+			timeoutMs: input.timeoutMs,
+			transcript: input.transcript
+		});
+		const fail = (reason: string) => new PrPublishError({ reason, cost });
 
-		const publish = Effect.gen(function* () {
-			if (existing === null) {
-				const url = yield* gh.createPr(input.repo, {
-					base: input.base,
-					head: input.branch,
-					title,
-					body,
-					draft
-				});
-				return { url, draft, created: true, cost } satisfies OpenPrResult;
+		return yield* Effect.gen(function* () {
+			const opened = yield* gh.findPr(repo, input.branch);
+			if (opened === null) return yield* fail(`no PR is open for ${input.branch}`);
+			const details = yield* gh.viewPr(repo, opened.url);
+			if (details.headSha !== input.headSha) {
+				return yield* fail(
+					`the PR's head is ${details.headSha}, not ${input.headSha}, the commit ship pushed`
+				);
 			}
-			yield* gh.editPr(input.repo, { url: existing.url, title, body });
-			if (input.escalation !== null && !existing.isDraft) {
-				yield* gh.markDraft(input.repo, existing.url);
+			const body = renderPrBody(details.body, input);
+			if (body !== details.body) {
+				yield* gh.editPr(repo, { url: opened.url, title: details.title, body });
+			}
+			if (input.escalation !== null && !opened.isDraft) {
+				yield* gh.markDraft(repo, opened.url);
 			}
 			return {
-				url: existing.url,
-				draft: existing.isDraft || input.escalation !== null,
-				created: false,
+				url: opened.url,
+				draft: opened.isDraft || input.escalation !== null,
+				created: existing === null,
 				cost
 			} satisfies OpenPrResult;
-		});
-		return yield* publish.pipe(
-			Effect.mapError((error) => new PrPublishError({ gh: error, cost }))
-		);
+		}).pipe(Effect.catchTag('GhError', (error) => Effect.fail(fail(error.message))));
 	});
 
 	return Pr.of({ open });
 });
 
-/** Opens or updates the run's pull request. Needs `Agent` and `Gh`. */
+/** Opens or updates the run's pull request. Needs `Agent`, `Gh` and `FileSystem`. */
 export class Pr extends Context.Service<Pr, PrShape>()('@ship/core/Pr') {
 	static readonly layer = Layer.effect(this, make);
 }
