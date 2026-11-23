@@ -63,11 +63,17 @@ export interface Check extends Schema.Schema.Type<typeof Check> {}
 
 // `checks` runs its agent calls through `fixChecks`, which resumes the implementer
 // session with the `fix` model; `escalate` opens its PR with the `pr` model.
-// `baseline`, `route` and `triage` run no agent: `route` asks Cloudflare Clef.
+// `baseline`, `route` and `triage` run no agent. Cloudflare Clef makes some decisions
+// without a model setting: routing, the review's risk and conventions, lowering must-fix
+// findings, failing checks' cause and unlabelled threads' severity.
+// `reviewTrivial` and `reviewRisky` replace `review` for the changes Clef rates trivial
+// or risky; a reviewer's own `model` wins over all three.
 const modelFields = {
 	implement: ModelId,
 	fix: ModelId,
 	review: ModelId,
+	reviewTrivial: ModelId,
+	reviewRisky: ModelId,
 	verify: ModelId,
 	pr: ModelId
 };
@@ -77,6 +83,8 @@ export const Models = Schema.Struct(
 		implement: withDefault('opus'),
 		fix: withDefault('opus'),
 		review: withDefault('sonnet'),
+		reviewTrivial: withDefault('haiku'),
+		reviewRisky: withDefault('opus'),
 		verify: withDefault('sonnet'),
 		pr: withDefault('sonnet')
 	})
@@ -133,9 +141,10 @@ export const Timeout = Schema.String.check(
 	)
 );
 
-// Every step has a timeout except the deterministic `triage` and `route`, whose Clef call
-// has a fixed one (`CLEF_TIMEOUT`), and `post`, `resolve`, `commit` and `push`, which only
-// run git and gh. `recheck` is one verifier call, which `verify` limits.
+// Every step has a timeout except the deterministic `triage`; `route`, which only asks
+// Clef; and `post`, `resolve`, `commit` and `push`, which only run git and gh. Clef calls,
+// in `route` or anywhere else, are not configured here: each has the fixed `CLEF_TIMEOUT`.
+// `recheck` is one verifier call, which `verify` limits.
 // `prepare` has none: no run reports it, and it stays a step only so that old logs decode.
 // `fixChecks` and `verify` limit the agent calls inside `checks` and `review`; `review`
 // limits each reviewer call.
@@ -193,12 +202,6 @@ export interface GlobalConfig extends Schema.Schema.Type<typeof GlobalConfig> {}
 export const ReviewersConfig = Schema.Struct({
 	disable: Schema.Array(ReviewerName).pipe(
 		withDefault([], 'Built-in reviewers to disable, by name')
-	),
-	clef: Schema.Boolean.pipe(
-		withDefault(
-			true,
-			'Ask Cloudflare Clef to add reviewers after the deterministic triggers; needs `ship auth cloudflare`'
-		)
 	)
 });
 export interface ReviewersConfig extends Schema.Schema.Type<typeof ReviewersConfig> {}
@@ -210,6 +213,9 @@ export const PrConfig = Schema.Struct({
 	squash: Schema.Boolean.pipe(withDefault(true, 'Squash to one commit before opening the PR'))
 });
 export interface PrConfig extends Schema.Schema.Type<typeof PrConfig> {}
+
+const CLEF_DESCRIPTION =
+	'Ask Cloudflare Clef for the decisions that deterministic rules leave open: which reviewers and convention topics a change needs, the reviewer model for its risk, whether a must-fix is only a taste remark, how severe an unlabelled review thread is, and whether failing checks are unrelated to the change. Each falls back to the deterministic behaviour when Clef is off or unavailable; needs `ship auth cloudflare`';
 
 const uniqueCheckNames = Schema.makeFilter(
 	(checks: ReadonlyArray<Check>) =>
@@ -227,6 +233,7 @@ export const ProjectConfig = Schema.Struct({
 		})
 	),
 	reviewers: ReviewersConfig.pipe(withDefault({})),
+	clef: Schema.Boolean.pipe(withDefault(true, CLEF_DESCRIPTION)),
 	pr: PrConfig.pipe(withDefault({})),
 	models: Schema.optionalKey(
 		Schema.Struct(Struct.map(modelFields, Schema.optionalKey)).annotate({
@@ -262,6 +269,8 @@ export const ResolvedConfig = Schema.Struct({
 	checks: Schema.Array(Check),
 	format: Schema.NullOr(Schema.NonEmptyString),
 	reviewers: ReviewersConfig,
+	// Runs created before `clef` existed resume with it on, the default.
+	clef: Schema.Boolean.pipe(withDefault(true)),
 	pr: PrConfig
 });
 export interface ResolvedConfig extends Schema.Schema.Type<typeof ResolvedConfig> {}
@@ -276,6 +285,7 @@ export const resolveConfig = (global: GlobalConfig, project: ProjectConfig): Res
 		checks: project.checks,
 		format: project.format ?? null,
 		reviewers: project.reviewers,
+		clef: project.clef,
 		pr: project.pr
 	};
 };

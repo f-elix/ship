@@ -5,7 +5,7 @@
  */
 import { createEffectEventStreamLogic, createEffectLogic, setupEffect } from '@xstate/effect';
 import { Effect, Schema } from 'effect';
-import { ChecksOutput, checksStep } from './check-steps.ts';
+import { ChecksOutput, checksFailedText, checksStep } from './check-steps.ts';
 import { withCheckpointScope } from './checkpoint.ts';
 import { fixStep } from './implementer.ts';
 import { addCost, checksEvents, fail, machineKit, stepInput, type Next } from './machine-kit.ts';
@@ -55,14 +55,17 @@ const { settle, onDefect } = machineKit<FixRunState, 'failed'>({
 const toPush = (context: FixRunState): FixNext =>
 	context.push === null ? { target: 'done', context } : { target: 'push', context };
 
-/** Failing checks at the cap fail the run with the commits kept local. */
+/**
+ * Failing checks at the cap, or failing again on a re-run after Clef rated them unrelated
+ * to the change, fail the run with the commits kept local.
+ */
 const afterChecks = (context: FixRunState, output: ChecksOutput): FixNext => {
 	const next = { ...context, checks: [...context.checks, ...output.passes] };
 	if (output.passed) return toPush(next);
 	const failing = (output.passes.at(-1)?.results ?? [])
 		.filter((result) => result.exitCode !== 0)
 		.map((result) => result.name);
-	return fail(next, `Checks still fail after the check fixes: ${failing.join(', ')}`);
+	return fail(next, checksFailedText(output, failing));
 };
 
 /**

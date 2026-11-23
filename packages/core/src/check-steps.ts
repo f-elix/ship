@@ -1,11 +1,14 @@
 /**
  * The check steps: `baseline`, the checks on the base commit before any change, and
  * `checks`, which runs the checks on the change and has the implementer fix failing ones
- * between passes, up to the configured cap.
+ * between passes, up to the configured cap, unless Clef rates every failure unrelated to
+ * the change.
  */
 import { Duration, Effect, Schema } from 'effect';
 import { Checkpoint } from './checkpoint.ts';
 import { baselinePass, Checks, checksPassed, failingChecks, filesForChecks } from './checks.ts';
+import { changeState, Clef, type ChoiceQuestion } from './clef.ts';
+import { withDefault } from './defaults.ts';
 import { Git } from './git.ts';
 import { fixChecksCall, implementerFields } from './implementer.ts';
 import { StepNotReady, StepTimeout, type StepKit } from './run-step.ts';
@@ -17,9 +20,20 @@ import { AbsolutePath, NonNegativeInt } from './values.ts';
 /** What both check steps return: every pass they ran, and whether the last passed. */
 export const ChecksOutput = Schema.Struct({
 	passes: Schema.Array(CheckRound),
-	passed: Schema.Boolean
+	passed: Schema.Boolean,
+	/**
+	 * The last pass failed after Clef rated every failure unrelated to the change and a
+	 * re-run with no fix failed again. Absent from outputs stored before Clef rated them.
+	 */
+	unrelated: Schema.Boolean.pipe(withDefault(false))
 });
 export interface ChecksOutput extends Schema.Schema.Type<typeof ChecksOutput> {}
+
+/** Why a run fails when the checks step ends with `failing` checks still failing. */
+export const checksFailedText = (output: ChecksOutput, failing: ReadonlyArray<string>): string =>
+	output.unrelated
+		? `Checks still fail when run again, and look unrelated to the change: ${failing.join(', ')}`
+		: `Checks still fail after the check fixes: ${failing.join(', ')}`;
 
 // --- baseline ---
 
@@ -64,7 +78,7 @@ export const baselineStep = {
 					onEvent: kit.emit
 				})
 			);
-			return { passes: [pass], passed: checksPassed(pass) };
+			return { passes: [pass], passed: checksPassed(pass), unrelated: false };
 		})
 } satisfies Step<BaselineInput, ChecksOutput, unknown>;
 
@@ -84,7 +98,7 @@ export const ChecksInput = Schema.Struct({
 });
 export interface ChecksInput extends Schema.Schema.Type<typeof ChecksInput> {}
 
-/** One pass over every check, on the files the run changed since its base. */
+/** One pass over every check, on the files the run changed since its base: the `attempt`th of the step. */
 const runPass = (input: ChecksInput, kit: StepKit, attempt: number) =>
 	Effect.gen(function* () {
 		const git = yield* Git;
@@ -118,6 +132,64 @@ const fixFailing = (input: ChecksInput, kit: StepKit, pass: CheckRound) => {
 	);
 };
 
+/** Clef rates a failing check unrelated to the change at this probability or above. */
+export const UNRELATED_THRESHOLD = 0.7;
+
+const causeQuestion = (index: number, name: string): ChoiceQuestion<'change' | 'unrelated'> => ({
+	type: 'choice',
+	instructions: `Did the code change make check ${index} (${name}) fail?`,
+	criteria: {
+		change: 'the change caused the failure: the output points at code, tests or files the change touched, or at what they do',
+		unrelated:
+			'the failure has nothing to do with the change: a flaky test, the network, the machine, or code the change did not touch'
+	}
+});
+
+/**
+ * Whether Clef rates every check that fails in `pass` and did not fail before the change
+ * unrelated to the change; `false` without its answer.
+ */
+const failuresUnrelated = (input: ChecksInput, pass: CheckRound) =>
+	Effect.gen(function* () {
+		const git = yield* Git;
+		const names = failingChecks(pass, input.preexisting);
+		const failing = pass.results.filter((result) => names.includes(result.name));
+		const range = { from: input.baseSha };
+		const [files, diff] = yield* Effect.all([
+			git.changedFiles(input, range),
+			git.diff(input, range)
+		]);
+		const checks = failing.map((result, index) =>
+			[
+				`Check ${index}: ${result.name}`,
+				`Command: ${input.config.checks.find((check) => check.name === result.name)?.run ?? 'unknown'}`,
+				`Exit code: ${result.exitCode}`,
+				'Output (tail):',
+				result.outputTail ?? '(none)'
+			].join('\n')
+		);
+		const answers = yield* (yield* Clef).ask(input, {
+			decision: 'Fixing failing checks without re-running them',
+			state: ['Failing checks:', '', ...checks, '', changeState(files, diff)].join('\n'),
+			questions: Object.fromEntries(
+				failing.map((result, index) => [
+					`check.${index}`,
+					causeQuestion(index, result.name)
+				])
+			)
+		});
+		if (answers === null) return false;
+		const ps = failing.map(
+			(_, index) => answers[`check.${index}`]?.probabilities.unrelated ?? 0
+		);
+		for (const [index, result] of failing.entries()) {
+			yield* Effect.logInfo(
+				`Check ${result.name} failure unrelated to the change (clef: p=${(ps[index] ?? 0).toFixed(2)})`
+			);
+		}
+		return ps.every((p) => p >= UNRELATED_THRESHOLD);
+	});
+
 /**
  * `checks`: runs the checks on the change. A pass fails when a check fails that did not
  * fail before the change (`preexisting`). While a pass fails and fewer than
@@ -125,8 +197,14 @@ const fixFailing = (input: ChecksInput, kit: StepKit, pass: CheckRound) => {
  * (reported as `fixChecks`) and the checks run again. A passing pass commits the work
  * with `commitMessage`.
  *
- * Each pass and each fix is checkpointed (`pass/<n>`, `fix/<n>`), so a resumed run keeps
- * its count of fixes and does not redo a finished one.
+ * Before a fix, Clef rates each failure: when it rates every one unrelated to the change,
+ * the checks run again with no fix instead, once per step. If that re-run fails too, the
+ * step ends with `unrelated`, for the run to escalate rather than fix what the change
+ * did not break.
+ *
+ * Each pass, Clef rating and fix is checkpointed (`pass/<n>`, `cause/<n>`, `fix/<n>`, by
+ * the pass they follow), so a resumed run keeps its count of fixes and does not redo a
+ * finished one or ask Clef again.
  */
 export const checksStep = {
 	name: 'checks',
@@ -140,11 +218,13 @@ export const checksStep = {
 			const git = yield* Git;
 			const passes: Array<CheckRound> = [];
 			let session = input.session;
-			for (let attempt = 0; ; attempt++) {
+			let fixes = 0;
+			let rerunning = false;
+			for (let index = 0; ; index++) {
 				const pass = yield* checkpoint.once(
-					`pass/${attempt}`,
+					`pass/${index}`,
 					CheckRound,
-					runPass(input, kit, attempt)
+					runPass(input, kit, index)
 				);
 				passes.push(pass);
 				if (checksPassed(pass, input.preexisting)) {
@@ -156,14 +236,25 @@ export const checksStep = {
 							message: input.commitMessage
 						});
 					}
-					return { passes, passed: true };
+					return { passes, passed: true, unrelated: false };
 				}
-				if (attempt >= input.config.caps.checkFixAttempts) return { passes, passed: false };
+				if (rerunning) return { passes, passed: false, unrelated: true };
+				if (fixes >= input.config.caps.checkFixAttempts) {
+					return { passes, passed: false, unrelated: false };
+				}
+				// A failing re-run ended the step above, so the checks re-run at most once.
+				rerunning = yield* checkpoint.once(
+					`cause/${index}`,
+					Schema.Boolean,
+					failuresUnrelated(input, pass)
+				);
+				if (rerunning) continue;
 				session = yield* checkpoint.once(
-					`fix/${attempt}`,
+					`fix/${index}`,
 					AgentSession,
 					fixFailing({ ...input, session }, kit, pass)
 				);
+				fixes += 1;
 				// A restored fix recorded its session when it ran; record it for this call too.
 				yield* kit.recordSession(session);
 			}

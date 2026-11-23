@@ -25,11 +25,16 @@ import {
 } from './checks.ts';
 import {
 	Clef,
-	CLEF_THRESHOLD,
 	ClefError,
-	type ClefPick,
-	type ClefPickInput,
-	type ClefShape
+	type ChoiceAnswer,
+	type ClefAnswers,
+	type ClefQuestion,
+	type ClefQuestions,
+	type ClefRequest,
+	type ClefScope,
+	type ClefShape,
+	type NoulAnswer,
+	type ScoreAnswer
 } from './clef.ts';
 import {
 	Gh,
@@ -791,54 +796,88 @@ export const opensPr = (text: {
 
 // --- Clef ---
 
+/** One `ask` that reached the fake Clef: the project had Clef on and asked something. */
+export interface ClefAsk {
+	readonly decision: string;
+	readonly state: string;
+	readonly questions: ClefQuestions;
+}
+
+/** A scripted answer; it must match the type of the question it answers. */
+export type ClefFakeAnswer = NoulAnswer | ChoiceAnswer | ScoreAnswer;
+
 export interface ClefFakeShape {
-	/** Every `pick` call that asked Clef, oldest first; a call with no candidates asks nothing. */
-	readonly calls: Effect.Effect<ReadonlyArray<ClefPickInput>>;
+	/** Every `ask` that reached Clef, oldest first; one with Clef off or no questions does not. */
+	readonly asks: Effect.Effect<ReadonlyArray<ClefAsk>>;
 	/**
-	 * The probability Clef gives each reviewer, by name; unlisted reviewers get 0. `pick`
-	 * applies {@link CLEF_THRESHOLD} as the real Clef does.
+	 * Scripts the answer to every later question with id `id`. An unscripted question gets
+	 * the answer that changes nothing: `noul` 0, `choice` its first option, `score` its
+	 * middle level.
 	 */
-	readonly answer: (probabilities: Readonly<Record<string, number>>) => Effect.Effect<void>;
-	/** Makes `pick` and `verify` fail with a `ClefError`, until cleared with `succeed`. */
+	readonly answer: (id: string, value: ClefFakeAnswer) => Effect.Effect<void>;
+	/**
+	 * Makes Clef unavailable until cleared with `succeed`: `ask` returns `null`, as the real
+	 * Clef does when its call fails, and `verify` fails with `error`.
+	 */
 	readonly fail: (error: ClefError) => Effect.Effect<void>;
 	readonly succeed: Effect.Effect<void>;
 }
 
+/** The answer an unscripted question gets: one that leaves every decision as without Clef. */
+const neutralAnswer = (question: ClefQuestion): ClefFakeAnswer => {
+	switch (question.type) {
+		case 'noul':
+			return { p: 0 };
+		case 'choice': {
+			const [first = ''] = Object.keys(question.criteria);
+			return { pick: first, probabilities: { [first]: 1 } };
+		}
+		case 'score':
+			return { score: (question.criteria.length - 1) / 2 };
+	}
+};
+
 export class ClefFake extends Context.Service<ClefFake, ClefFakeShape>()('@ship/core/ClefFake') {
-	/** A fake `Clef` that gives scripted probabilities, plus `ClefFake` to script and inspect it. */
+	/** A fake `Clef` that gives scripted answers, plus `ClefFake` to script and inspect it. */
 	static readonly layer: Layer.Layer<Clef | ClefFake> = Layer.effectContext(
 		Effect.gen(function* () {
-			const calls = yield* Ref.make<ReadonlyArray<ClefPickInput>>([]);
-			const probabilities = yield* Ref.make<Readonly<Record<string, number>>>({});
+			const asks = yield* Ref.make<ReadonlyArray<ClefAsk>>([]);
+			const scripted = yield* Ref.make<ReadonlyMap<string, ClefFakeAnswer>>(new Map());
 			const failure = yield* Ref.make<ClefError | null>(null);
 
-			const guard = Effect.flatMap(Ref.get(failure), (error) =>
-				error === null ? Effect.void : Effect.fail(error)
-			);
-
 			const clef: ClefShape = {
-				pick: (input) =>
-					input.candidates.length === 0
-						? Effect.succeed([])
-						: Ref.update(calls, (current) => [...current, input]).pipe(
-								Effect.andThen(guard),
-								Effect.andThen(Ref.get(probabilities)),
-								Effect.map((answers) =>
-									input.candidates.flatMap(
-										(reviewer): ReadonlyArray<ClefPick> => {
-											const probability = answers[reviewer.name] ?? 0;
-											return probability >= CLEF_THRESHOLD
-												? [{ name: reviewer.name, probability }]
-												: [];
-										}
-									)
-								)
-							),
-				verify: () => guard
+				ask: <const Qs extends ClefQuestions>(scope: ClefScope, request: ClefRequest<Qs>) =>
+					Effect.gen(function* () {
+						const entries = Object.entries(request.questions);
+						// Built per question like the real Clef's answers, so they match `Qs`.
+						if (entries.length === 0) return {} as ClefAnswers<Qs>;
+						if (!scope.config.clef) return null;
+						yield* Ref.update(asks, (all) => [
+							...all,
+							{
+								decision: request.decision,
+								state: request.state,
+								questions: request.questions
+							}
+						]);
+						if ((yield* Ref.get(failure)) !== null) return null;
+						const answers = yield* Ref.get(scripted);
+						return Object.fromEntries(
+							entries.map(([id, question]) => [
+								id,
+								answers.get(id) ?? neutralAnswer(question)
+							])
+						) as ClefAnswers<Qs>;
+					}),
+				verify: () =>
+					Effect.flatMap(Ref.get(failure), (error) =>
+						error === null ? Effect.void : Effect.fail(error)
+					)
 			};
 			const fake: ClefFakeShape = {
-				calls: Ref.get(calls),
-				answer: (next) => Ref.set(probabilities, next),
+				asks: Ref.get(asks),
+				answer: (id, value) =>
+					Ref.update(scripted, (current) => new Map([...current, [id, value]])),
 				fail: (error) => Ref.set(failure, error),
 				succeed: Ref.set(failure, null)
 			};

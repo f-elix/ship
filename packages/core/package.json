@@ -5,6 +5,7 @@
 	"type": "module",
 	"exports": {
 		".": "./src/index.ts",
+		"./clef": "./src/clef.ts",
 		"./contract": "./src/contract.ts",
 		"./conventions": "./src/conventions.ts",
 		"./credentials": "./src/credentials.ts",

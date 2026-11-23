@@ -53,6 +53,8 @@ export const recheckStep = {
 					});
 					const result = yield* reviewers.verify({
 						...subject,
+						// Nothing to lower: a recheck verifies no new finding.
+						scope: input,
 						// Past every finding's round, so nothing the verifier keeps reuses an id.
 						round: Math.max(0, ...input.findings.map((finding) => finding.round)) + 1,
 						findings: [],

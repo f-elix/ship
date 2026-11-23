@@ -38,6 +38,7 @@ export const isResumable = (status: RunStatus): boolean =>
 /** `timeout`: a step timed out after the run had already committed work. */
 export const EscalationReason = Schema.Literals([
 	'check-fix-cap',
+	'checks-unrelated',
 	'review-cap',
 	'stall',
 	'timeout'
@@ -58,7 +59,10 @@ export const CheckRound = Schema.Struct({
 	baseline: Schema.Boolean,
 	/** Review round the pass belongs to; 0 before the first review. */
 	round: NonNegativeInt,
-	/** Check-fix attempts made in this round before the pass; 0 for the first pass. */
+	/**
+	 * The pass's number in its round: 0 for the first, then one more for each pass after a
+	 * check fix or a re-run with no fix.
+	 */
 	attempt: NonNegativeInt,
 	results: Schema.Array(CheckResult)
 });

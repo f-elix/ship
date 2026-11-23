@@ -140,9 +140,8 @@ const afterBaseline = (context: RunState, output: ChecksOutput): PipelineNext =>
 
 const afterChecks = (context: RunState, output: ChecksOutput): PipelineNext => {
 	const next = { ...context, checks: [...context.checks, ...output.passes] };
-	return output.passed
-		? { target: 'review', context: { ...next, round: next.round + 1 } }
-		: escalate(next, 'check-fix-cap');
+	if (output.passed) return { target: 'review', context: { ...next, round: next.round + 1 } };
+	return escalate(next, output.unrelated ? 'checks-unrelated' : 'check-fix-cap');
 };
 
 /** The context once a review closed its round; the next round routes from its head. */

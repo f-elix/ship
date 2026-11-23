@@ -64,8 +64,14 @@ export interface GitShape {
 	readonly baseSha: (repo: GitRepo) => Effect.Effect<GitSha, GitError>;
 	/** No staged, unstaged or untracked (and not ignored) changes. */
 	readonly isClean: (repo: GitRepo) => Effect.Effect<boolean, GitError>;
-	/** The unified diff of `from..to`. */
-	readonly diff: (repo: GitRepo, range: CommitRange) => Effect.Effect<string, GitError>;
+	/**
+	 * The unified diff of `from..to`. Without `to`, of `from` against the working tree's
+	 * tracked files; untracked files are not in it.
+	 */
+	readonly diff: (
+		repo: GitRepo,
+		range: { readonly from: GitSha; readonly to?: GitSha }
+	) => Effect.Effect<string, GitError>;
 	/** Commits in `from..to`, oldest first. */
 	readonly commits: (
 		repo: GitRepo,
@@ -376,14 +382,17 @@ const make = Effect.gen(function* () {
 
 	const diffArgs = ['--no-color', '--no-ext-diff', '--no-textconv', '-M'];
 
-	const diff = Effect.fn('Git.diff')(function* (repo: GitRepo, range: CommitRange) {
+	const diff = Effect.fn('Git.diff')(function* (
+		repo: GitRepo,
+		range: { readonly from: GitSha; readonly to?: GitSha }
+	) {
 		return yield* run(repo, [
 			'diff',
 			...diffArgs,
 			'--src-prefix=a/',
 			'--dst-prefix=b/',
 			range.from,
-			range.to,
+			...(range.to === undefined ? [] : [range.to]),
 			'--'
 		]);
 	});

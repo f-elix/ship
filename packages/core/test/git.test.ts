@@ -150,6 +150,20 @@ describe('Git', () => {
 		}).pipe(Effect.scoped, Effect.provide(GitLive))
 	);
 
+	it.effect('diffs against the working tree without `to`', () =>
+		Effect.gen(function* () {
+			const { git: run, write, repo } = yield* tempRepo;
+			const git = yield* Git;
+			const from = sha(run('rev-parse', 'HEAD'));
+			write('README.md', 'changed, not committed\n');
+			write('untracked.md', 'new\n');
+
+			const diff = yield* git.diff(repo, { from });
+			expect(diff).toContain('+changed, not committed');
+			expect(diff).not.toContain('untracked.md');
+		}).pipe(Effect.scoped, Effect.provide(GitLive))
+	);
+
 	it.effect('commits every change, and returns null when there is nothing to commit', () =>
 		Effect.gen(function* () {
 			const { work, git: run, write, repo } = yield* tempRepo;

@@ -271,6 +271,14 @@ describe('renderPrBody', () => {
 			'Body.\n'
 		);
 	});
+
+	it('says the failing checks look unrelated when that escalated the run', () => {
+		expect(
+			renderPrBody('Body.', { escalation: 'checks-unrelated', checks: [], unresolved: none })
+		).toContain(
+			'> ship escalated this run: checks still fail when run again, and the failing checks look unrelated to the change.'
+		);
+	});
 });
 
 describe('renderPrBody with a failing baseline', () => {

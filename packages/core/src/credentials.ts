@@ -1,9 +1,13 @@
 import { Effect, FileSystem, Schema } from 'effect';
 import type { PlatformError } from 'effect/PlatformError';
-import { Clef, CloudflareCredentials } from './clef.ts';
 import { shipPaths } from './ship-paths.ts';
 
-export { Clef, ClefError, CloudflareCredentials } from './clef.ts';
+/** A Cloudflare account and an API token with the Workers AI permission. */
+export const CloudflareCredentials = Schema.Struct({
+	accountId: Schema.NonEmptyString,
+	apiToken: Schema.NonEmptyString
+});
+export interface CloudflareCredentials extends Schema.Schema.Type<typeof CloudflareCredentials> {}
 
 /**
  * `~/.ship/credentials.json`: secrets ship calls other services with. It is the only
@@ -67,18 +71,4 @@ export const writeCredentials = Effect.fn('writeCredentials')(function* (
 		Effect.mapError(fail),
 		Effect.onError(() => Effect.ignore(fs.remove(temp, { force: true })))
 	);
-});
-
-/**
- * Checks Cloudflare credentials with one Clef call, which proves the account id, the
- * token and its Workers AI permission together, then saves them beside any other saved
- * credentials. When Clef refuses them, it fails with Cloudflare's error and saves nothing.
- */
-export const saveCloudflareCredentials = Effect.fn('saveCloudflareCredentials')(function* (
-	home: string,
-	cloudflare: CloudflareCredentials
-) {
-	yield* (yield* Clef).verify(cloudflare);
-	const saved = yield* readCredentials(home);
-	yield* writeCredentials(home, { ...saved, cloudflare });
 });

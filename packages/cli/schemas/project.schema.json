@@ -56,15 +56,15 @@
 					},
 					"description": "Built-in reviewers to disable, by name",
 					"default": []
-				},
-				"clef": {
-					"type": "boolean",
-					"description": "Ask Cloudflare Clef to add reviewers after the deterministic triggers; needs `ship auth cloudflare`",
-					"default": true
 				}
 			},
 			"additionalProperties": false,
 			"default": {}
+		},
+		"clef": {
+			"type": "boolean",
+			"description": "Ask Cloudflare Clef for the decisions that deterministic rules leave open: which reviewers and convention topics a change needs, the reviewer model for its risk, whether a must-fix is only a taste remark, how severe an unlabelled review thread is, and whether failing checks are unrelated to the change. Each falls back to the deterministic behaviour when Clef is off or unavailable; needs `ship auth cloudflare`",
+			"default": true
 		},
 		"pr": {
 			"type": "object",
@@ -95,6 +95,14 @@
 					"minLength": 1
 				},
 				"review": {
+					"type": "string",
+					"minLength": 1
+				},
+				"reviewTrivial": {
+					"type": "string",
+					"minLength": 1
+				},
+				"reviewRisky": {
 					"type": "string",
 					"minLength": 1
 				},

@@ -3,11 +3,13 @@
  * finding was posted as.
  */
 import { Effect, Schema } from 'effect';
+import { Clef, type ChoiceQuestion, type ClefScope } from './clef.ts';
 import { FindingId, VerifiedFinding, type Severity } from './finding.ts';
 import { FINDING_MARKER, parseFindingMarker, type FindingsSource } from './findings-source.ts';
 import { Gh, type GhError, type PrDetails, type ReviewThread } from './gh.ts';
 import type { GitRepo } from './git.ts';
 import { ChangeIntent } from './reviewers.ts';
+import type { ShipHome } from './ship-paths.ts';
 import { Reviews, type ReviewNotFound, type StoredReview } from './stored-review.ts';
 import { ReviewId } from './values.ts';
 
@@ -19,19 +21,32 @@ const LABELS: Readonly<Record<string, Severity>> = {
 };
 const LABEL = /^\*\*(Must-fix|Tradeoff|Nit)\*\* /u;
 
+/** A thread's comment without ship's finding markers. */
+const commentText = (thread: ReviewThread): string =>
+	thread.body.replace(new RegExp(FINDING_MARKER.source, 'gu'), '').trim();
+
+/** The severity ship labelled a thread with when it posted it, or `null` for no label. */
+const threadLabel = (thread: ReviewThread): Severity | null => {
+	const label = LABEL.exec(commentText(thread))?.[1];
+	return label === undefined ? null : (LABELS[label] ?? null);
+};
+
 /**
- * A review thread as a finding: a must-fix, unless ship posted it with another severity
- * label, reported by `github:<login>`, claiming what the comment says (markers left out),
- * with the comment's URL as evidence. `id` is the finding's id within the source.
+ * A review thread as a finding of `severity`, reported by `github:<login>`, claiming what
+ * the comment says (markers left out), with the comment's URL as evidence. `id` is the
+ * finding's id within the source.
  */
-export const threadFinding = (thread: ReviewThread, id: FindingId): VerifiedFinding => {
-	const body = thread.body.replace(new RegExp(FINDING_MARKER.source, 'gu'), '').trim();
-	const label = LABEL.exec(body)?.[1];
+export const threadFinding = (
+	thread: ReviewThread,
+	id: FindingId,
+	severity: Severity
+): VerifiedFinding => {
+	const body = commentText(thread);
 	return {
 		reviewer: `github:${thread.author ?? 'ghost'}`,
 		file: thread.path,
 		...(thread.line === null || thread.line < 1 ? {} : { line: thread.line }),
-		severity: label === undefined ? 'must-fix' : (LABELS[label] ?? 'must-fix'),
+		severity,
 		claim: body === '' ? `See ${thread.url}` : body,
 		evidence: thread.url,
 		id,
@@ -94,25 +109,84 @@ const byTrust = (threads: ReadonlyArray<ReviewThread>) => ({
 	ignoredThreads: threads.filter((thread) => !thread.authorCanWrite).map((thread) => thread.url)
 });
 
+/** What Clef rates an unlabelled thread: a finding of either severity, or no finding. */
+type ThreadKind = 'must-fix' | 'nit' | 'none';
+
+const THREAD_QUESTION: ChoiceQuestion<ThreadKind> = {
+	type: 'choice',
+	instructions: 'What does this pull request review comment ask of the code change?',
+	criteria: {
+		'must-fix':
+			'a change the author must make: a defect, a missing case, a broken contract, or a request the reviewer expects addressed',
+		nit: 'an optional suggestion: naming, style, wording, or a matter of taste',
+		none: 'no change at all: a question, praise, an acknowledgement, or a discussion'
+	}
+};
+
+/**
+ * What an unlabelled thread is, as Clef rates it: its most probable kind. Without Clef's
+ * answer, a must-fix, as before Clef.
+ */
+const threadKind = Effect.fnUntraced(function* (scope: ClefScope, thread: ReviewThread) {
+	const answers = yield* (yield* Clef).ask(scope, {
+		decision: 'Treating an unlabelled review thread as a must-fix',
+		state: [
+			`File: ${thread.path}${thread.line === null ? '' : `:${thread.line}`}`,
+			'',
+			'Comment:',
+			commentText(thread)
+		].join('\n'),
+		questions: { kind: THREAD_QUESTION }
+	});
+	if (answers === null) return 'must-fix';
+	const { pick, probabilities } = answers.kind;
+	yield* Effect.logInfo(
+		`Review thread ${thread.url}: ${pick} (clef: p=${(probabilities[pick] ?? 0).toFixed(2)})`
+	);
+	return pick;
+});
+
 /**
  * A PR's open threads as findings. A thread ship posted is its stored finding, id
  * included, when this machine still has the review and no earlier thread took the id;
- * otherwise it keeps only its labelled severity. Other threads take their GitHub id, so a
- * finding keeps its id as threads around it are resolved.
+ * otherwise it keeps its labelled severity. An unlabelled thread is the kind Clef rates
+ * it, asked for every such thread at once; one Clef rates no finding is left out. Other
+ * threads take their GitHub id, so a finding keeps its id as threads around it are
+ * resolved.
  */
-const fromThreads = Effect.fnUntraced(function* (threads: ReadonlyArray<ReviewThread>) {
+const fromThreads = Effect.fnUntraced(function* (
+	scope: ClefScope,
+	threads: ReadonlyArray<ReviewThread>
+) {
+	const stored = yield* Effect.forEach(threads, storedFinding);
+	const taken = new Set<string>();
+	const own = stored.map((finding) => {
+		if (finding === null || taken.has(finding.id)) return null;
+		if (actionable(finding)) taken.add(finding.id);
+		return finding;
+	});
+	const kinds = yield* Effect.forEach(
+		threads,
+		(thread, index): Effect.Effect<ThreadKind | Severity | null, never, Clef | ShipHome> => {
+			if (own[index] !== null) return Effect.succeed(null);
+			const label = threadLabel(thread);
+			return label === null ? threadKind(scope, thread) : Effect.succeed(label);
+		},
+		{ concurrency: 'unbounded' }
+	);
 	const findings: Array<VerifiedFinding> = [];
 	const byFinding: Record<string, string> = {};
-	for (const thread of threads) {
-		const stored = yield* storedFinding(thread);
+	threads.forEach((thread, index) => {
+		const kind = kinds[index] ?? null;
 		const finding =
-			stored !== null && !(stored.id in byFinding)
-				? stored
-				: threadFinding(thread, FindingId.make(thread.id));
-		if (!actionable(finding)) continue;
+			own[index] ??
+			(kind === null || kind === 'none'
+				? null
+				: threadFinding(thread, FindingId.make(thread.id), kind));
+		if (finding === null || !actionable(finding)) return;
 		findings.push(finding);
 		byFinding[finding.id] = thread.id;
-	}
+	});
 	return { findings, threads: byFinding };
 });
 
@@ -132,17 +206,19 @@ const fromReview = (review: StoredReview, threads: ReadonlyArray<ReviewThread>) 
 
 /**
  * Loads `source` in `repo`: its PR, as GitHub has it now, and the findings with their
- * open threads. Fails with `ReviewNotFound` for an unknown review, `ReviewWithoutPr` for a
+ * open threads. Clef rates the unlabelled threads of a PR, unless `scope`'s project
+ * turned it off. Fails with `ReviewNotFound` for an unknown review, `ReviewWithoutPr` for a
  * review of a branch without a PR, `PrNotFound` when the PR cannot be read, and `GhError`
  * when its threads cannot.
  */
 export const loadFindings = Effect.fn('loadFindings')(function* (
 	repo: GitRepo,
-	source: FindingsSource
+	source: FindingsSource,
+	scope: ClefScope
 ): Effect.fn.Return<
 	{ readonly pr: PrDetails; readonly loaded: LoadedFindings },
 	ReviewNotFound | ReviewWithoutPr | PrNotFound | GhError,
-	Gh | Reviews
+	Gh | Reviews | Clef | ShipHome
 > {
 	const gh = yield* Gh;
 	const viewPr = (ref: string) =>
@@ -156,7 +232,7 @@ export const loadFindings = Effect.fn('loadFindings')(function* (
 	if (source._tag === 'PrThreads') {
 		const pr = yield* viewPr(source.pr);
 		const { trusted, ignoredThreads } = byTrust(yield* gh.reviewThreads(repo, pr.url));
-		const fromPr = yield* fromThreads(trusted);
+		const fromPr = yield* fromThreads(scope, trusted);
 		return {
 			pr,
 			loaded: {

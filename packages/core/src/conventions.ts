@@ -1,11 +1,13 @@
 import { Context, Effect, FileSystem, Layer, Schema, SchemaIssue } from 'effect';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { changeState, Clef, type ClefScope, type NoulQuestion } from './clef.ts';
 import { configParseOptions } from './config.ts';
 import { Git, type GitError, type GitRepo } from './git.ts';
 import { splitFrontmatter } from './reviewer-markdown.ts';
 import { ReviewerName, ReviewerTriggers, type ReviewerFrontmatter } from './reviewer.ts';
 import { matchTriggers, type ReviewChanges } from './router.ts';
+import type { ShipHome } from './ship-paths.ts';
 
 // --- Built-in conventions ---
 
@@ -206,6 +208,20 @@ export const otherConventions = (scope: ConventionScope): ReadonlyArray<Conventi
 const topicFiles = (topic: Convention, details: boolean) =>
 	details && topic.details !== null ? [topic.base, topic.details] : [topic.base];
 
+/** Clef adds a topic whose triggers did not match at this probability or above. */
+export const TOPIC_THRESHOLD = 0.5;
+
+const topicQuestion = (topic: Convention): NoulQuestion => ({
+	type: 'noul',
+	instructions: `Does this code change touch what the "${topic.name}" coding conventions cover: ${topic.description}`
+});
+
+/** What a review's conventions are picked from: the repo, the project's Clef flag, the change. */
+export interface ReviewScopeInput {
+	readonly scope: GitRepo & ClefScope;
+	readonly changes: ReviewChanges & { readonly diff: string };
+}
+
 /** Tells agents given conventions that the repo's own written rules win. */
 export const REPO_RULES_WIN =
 	"Where these conventions conflict with the repository's own written rules (AGENTS.md, CLAUDE.md, its docs), the repository's rules win.";
@@ -222,14 +238,17 @@ export interface ConventionsShape {
 	 * `typescript` when a `tsconfig.json` is tracked.
 	 */
 	readonly stack: (repo: GitRepo) => Effect.Effect<ReadonlySet<string>, GitError>;
+	/** The topics whose stack matches the repo, triggers ignored: what an implementer gets. */
+	readonly scope: (input: { readonly repo: GitRepo }) => Effect.Effect<ConventionScope, GitError>;
 	/**
-	 * The topics that apply to the repo; with `changes`, a topic with
-	 * triggers applies only when they match.
+	 * The topics a review of `changes` gets: those whose stack matches the repo and that
+	 * have no triggers or whose triggers match, plus those Clef says the change touches,
+	 * from their `description`. Clef never removes a topic; without its answer, the
+	 * triggers alone decide.
 	 */
-	readonly scope: (input: {
-		readonly repo: GitRepo;
-		readonly changes?: ReviewChanges;
-	}) => Effect.Effect<ConventionScope, GitError>;
+	readonly reviewScope: (
+		input: ReviewScopeInput
+	) => Effect.Effect<ConventionScope, GitError, Clef | ShipHome>;
 }
 
 const make = (dir: string) =>
@@ -293,22 +312,46 @@ const make = (dir: string) =>
 			return names;
 		});
 
-		const scope = Effect.fn('Conventions.scope')(function* (input: {
-			readonly repo: GitRepo;
-			readonly changes?: ReviewChanges;
-		}) {
+		const scope = Effect.fn('Conventions.scope')(function* (input: { readonly repo: GitRepo }) {
 			const repoStack = yield* stack(input.repo);
 			return {
 				dir,
-				topics: selectConventions({
-					topics,
-					stack: repoStack,
-					...(input.changes === undefined ? {} : { changes: input.changes })
-				})
+				topics: selectConventions({ topics, stack: repoStack })
 			} satisfies ConventionScope;
 		});
 
-		return Conventions.of({ dir, topics, stack, scope });
+		const reviewScope = Effect.fn('Conventions.reviewScope')(function* (
+			input: ReviewScopeInput
+		) {
+			const repoStack = yield* stack(input.scope);
+			const stackTopics = selectConventions({ topics, stack: repoStack });
+			const matched = new Set(
+				selectConventions({ topics, stack: repoStack, changes: input.changes }).map(
+					(topic) => topic.name
+				)
+			);
+			const candidates = stackTopics.filter((topic) => !matched.has(topic.name));
+			const answers = yield* (yield* Clef).ask(input.scope, {
+				decision: 'Picking convention topics',
+				state: changeState(input.changes.files, input.changes.diff),
+				questions: Object.fromEntries(
+					candidates.map((topic) => [`topic.${topic.name}`, topicQuestion(topic)])
+				)
+			});
+			const picked = new Set(matched);
+			for (const topic of candidates) {
+				const p = answers?.[`topic.${topic.name}`]?.p ?? 0;
+				if (p < TOPIC_THRESHOLD) continue;
+				picked.add(topic.name);
+				yield* Effect.logInfo(`Convention topic ${topic.name}: clef: p=${p.toFixed(2)}`);
+			}
+			return {
+				dir,
+				topics: stackTopics.filter((topic) => picked.has(topic.name))
+			} satisfies ConventionScope;
+		});
+
+		return Conventions.of({ dir, topics, stack, scope, reviewScope });
 	});
 
 export class Conventions extends Context.Service<Conventions, ConventionsShape>()(

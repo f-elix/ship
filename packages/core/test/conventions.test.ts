@@ -1,7 +1,7 @@
 import { NodeServices } from '@effect/platform-node';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Schema } from 'effect';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -22,6 +22,7 @@ import {
 	reviewerPrompt,
 	ReviewerTriggers,
 	selectConventions,
+	ShipHome,
 	splitFrontmatter,
 	type Convention,
 	type ConventionScope,
@@ -29,7 +30,7 @@ import {
 	type ReviewerDef,
 	type ReviewSubject
 } from '../src/index.ts';
-import { fakeSha, GitFake } from '../src/testing.ts';
+import { ClefFake, fakeSha, GitFake } from '../src/testing.ts';
 import { GitLive, tempRepo } from './temp-repo.ts';
 
 const DIR = BUILTIN_CONVENTIONS_DIR;
@@ -215,6 +216,96 @@ describe('Conventions.stack', () => {
 	it.effect('is empty in a repo with no package.json', () =>
 		Effect.gen(function* () {
 			expect(yield* stackOf(() => {})).toEqual([]);
+		})
+	);
+});
+
+describe('Conventions.reviewScope', () => {
+	const conventionFile = (name: string, stack: string, triggers = '') =>
+		`---\nname: ${name}\ndescription: The ${name} topic.\nstack: [${stack}]\n${triggers}---\n\n# ${name}\n`;
+
+	/** Picks a review's topics for a change to `src/a.ts` in a TypeScript repo. */
+	const reviewScopeWith = (clef: {
+		readonly answer: Record<string, number>;
+		readonly on?: boolean;
+	}) =>
+		Effect.gen(function* () {
+			const repo = yield* tempRepo;
+			repo.write('tsconfig.json', '{}');
+			repo.git('add', '.');
+			const dir = join(repo.dir, 'conventions');
+			mkdirSync(dir);
+			const files = {
+				'always.md': conventionFile('always', 'typescript'),
+				'comments.md': conventionFile(
+					'comments',
+					'typescript',
+					'triggers:\n    fileKinds: [source]\n'
+				),
+				'testing.md': conventionFile(
+					'testing',
+					'typescript',
+					'triggers:\n    fileKinds: [test]\n'
+				),
+				'styling.md': conventionFile(
+					'styling',
+					'typescript',
+					"triggers:\n    paths: ['**/*.css']\n"
+				),
+				'svelte.md': conventionFile('svelte', 'svelte')
+			};
+			for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+			const fake = yield* ClefFake;
+			for (const [id, p] of Object.entries(clef.answer)) yield* fake.answer(id, { p });
+			const scope = yield* Effect.gen(function* () {
+				return yield* (yield* Conventions).reviewScope({
+					scope: { ...repo.repo, config: { clef: clef.on ?? true } },
+					changes: {
+						files: [{ path: 'src/a.ts', status: 'modified' }],
+						addedLines: {},
+						diff: '+const a = 1;'
+					}
+				});
+			}).pipe(
+				Effect.provide(
+					Conventions.layerWithDir(dir).pipe(Layer.provide([GitLive, NodeServices.layer]))
+				)
+			);
+			return { topics: scope.topics.map((topic) => topic.name), asks: yield* fake.asks };
+		}).pipe(Effect.provide([ClefFake.layer, ShipHome.layer('/nonexistent')]), Effect.scoped);
+
+	it.effect('asks about stack topics the triggers missed and adds those Clef picks', () =>
+		Effect.gen(function* () {
+			const { topics, asks } = yield* reviewScopeWith({
+				answer: { 'topic.testing': 0.5, 'topic.styling': 0.49 }
+			});
+			expect(topics).toEqual(['always', 'comments', 'testing']);
+			expect(asks.map((ask) => Object.keys(ask.questions))).toEqual([
+				['topic.styling', 'topic.testing']
+			]);
+			expect(asks[0]?.questions['topic.testing']?.instructions).toContain(
+				'"testing" coding conventions cover: The testing topic.'
+			);
+		})
+	);
+
+	it.effect('never removes a topic the triggers matched', () =>
+		Effect.gen(function* () {
+			const { topics } = yield* reviewScopeWith({
+				answer: { 'topic.always': 0, 'topic.comments': 0 }
+			});
+			expect(topics).toEqual(['always', 'comments']);
+		})
+	);
+
+	it.effect('keeps the triggers alone without a Clef answer', () =>
+		Effect.gen(function* () {
+			const { topics, asks } = yield* reviewScopeWith({
+				answer: { 'topic.testing': 1 },
+				on: false
+			});
+			expect(topics).toEqual(['always', 'comments']);
+			expect(asks).toEqual([]);
 		})
 	);
 });

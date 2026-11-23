@@ -146,6 +146,8 @@ const checksEvidence = (checks: ReadonlyArray<CheckRound>): string => {
 
 const ESCALATION_TEXT: Record<EscalationReason, string> = {
 	'check-fix-cap': 'checks still fail after the last check-fix attempt',
+	'checks-unrelated':
+		'checks still fail when run again, and the failing checks look unrelated to the change',
 	'review-cap': 'must-fix findings or nits remain after the last review round',
 	stall: 'a fix round left a must-fix finding unresolved',
 	timeout: 'a step timed out'

@@ -1,9 +1,5 @@
-import {
-	Clef,
-	credentialsPath,
-	saveCloudflareCredentials,
-	type CloudflareCredentials
-} from '@ship/core/credentials';
+import { Clef, saveCloudflareCredentials } from '@ship/core/clef';
+import { credentialsPath, type CloudflareCredentials } from '@ship/core/credentials';
 import { Console, Effect, Redacted } from 'effect';
 import { Command, Prompt } from 'effect/cli';
 import { cliError } from './connection.ts';
@@ -56,7 +52,7 @@ const cloudflare = Command.make(
 	)
 ).pipe(
 	Command.withDescription(
-		'Save the Cloudflare account id and API token Clef routing uses, after checking them with one Clef call.'
+		'Save the Cloudflare account id and API token that Clef decisions use, after checking them with one Clef call.'
 	)
 );
 

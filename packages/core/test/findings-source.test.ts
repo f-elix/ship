@@ -2,6 +2,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
 import {
 	ChangeIntent,
+	ClefError,
 	FindingId,
 	findingMarker,
 	FindingsSource,
@@ -16,11 +17,12 @@ import {
 	type StoredReview,
 	type VerifiedFinding
 } from '../src/index.ts';
-import { GhFake } from '../src/testing.ts';
+import { ClefFake, GhFake } from '../src/testing.ts';
 import { baseSha, projectKey, runId } from './fixtures.ts';
 import { withSteps } from './step-harness.ts';
 
 const repo = { cwd: '/repo', env: {} };
+const clefOn = { config: { clef: true } };
 const PR_URL = 'https://github.com/f-elix/example/pull/1';
 const reviewId = ReviewId.make('run-1-r1');
 
@@ -71,21 +73,21 @@ describe('findingMarker', () => {
 });
 
 describe('threadFinding', () => {
-	it("makes a reviewer's comment a must-fix finding with the comment as evidence", () => {
-		expect(threadFinding(thread, FindingId.make('t1'))).toEqual({
+	it("makes a reviewer's comment a finding of the given severity with the comment as evidence", () => {
+		expect(threadFinding(thread, FindingId.make('t1'), 'nit')).toEqual({
 			id: 't1',
 			round: 1,
 			reviewer: 'github:octocat',
 			alsoReportedBy: [],
 			file: 'src/a.ts',
 			line: 3,
-			severity: 'must-fix',
+			severity: 'nit',
 			claim: 'This leaks the token.',
 			evidence: thread.url
 		});
 	});
 
-	it("keeps the severity ship labelled it with, leaves the marker out and has no line for a file's thread", () => {
+	it("leaves the marker out and has no line for a file's thread", () => {
 		const finding = threadFinding(
 			{
 				...thread,
@@ -93,21 +95,21 @@ describe('threadFinding', () => {
 				author: null,
 				body: `**Nit** (standards): Rename it.\n\n${findingMarker(reviewId, FindingId.make('r1-1'))}`
 			},
-			FindingId.make('t1')
+			FindingId.make('t1'),
+			'nit'
 		);
 
 		expect(finding).toMatchObject({
 			reviewer: 'github:ghost',
-			severity: 'nit',
 			claim: '**Nit** (standards): Rename it.'
 		});
 		expect(finding.line).toBeUndefined();
 	});
 
 	it('points at the comment when its body says nothing', () => {
-		expect(threadFinding({ ...thread, body: '  ' }, FindingId.make('t1')).claim).toBe(
-			`See ${thread.url}`
-		);
+		expect(
+			threadFinding({ ...thread, body: '  ' }, FindingId.make('t1'), 'must-fix').claim
+		).toBe(`See ${thread.url}`);
 	});
 });
 
@@ -183,7 +185,8 @@ describe('loadFindings', () => {
 
 				const { pr, loaded } = yield* loadFindings(
 					repo,
-					FindingsSource.cases.PrThreads.make({ pr: '1' })
+					FindingsSource.cases.PrThreads.make({ pr: '1' }),
+					clefOn
 				);
 
 				expect(pr.url).toBe(PR_URL);
@@ -210,7 +213,8 @@ describe('loadFindings', () => {
 
 				const { loaded } = yield* loadFindings(
 					repo,
-					FindingsSource.cases.PrThreads.make({ pr: PR_URL })
+					FindingsSource.cases.PrThreads.make({ pr: PR_URL }),
+					clefOn
 				);
 
 				expect(loaded.findings).toMatchObject([{ id: posted.id, severity: 'nit' }]);
@@ -238,7 +242,8 @@ describe('loadFindings', () => {
 
 				const { loaded } = yield* loadFindings(
 					repo,
-					FindingsSource.cases.Review.make({ reviewId })
+					FindingsSource.cases.Review.make({ reviewId }),
+					clefOn
 				);
 
 				expect(loaded.findings.map((finding) => finding.id)).toEqual(['r1-1', 'r1-3']);
@@ -259,7 +264,11 @@ describe('loadFindings', () => {
 				yield* addPr;
 				const first = yield* comment('Rename this.');
 				const second = yield* comment('Export it.');
-				const load = loadFindings(repo, FindingsSource.cases.PrThreads.make({ pr: '1' }));
+				const load = loadFindings(
+					repo,
+					FindingsSource.cases.PrThreads.make({ pr: '1' }),
+					clefOn
+				);
 				const before = yield* load;
 				yield* (yield* Gh).resolveThread(repo, { prUrl: PR_URL, threadId: first.id });
 
@@ -287,11 +296,13 @@ describe('loadFindings', () => {
 
 				const fromPr = yield* loadFindings(
 					repo,
-					FindingsSource.cases.PrThreads.make({ pr: '1' })
+					FindingsSource.cases.PrThreads.make({ pr: '1' }),
+					clefOn
 				);
 				const fromReview = yield* loadFindings(
 					repo,
-					FindingsSource.cases.Review.make({ reviewId })
+					FindingsSource.cases.Review.make({ reviewId }),
+					clefOn
 				);
 
 				expect(fromPr.loaded.findings).toEqual([]);
@@ -312,7 +323,8 @@ describe('loadFindings', () => {
 
 				const { loaded } = yield* loadFindings(
 					repo,
-					FindingsSource.cases.Review.make({ reviewId })
+					FindingsSource.cases.Review.make({ reviewId }),
+					clefOn
 				);
 
 				expect(loaded.threads).toEqual({});
@@ -324,19 +336,104 @@ describe('loadFindings', () => {
 		withSteps(
 			Effect.gen(function* () {
 				const unknown = yield* Effect.flip(
-					loadFindings(repo, FindingsSource.cases.Review.make({ reviewId }))
+					loadFindings(repo, FindingsSource.cases.Review.make({ reviewId }), clefOn)
 				);
 				yield* storeReview([findingOf(1, 'must-fix')], {}, null);
 				const withoutPr = yield* Effect.flip(
-					loadFindings(repo, FindingsSource.cases.Review.make({ reviewId }))
+					loadFindings(repo, FindingsSource.cases.Review.make({ reviewId }), clefOn)
 				);
 				const noPr = yield* Effect.flip(
-					loadFindings(repo, FindingsSource.cases.PrThreads.make({ pr: '9' }))
+					loadFindings(repo, FindingsSource.cases.PrThreads.make({ pr: '9' }), clefOn)
 				);
 
 				expect(unknown._tag).toBe('ReviewNotFound');
 				expect(withoutPr._tag).toBe('ReviewWithoutPr');
 				expect(noPr._tag).toBe('PrNotFound');
+			})
+		)
+	);
+
+	it.effect.each([
+		['must-fix', ['must-fix']],
+		['nit', ['nit']],
+		['none', []]
+	] as const)('takes an unlabelled thread Clef rates %s as such', ([kind, severities]) =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* addPr;
+				const clef = yield* ClefFake;
+				yield* clef.answer('kind', {
+					pick: kind,
+					probabilities: { 'must-fix': 0.1, nit: 0.1, none: 0.1, [kind]: 0.8 }
+				});
+				yield* comment('Rename this.', 4);
+
+				const { loaded } = yield* loadFindings(
+					repo,
+					FindingsSource.cases.PrThreads.make({ pr: '1' }),
+					clefOn
+				);
+
+				expect(loaded.findings.map((finding) => finding.severity)).toEqual(severities);
+				expect(Object.keys(loaded.threads)).toHaveLength(severities.length);
+				expect(loaded.ignoredThreads).toEqual([]);
+				const [ask] = yield* clef.asks;
+				expect(ask?.state).toBe('File: src/a.ts:4\n\nComment:\nRename this.');
+				expect(ask?.questions['kind']).toMatchObject({
+					type: 'choice',
+					criteria: {
+						'must-fix': expect.any(String),
+						nit: expect.any(String),
+						none: expect.any(String)
+					}
+				});
+			})
+		)
+	);
+
+	it.effect('never asks Clef about a labelled or stored thread', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* addPr;
+				yield* storeReview([findingOf(1, 'must-fix')]);
+				const clef = yield* ClefFake;
+				yield* clef.answer('kind', { pick: 'none', probabilities: { none: 1 } });
+				yield* comment(`Posted.\n\n${findingMarker(reviewId, FindingId.make('r1-1'))}`);
+				yield* comment(
+					`**Nit** (standards): Claim 2.\n\n${findingMarker(reviewId, FindingId.make('r1-2'))}`
+				);
+
+				const { loaded } = yield* loadFindings(
+					repo,
+					FindingsSource.cases.PrThreads.make({ pr: '1' }),
+					clefOn
+				);
+
+				expect(loaded.findings.map((finding) => finding.severity)).toEqual([
+					'must-fix',
+					'nit'
+				]);
+				expect(yield* clef.asks).toEqual([]);
+			})
+		)
+	);
+
+	it.effect('takes an unlabelled thread as a must-fix without a Clef answer', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* addPr;
+				const clef = yield* ClefFake;
+				yield* clef.answer('kind', { pick: 'none', probabilities: { none: 1 } });
+				yield* clef.fail(new ClefError({ status: 500, detail: 'Internal error' }));
+				yield* comment('Rename this.');
+
+				const { loaded } = yield* loadFindings(
+					repo,
+					FindingsSource.cases.PrThreads.make({ pr: '1' }),
+					clefOn
+				);
+
+				expect(loaded.findings.map((finding) => finding.severity)).toEqual(['must-fix']);
 			})
 		)
 	);

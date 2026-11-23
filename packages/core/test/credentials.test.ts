@@ -2,13 +2,8 @@ import { NodeServices } from '@effect/platform-node';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import {
-	ClefError,
-	credentialsPath,
-	readCredentials,
-	saveCloudflareCredentials,
-	writeCredentials
-} from '../src/credentials.ts';
+import { ClefError, saveCloudflareCredentials } from '../src/clef.ts';
+import { credentialsPath, readCredentials, writeCredentials } from '../src/credentials.ts';
 import { ClefFake } from '../src/testing.ts';
 import { tempDir } from './temp-repo.ts';
 
