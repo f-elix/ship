@@ -135,6 +135,8 @@ const fixFailing = (input: ChecksInput, kit: StepKit, pass: CheckRound) => {
 /** Clef rates a failing check unrelated to the change at this probability or above. */
 export const UNRELATED_THRESHOLD = 0.7;
 
+const UNRELATED_DECISION = 'Fixing failing checks without re-running them';
+
 const causeQuestion = (index: number, name: string): ChoiceQuestion<'change' | 'unrelated'> => ({
 	type: 'choice',
 	instructions: `Did the code change make check ${index} (${name}) fail?`,
@@ -147,7 +149,7 @@ const causeQuestion = (index: number, name: string): ChoiceQuestion<'change' | '
 
 /**
  * Whether Clef rates every check that fails in `pass` and did not fail before the change
- * unrelated to the change; `false` without its answer.
+ * unrelated to the change; `false` without its answer or when the change cannot be read.
  */
 const failuresUnrelated = (input: ChecksInput, pass: CheckRound) =>
 	Effect.gen(function* () {
@@ -155,10 +157,16 @@ const failuresUnrelated = (input: ChecksInput, pass: CheckRound) =>
 		const names = failingChecks(pass, input.preexisting);
 		const failing = pass.results.filter((result) => names.includes(result.name));
 		const range = { from: input.baseSha };
-		const [files, diff] = yield* Effect.all([
+		const change = yield* Effect.all([
 			git.changedFiles(input, range),
 			git.diff(input, range)
-		]);
+		]).pipe(
+			Effect.catchTag('GitError', (error) =>
+				Effect.as(Effect.logWarning(`${UNRELATED_DECISION} without Clef`, error), null)
+			)
+		);
+		if (change === null) return false;
+		const [files, diff] = change;
 		const checks = failing.map((result, index) =>
 			[
 				`Check ${index}: ${result.name}`,
@@ -169,7 +177,7 @@ const failuresUnrelated = (input: ChecksInput, pass: CheckRound) =>
 			].join('\n')
 		);
 		const answers = yield* (yield* Clef).ask(input, {
-			decision: 'Fixing failing checks without re-running them',
+			decision: UNRELATED_DECISION,
 			state: ['Failing checks:', '', ...checks, '', changeState(files, diff)].join('\n'),
 			questions: Object.fromEntries(
 				failing.map((result, index) => [

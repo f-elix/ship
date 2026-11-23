@@ -270,6 +270,26 @@ describe('checksStep', () => {
 		)
 	);
 
+	it.effect('fixes as before, without asking Clef, when the change cannot be read', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1, 0] }));
+				yield* (yield* GitFake).fail('diff', 'fatal: bad object');
+				const agent = yield* AgentFake;
+				yield* agent.script({ step: 'fixChecks' }, { costUsd: 0.2 });
+				const recorded = yield* recordingKit;
+
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
+
+				expect(output).toMatchObject({ passed: true, unrelated: false });
+				expect(yield* agent.calls).toHaveLength(1);
+				expect(yield* (yield* ClefFake).asks).toEqual([]);
+				expect((yield* CheckpointValues).get('cause/0')).toBe(false);
+			}),
+			changed
+		)
+	);
+
 	it.effect('asks Clef nothing when no fix is allowed', () =>
 		withSteps(
 			Effect.gen(function* () {
