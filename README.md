@@ -81,7 +81,7 @@ Ctrl-C detaches instead of cancelling, and prints how to follow, check or cancel
 | `ship daemon restart [--force]`             | Restart it, e.g. after upgrading ship or editing lock permits                                                                                          |
 | `ship init --detect`                        | Print a draft project config for the current directory                                                                                                 |
 | `ship init --write <file> [--force]`        | Validate and save the project config, then run every check once                                                                                        |
-| `ship auth cloudflare`                      | Save the Cloudflare credentials reviewer routing uses, after checking them                                                                             |
+| `ship auth cloudflare`                      | Save the Cloudflare credentials [Clef decisions](#clef-decisions) use, after checking them                                                             |
 
 Runs are hosted by a background daemon, which the commands that need it start when it is not running (`ship daemon stop` does not); its output goes to `daemon.log` in ship's home. The CLI and the daemon must be the same version: after an upgrade, commands ask for `ship daemon restart`. Stopping or restarting the daemon is refused while runs are active; `--force` interrupts them, and `ship resume <id>` continues them later.
 
@@ -101,7 +101,7 @@ Events and the summary JSON go to stderr and stdout like `ship run`; the summary
 
 `ship fix <source>` and `ship recheck <source>` work on findings left on a pull request, in the checkout you run them from, with the same rules as `ship review`: check the PR out first with `gh pr checkout <n>`, and ship refuses to start unless the tree is clean and `HEAD` is the PR's head commit. `<source>` is one of:
 
-- a PR number or URL: the PR's open, unresolved review threads. A thread ship posted carries a hidden marker, `<!-- ship-finding: <reviewId>/<findingId> -->`, and becomes that finding again (its stored copy when this machine has the review, its severity otherwise; tradeoffs are left out). Any other thread is a must-fix finding by its author.
+- a PR number or URL: the PR's open, unresolved review threads. A thread ship posted carries a hidden marker, `<!-- ship-finding: <reviewId>/<findingId> -->`, and becomes that finding again (its stored copy when this machine has the review, its severity otherwise; tradeoffs are left out). Any other thread is a finding by its author: a must-fix, or what Clef rates it (see [Clef decisions](#clef-decisions)).
 - a review id, the `reviewId` of a `ship review` summary: that review's must-fix findings and nits, with the threads it posted when it was posted.
 
 `ship fix` gives the must-fix findings and nits to the fix agent, runs the checks (fixing failing ones like `ship run`) and commits; with `--no-checks` it commits the work without running them. It then pushes `HEAD` to the PR's branch, to `origin` for a branch of the same repository and to the fork when the PR allows maintainer edits; ship refuses to start when it cannot push, unless you pass `--local`, which keeps the commits in the checkout. It never pushes a `HEAD` that does not descend from the head it started from. It needs the project config. The summary has `"kind": "fix"`, the commits and whether they were pushed; it exits 0 when done and 1 when the run failed, was cancelled or did not start.
@@ -117,9 +117,22 @@ Four commands each run one part of `ship run` on its own, in the checkout you ru
 - `ship pr` pushes the branch and has the PR agent open or update its PR, as described in [The pull request](#the-pull-request). It never squashes, whatever `pr.squash` says: the commits go up as they are. `--plan <dir>` gives the agent a spec and plan to describe the change with; without one, the commits and the diff describe it. It needs a feature branch and a clean tree outside the plan dir, and uses the project config when there is one and the defaults otherwise.
 - `ship post <review-id>` posts a review `ship review` stored, as `ship review --post` would. It needs `HEAD` at the reviewed head (`gh pr checkout <n>`), and refuses a review with no PR, of another repository, or with no findings.
 
-## Reviewer routing
+## Clef decisions
 
-Each review round picks reviewers with the deterministic triggers in their briefs, then asks [Cloudflare Clef](https://developers.cloudflare.com/workers-ai/models/clef-flash/) whether the change needs any of the others. Clef can only add reviewers. `ship auth cloudflare` asks for a Cloudflare account id and an API token with the Workers AI permission, checks them with one Clef call, and saves them to `credentials.json` in ship's home, readable by you only (mode 0600). That file is the only place ship reads them from; delete it to remove them. Without credentials, routing uses the triggers only and logs a warning to `daemon.log`; set `reviewers.clef` to `false` in the project config to turn Clef off.
+ship asks [Cloudflare Clef](https://developers.cloudflare.com/workers-ai/models/clef-flash/) (`clef-flash`) to make a few small judgement calls that rules make badly:
+
+- **Reviewer routing.** Each review round picks reviewers with the deterministic triggers in their briefs, then asks Clef whether the change needs any of the others (added at probability 0.5 or more). Clef can only add reviewers.
+- **Review model.** The same call rates the change's risk: a `trivial` change is reviewed with `models.reviewTrivial` (default `haiku`), a `risky` one with `models.reviewRisky` (default `opus`), and a `routine` one with `models.review`. A reviewer whose brief names a `model` keeps it.
+- **Convention topics.** A review also gets a convention topic whose stack the repo uses but whose triggers the change missed, when Clef says the change touches what it covers (0.5 or more). Clef never removes a topic.
+- **Lowering must-fix findings.** Clef rates each must-fix finding of a round; one it rates only a formatter, linter or taste remark (0.7 or more) becomes a nit. It never touches a tradeoff and never raises a severity. Duplicates merged into one finding are lowered only when every must-fix among them is.
+- **Unlabelled threads.** For `ship fix` and `ship recheck` on a PR, a thread from someone who may push, with no label from ship and no stored finding, is a must-fix, a nit or no finding at all (a question or a thank-you, left out), whichever Clef finds most probable.
+- **Failing checks.** Before a check fix, Clef rates each failing check as caused by the change or unrelated to it. When every failure looks unrelated (0.7 or more), ship runs the checks again once without a fix: a pass goes on, and a failure escalates the run as `checks-unrelated`, its PR saying the failing checks look unrelated to the change.
+
+Clef is never required. When it is off, has no credentials, fails or times out (30 seconds), each decision does what it did without Clef (triggers only, `models.review`, triggers only, no lowering, must-fix, the fix loop) and ship logs a warning to `daemon.log`. Each decision is logged with Clef's probability, and a decision made inside a run is checkpointed with its step, so `ship resume` does not ask again.
+
+`ship auth cloudflare` asks for a Cloudflare account id and an API token with the Workers AI permission, checks them with one Clef call, and saves them to `credentials.json` in ship's home, readable by you only (mode 0600). That file is the only place ship reads them from; delete it to remove them. Set `clef` to `false` in the project config to turn Clef off for a project.
+
+`clef` replaced `reviewers.clef`: a project config that still sets `reviewers.clef` fails to load, naming the key. Move the value to the top-level `clef`.
 
 ## Conventions
 

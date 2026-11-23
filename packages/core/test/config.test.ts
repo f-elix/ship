@@ -36,6 +36,8 @@ describe('GlobalConfig', () => {
 			implement: 'opus',
 			fix: 'opus',
 			review: 'sonnet',
+			reviewTrivial: 'haiku',
+			reviewRisky: 'opus',
 			verify: 'sonnet',
 			pr: 'sonnet'
 		});
@@ -94,7 +96,8 @@ describe('ProjectConfig', () => {
 	it('decodes {} to defaults and leaves global overrides absent', () => {
 		expect(decodeProject({})).toEqual({
 			checks: [],
-			reviewers: { disable: [], clef: true },
+			reviewers: { disable: [] },
+			clef: true,
 			pr: { draft: true, squash: true }
 		});
 	});
@@ -105,7 +108,8 @@ describe('ProjectConfig', () => {
 				{ name: 'lint', run: 'oxlint {files}', fix: 'oxlint --fix {files}' },
 				{ name: 'test', run: 'vitest run', lock: 'db' }
 			],
-			reviewers: { disable: ['ui-a11y'], clef: false },
+			reviewers: { disable: ['ui-a11y'] },
+			clef: false,
 			pr: { draft: false },
 			caps: { reviewRounds: 1 },
 			timeouts: { checks: '1 hour' }
@@ -136,6 +140,8 @@ describe('ProjectConfig', () => {
 		);
 		rejects(decodeProject, { caps: { checkFixAttempts: -2 } }, /greater than or equal to 0/);
 		rejects(decodeProject, { pr: { draft: 'yes' } }, /Expected boolean/);
+		// `reviewers.clef` became the project-level `clef`; the old key names itself.
+		rejects(decodeProject, { reviewers: { clef: false } }, /\["reviewers"\]\["clef"\]/);
 		rejects(
 			decodeProject,
 			{ reviewers: { disable: ['Security'] } },
@@ -185,6 +191,13 @@ describe('ResolvedConfig', () => {
 		expect(resolved.format).toBe('prettier --write {files}');
 		expect(resolved.pr).toEqual({ draft: true, squash: false });
 		expect(resolveConfig(global, decodeProject({})).format).toBeNull();
+		expect(resolveConfig(global, decodeProject({ clef: false })).clef).toBe(false);
+	});
+
+	it('decodes a snapshot written before `clef` existed with Clef on', () => {
+		const plain = JSON.parse(JSON.stringify(resolvedConfig)) as Record<string, unknown>;
+		delete plain['clef'];
+		expect(Schema.decodeUnknownSync(ResolvedConfig)(plain).clef).toBe(true);
 	});
 
 	it('decodes from its plain JSON unchanged, as the store reads a snapshot', () => {

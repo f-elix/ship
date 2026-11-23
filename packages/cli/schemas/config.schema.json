@@ -37,6 +37,16 @@
 					"minLength": 1,
 					"default": "sonnet"
 				},
+				"reviewTrivial": {
+					"type": "string",
+					"minLength": 1,
+					"default": "haiku"
+				},
+				"reviewRisky": {
+					"type": "string",
+					"minLength": 1,
+					"default": "opus"
+				},
 				"verify": {
 					"type": "string",
 					"minLength": 1,

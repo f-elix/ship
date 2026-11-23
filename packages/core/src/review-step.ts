@@ -8,15 +8,17 @@ import { Duration, Effect, Schema } from 'effect';
 import { agentContext } from './agent-context.ts';
 import { Checkpoint } from './checkpoint.ts';
 import { Conventions } from './conventions.ts';
-import { readCredentials, type Credentials } from './credentials.ts';
+import { withDefault } from './defaults.ts';
 import { Finding, VerifiedFinding } from './finding.ts';
 import { Git, type CommitRange } from './git.ts';
 import { ReviewerName } from './reviewer.ts';
 import {
 	ChangeIntent,
 	DEFAULT_REVIEW_CONCURRENCY,
+	modelForRisk,
 	reviewChanges,
 	Reviewers,
+	ReviewRisk,
 	type ReviewSubject
 } from './reviewers.ts';
 import { StepTimeout, type StepKit } from './run-step.ts';
@@ -54,23 +56,45 @@ export const ReviewStepInput = Schema.Struct({
 });
 export interface ReviewStepInput extends Schema.Schema.Type<typeof ReviewStepInput> {}
 
-/** The reviewed head and the reviewers routing picked, checkpointed as `route`. */
-const Routed = Schema.Struct({ toSha: GitSha, reviewers: Schema.Array(ReviewerName) });
+/**
+ * The reviewed head, the reviewers routing picked and the risk Clef rated the change,
+ * checkpointed as `route`.
+ */
+const Routed = Schema.Struct({
+	toSha: GitSha,
+	reviewers: Schema.Array(ReviewerName),
+	// A `route` checkpointed before Clef rated risk resumes without a rating.
+	risk: Schema.NullOr(ReviewRisk).pipe(withDefault(null))
+});
 interface Routed extends Schema.Schema.Type<typeof Routed> {}
 
-/** What reviewers and the verifier see of `range`, with the conventions that apply to it. */
+/**
+ * What reviewers and the verifier see of `range`, with the conventions that apply to it:
+ * those whose triggers match, and those Clef adds. The topics are checkpointed
+ * (`conventions`), so a resumed step does not ask Clef again.
+ */
 export const reviewSubject = Effect.fnUntraced(function* (
 	scope: StepScope,
 	intent: ChangeIntent,
 	range: CommitRange
 ) {
+	const conventions = yield* Conventions;
 	const changes = yield* reviewChanges(scope, range);
-	const conventions = yield* (yield* Conventions).scope({ repo: scope, changes });
+	const names = yield* (yield* Checkpoint).once(
+		'conventions',
+		Schema.Array(Schema.String),
+		conventions
+			.reviewScope({ scope, changes })
+			.pipe(Effect.map((picked) => picked.topics.map((topic) => topic.name)))
+	);
 	return {
 		diff: changes.diff,
 		commits: changes.commits,
 		intent,
-		conventions
+		conventions: {
+			dir: conventions.dir,
+			topics: conventions.topics.filter((topic) => names.includes(topic.name))
+		}
 	} satisfies ReviewSubject;
 });
 
@@ -81,27 +105,6 @@ const loadReviewers = Effect.fnUntraced(function* (scope: StepScope) {
 		projectDir: home.projectReviewers(scope.projectKey),
 		disable: scope.config.reviewers.disable
 	});
-});
-
-/**
- * The Clef input for routing: the saved Cloudflare credentials, or `null` when the project
- * turned Clef off, none are saved, or the file cannot be read, which logs a warning.
- */
-const clefRouting = Effect.fnUntraced(function* (scope: StepScope) {
-	if (!scope.config.reviewers.clef) return null;
-	const home = yield* ShipHome;
-	const credentials: Credentials = yield* readCredentials(home.home).pipe(
-		Effect.catchTag('CredentialsFileError', (error) =>
-			Effect.as(Effect.logWarning('Routing without Clef', error), {})
-		)
-	);
-	if (credentials.cloudflare === undefined) {
-		yield* Effect.logWarning(
-			'No Cloudflare credentials are saved (`ship auth cloudflare`); routing without Clef'
-		);
-		return null;
-	}
-	return { credentials: credentials.cloudflare };
 });
 
 /**
@@ -118,17 +121,7 @@ const route = (input: ReviewStepInput, kit: StepKit) =>
 		const toSha = yield* git.headSha(input);
 		const changes = yield* reviewChanges(input, { from: routedFromSha, to: toSha });
 		const loaded = yield* loadReviewers(input);
-		const routed = yield* reviewers.route({
-			reviewers: loaded,
-			changes,
-			clef: yield* clefRouting(input)
-		});
-		if (routed.clefError !== null) {
-			yield* Effect.logWarning(
-				'Routing with the deterministic triggers only',
-				routed.clefError
-			);
-		}
+		const routed = yield* reviewers.route({ scope: input, reviewers: loaded, changes });
 		const reasons = new Map(
 			routed.reviewers.map((picked) => [picked.reviewer.name, picked.reasons])
 		);
@@ -154,7 +147,7 @@ const route = (input: ReviewStepInput, kit: StepKit) =>
 			toSha,
 			reviewers: picked
 		});
-		return { toSha, reviewers: picked } satisfies Routed;
+		return { toSha, reviewers: picked, risk: routed.risk } satisfies Routed;
 	});
 
 /**
@@ -162,10 +155,11 @@ const route = (input: ReviewStepInput, kit: StepKit) =>
  * findings, also checking whether the fix resolved `followUp.previous`. Returns the
  * round with its verified findings.
  *
- * Routing, each reviewer's report and the verdicts are checkpointed (`route`,
- * `reviewer/<name>`, `verify`), so a resumed review re-runs only the reviewers that had
- * not finished. Reviewer calls and the verifier have their own timeouts, so the
- * step has none.
+ * Reviewers run on the model for the risk Clef rated the change (`modelForRisk`), unless
+ * their own frontmatter names one. Routing with its risk, each reviewer's report and the
+ * verdicts are checkpointed (`route`, `reviewer/<name>`, `verify`), so a resumed review
+ * re-runs only the reviewers that had not finished and asks Clef nothing again. Reviewer
+ * calls and the verifier have their own timeouts, so the step has none.
  */
 export const reviewStep = {
 	name: 'review',
@@ -195,7 +189,7 @@ export const reviewStep = {
 							.review({
 								...subject,
 								reviewers: [def],
-								model: input.config.models.review,
+								model: modelForRisk(input.config.models, routed.risk),
 								timeoutMs: input.config.timeouts.review,
 								context,
 								onReport: (report) =>
@@ -224,6 +218,7 @@ export const reviewStep = {
 				Effect.gen(function* () {
 					const result = yield* reviewers.verify({
 						...subject,
+						scope: input,
 						round: input.round,
 						findings: findings.flat(),
 						previous: input.followUp?.previous ?? [],

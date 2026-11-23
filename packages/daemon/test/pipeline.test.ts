@@ -176,7 +176,7 @@ const configWith = (project: Record<string, unknown> = {}) =>
 	Effect.map(
 		decodeProjectConfig({
 			checks: [{ name: 'test', run: 'pnpm test' }],
-			reviewers: { clef: false },
+			clef: false,
 			...project
 		}),
 		(projectConfig): ResolvedConfig =>
@@ -577,6 +577,32 @@ describe('pipeline', () => {
 					'escalate',
 					'escalated'
 				]);
+			})
+		)
+	);
+
+	it.effect('escalates as unrelated when checks Clef rates unrelated fail again', () =>
+		withHarness(() =>
+			Effect.gen(function* () {
+				const agent = yield* AgentFake;
+				const git = yield* GitFake;
+				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [0, 1, 1] }));
+				yield* (yield* ClefFake).answer('check.0', {
+					pick: 'unrelated',
+					probabilities: { change: 0.1, unrelated: 0.9 }
+				});
+				yield* agent.script({ step: 'implement' }, edits(git, 'feature.ts'));
+				yield* agent.script({ step: 'escalate' }, yield* opensPr(prText));
+				const state = yield* newRun({ clef: true });
+
+				const summary = yield* Effect.flatMap(startRun(state), (h) => h.await);
+
+				expect(summary).toMatchObject({
+					status: 'escalated',
+					escalationReason: 'checks-unrelated'
+				});
+				expect(summary.checks.map((pass) => pass.attempt)).toEqual([0, 0, 1]);
+				expect((yield* agent.calls).map((call) => call.step)).not.toContain('fixChecks');
 			})
 		)
 	);

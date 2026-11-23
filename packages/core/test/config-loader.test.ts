@@ -67,7 +67,8 @@ describe('ConfigLoader', () => {
 			expect(config.project).toEqual({
 				checks: [],
 				pr: { draft: true, squash: true },
-				reviewers: { clef: true, disable: [] }
+				reviewers: { disable: [] },
+				clef: true
 			});
 			expect(config.resolved.caps).toEqual({ checkFixAttempts: 3, reviewRounds: 4 });
 		}).pipe(Effect.scoped)

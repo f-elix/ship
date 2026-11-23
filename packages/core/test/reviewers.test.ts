@@ -9,9 +9,11 @@ import {
 	ChangeIntent,
 	ClefError,
 	FindingId,
+	modelForRisk,
 	reviewChanges,
 	Reviewers,
 	ReviewerTriggers,
+	ShipHome,
 	type Finding,
 	type ReviewDelta,
 	type ReviewerDef,
@@ -46,14 +48,20 @@ const briefsDir = Effect.gen(function* () {
 });
 
 const withReviewers = <A, E>(
-	f: (dir: string) => Effect.Effect<A, E, Reviewers | AgentFake | ClefFake>
+	f: (dir: string) => Effect.Effect<A, E, Reviewers | AgentFake | ClefFake | ShipHome>
 ) =>
 	Effect.gen(function* () {
 		const dir = yield* briefsDir;
 		return yield* f(dir).pipe(
 			Effect.provide(
 				Reviewers.layerWithBriefs(dir).pipe(
-					Layer.provideMerge(Layer.mergeAll(AgentFake.layer, ClefFake.layer)),
+					Layer.provideMerge(
+						Layer.mergeAll(
+							AgentFake.layer,
+							ClefFake.layer,
+							ShipHome.layer(`${dir}/home`)
+						)
+					),
 					Layer.provide(NodeServices.layer)
 				)
 			)
@@ -72,6 +80,7 @@ const def = (
 });
 
 const context = { cwd: '/repo', env: { PATH: '/bin' } };
+const scope = { config: { clef: true } };
 
 const subject: ReviewSubject = {
 	diff: 'diff --git a/src/a.ts b/src/a.ts\n+const a = 1;',
@@ -193,23 +202,22 @@ describe('Reviewers.route', () => {
 		def('design', {}),
 		def('security', { addedLines: ['token'] })
 	];
-	const clef = { credentials: { accountId: 'account', apiToken: 'token' } };
+	const names = (result: { reviewers: ReadonlyArray<{ reviewer: ReviewerDef }> }) =>
+		result.reviewers.map((routed) => routed.reviewer.name);
 
-	it.effect('routes deterministically without Clef', () =>
+	it.effect('routes deterministically, with no risk, when the project turned Clef off', () =>
 		withReviewers(() =>
 			Effect.gen(function* () {
-				yield* (yield* ClefFake).answer({ design: 1 });
+				const fake = yield* ClefFake;
+				yield* fake.answer('reviewer.design', { p: 1 });
 				const result = yield* (yield* Reviewers).route({
+					scope: { config: { clef: false } },
 					reviewers: all,
-					changes: sourceChange,
-					clef: null
+					changes: sourceChange
 				});
-				expect(result.reviewers.map((routed) => routed.reviewer.name)).toEqual([
-					'standards',
-					'tests'
-				]);
-				expect(result.clefError).toBeNull();
-				expect(yield* (yield* ClefFake).calls).toEqual([]);
+				expect(names(result)).toEqual(['standards', 'tests']);
+				expect(result.risk).toBeNull();
+				expect(yield* fake.asks).toEqual([]);
 			})
 		)
 	);
@@ -218,11 +226,12 @@ describe('Reviewers.route', () => {
 		withReviewers(() =>
 			Effect.gen(function* () {
 				const fake = yield* ClefFake;
-				yield* fake.answer({ design: 0.82, security: 0.2 });
+				yield* fake.answer('reviewer.design', { p: 0.82 });
+				yield* fake.answer('reviewer.security', { p: 0.2 });
 				const result = yield* (yield* Reviewers).route({
+					scope,
 					reviewers: all,
-					changes: sourceChange,
-					clef
+					changes: sourceChange
 				});
 				expect(
 					result.reviewers.map((routed) => [routed.reviewer.name, routed.reasons])
@@ -231,49 +240,103 @@ describe('Reviewers.route', () => {
 					['tests', ['kind source']],
 					['design', ['clef: p=0.82']]
 				]);
-				const [call] = yield* fake.calls;
-				expect(call?.candidates.map((reviewer) => reviewer.name)).toEqual([
-					'design',
-					'security'
+				const [ask] = yield* fake.asks;
+				expect(Object.keys(ask?.questions ?? {})).toEqual([
+					'reviewer.design',
+					'reviewer.security',
+					'risk'
 				]);
-				expect(call?.credentials).toEqual(clef.credentials);
-				expect(call?.changes.files).toEqual(sourceChange.files);
+				expect(ask?.questions['reviewer.design']?.instructions).toContain(
+					'"design" code reviewer covers: The design brief.'
+				);
+				expect(ask?.state).toContain('- modified src/a.ts');
+				expect(ask?.state).toContain(sourceChange.diff);
 			})
 		)
 	);
 
-	it.effect('keeps the deterministic picks when Clef fails', () =>
+	it.effect('adds a reviewer at the threshold and not below it', () =>
 		withReviewers(() =>
 			Effect.gen(function* () {
-				const failure = new ClefError({ status: 401, detail: 'Authentication error' });
-				yield* (yield* ClefFake).fail(failure);
+				const fake = yield* ClefFake;
+				yield* fake.answer('reviewer.design', { p: 0.5 });
+				yield* fake.answer('reviewer.security', { p: 0.49 });
 				const result = yield* (yield* Reviewers).route({
+					scope,
 					reviewers: all,
-					changes: sourceChange,
-					clef
+					changes: sourceChange
 				});
-				expect(result.reviewers.map((routed) => routed.reviewer.name)).toEqual([
-					'standards',
-					'tests'
-				]);
-				expect(result.clefError).toBe(failure);
+				expect(names(result)).toEqual(['standards', 'tests', 'design']);
 			})
 		)
 	);
 
-	it.effect('skips Clef when every reviewer is already picked', () =>
+	it.effect.each([
+		[0.49, 'trivial'],
+		[0.5, 'routine'],
+		[1.5, 'routine'],
+		[1.51, 'risky']
+	] as const)('rates a risk score of %d %s', ([score, risk]) =>
 		withReviewers(() =>
 			Effect.gen(function* () {
+				yield* (yield* ClefFake).answer('risk', { score });
 				const result = yield* (yield* Reviewers).route({
+					scope,
+					reviewers: all,
+					changes: sourceChange
+				});
+				expect(result.risk).toBe(risk);
+			})
+		)
+	);
+
+	it.effect('keeps the deterministic picks, with no risk, when Clef fails', () =>
+		withReviewers(() =>
+			Effect.gen(function* () {
+				const fake = yield* ClefFake;
+				yield* fake.answer('reviewer.design', { p: 1 });
+				yield* fake.fail(new ClefError({ status: 401, detail: 'Authentication error' }));
+				const result = yield* (yield* Reviewers).route({
+					scope,
+					reviewers: all,
+					changes: sourceChange
+				});
+				expect(names(result)).toEqual(['standards', 'tests']);
+				expect(result.risk).toBeNull();
+			})
+		)
+	);
+
+	it.effect('asks only the risk when every reviewer is already picked', () =>
+		withReviewers(() =>
+			Effect.gen(function* () {
+				const fake = yield* ClefFake;
+				const result = yield* (yield* Reviewers).route({
+					scope,
 					reviewers: [def('standards', { always: true })],
-					changes: sourceChange,
-					clef
+					changes: sourceChange
 				});
 				expect(result.reviewers).toHaveLength(1);
-				expect(yield* (yield* ClefFake).calls).toEqual([]);
+				expect(result.risk).toBe('routine');
+				expect((yield* fake.asks).map((ask) => Object.keys(ask.questions))).toEqual([
+					['risk']
+				]);
 			})
 		)
 	);
+});
+
+describe('modelForRisk', () => {
+	const models = { review: 'sonnet', reviewTrivial: 'haiku', reviewRisky: 'opus' };
+
+	it.each([
+		['trivial', 'haiku'],
+		['routine', 'sonnet'],
+		['risky', 'opus'],
+		[null, 'sonnet']
+	] as const)('reviews a %s change with %s', (risk, model) => {
+		expect(modelForRisk(models, risk)).toBe(model);
+	});
 });
 
 describe('Reviewers.review', () => {
@@ -459,6 +522,7 @@ describe('Reviewers.verify', () => {
 	});
 	const verifyInput = {
 		...subject,
+		scope,
 		round: 2,
 		knownTradeoffs: [],
 		model: 'opus',
@@ -470,6 +534,7 @@ describe('Reviewers.verify', () => {
 		withReviewers(() =>
 			Effect.gen(function* () {
 				const fake = yield* AgentFake;
+				yield* (yield* ClefFake).answer('finding.3', { p: 0.9 });
 				yield* fake.script(
 					{ step: 'verify' },
 					{
@@ -482,8 +547,7 @@ describe('Reviewers.verify', () => {
 									index: 3,
 									verdict: 'confirmed',
 									reason: 'Real.',
-									repeats: 'r1-1',
-									severity: 'nit'
+									repeats: 'r1-1'
 								},
 								{ index: 5, verdict: 'confirmed', reason: 'Real.', repeats: 'r9-9' }
 							],
@@ -569,41 +633,29 @@ describe('Reviewers.verify', () => {
 		)
 	);
 
-	it.effect('only lowers a must-fix to a nit, after merging duplicates of the same kind', () =>
+	it.effect('lowers a must-fix Clef rates a taste remark, after merging duplicates', () =>
 		withReviewers(() =>
 			Effect.gen(function* () {
+				const clef = yield* ClefFake;
+				// 2 and 4 are rated taste, but 2 merges into a must-fix 1 that is not.
+				for (const index of [2, 3, 4, 7]) {
+					yield* clef.answer(`finding.${index}`, { p: 0.7 });
+				}
+				yield* clef.answer('finding.6', { p: 0.69 });
 				yield* (yield* AgentFake).script(
 					{ step: 'verify' },
 					{
 						output: {
 							verdicts: [
-								{
-									index: 0,
-									verdict: 'confirmed',
-									reason: 'Real.',
-									severity: 'must-fix'
-								},
+								{ index: 0, verdict: 'confirmed', reason: 'Real.' },
 								{ index: 1, verdict: 'confirmed', reason: 'Real.' },
 								{ index: 2, verdict: 'duplicate', duplicateOf: 1, reason: 'Same.' },
-								{
-									index: 3,
-									verdict: 'confirmed',
-									reason: 'Real.',
-									severity: 'nit'
-								},
+								{ index: 3, verdict: 'confirmed', reason: 'Real.' },
 								{ index: 4, verdict: 'duplicate', duplicateOf: 3, reason: 'Same.' },
-								{
-									index: 5,
-									verdict: 'confirmed',
-									reason: 'Real.',
-									severity: 'nit'
-								},
-								{
-									index: 6,
-									verdict: 'confirmed',
-									reason: 'Real.',
-									severity: 'tradeoff'
-								}
+								{ index: 5, verdict: 'confirmed', reason: 'Real.' },
+								{ index: 6, verdict: 'confirmed', reason: 'Real.' },
+								{ index: 7, verdict: 'confirmed', reason: 'Real.' },
+								{ index: 8, verdict: 'duplicate', duplicateOf: 7, reason: 'Same.' }
 							],
 							previous: []
 						}
@@ -612,24 +664,71 @@ describe('Reviewers.verify', () => {
 				const result = yield* (yield* Reviewers).verify({
 					...verifyInput,
 					findings: [
-						found('design', 'Not raised.', 'tradeoff'),
-						found('comments', 'Merged up.', 'nit'),
-						found('security', 'Merged up, again.', 'must-fix'),
+						found('design', 'A tradeoff.', 'tradeoff'),
+						found('security', 'Kept.', 'must-fix'),
+						found('standards', 'Kept, again.', 'must-fix'),
 						found('standards', 'Lowered.', 'must-fix'),
 						found('security', 'Lowered, again.', 'must-fix'),
-						found('data', 'Not lowered.', 'tradeoff'),
-						found('tests', 'Not moved.', 'must-fix')
+						found('comments', 'A nit.', 'nit'),
+						found('tests', 'Below the threshold.', 'must-fix'),
+						found('comments', 'Lowered with a nit.', 'must-fix'),
+						found('docs', 'Its nit.', 'nit')
 					],
 					previous: []
 				});
 				expect(result.verified.map((f) => [f.claim, f.severity, f.alsoReportedBy])).toEqual(
 					[
-						['Not raised.', 'tradeoff', []],
-						['Merged up.', 'must-fix', ['security']],
+						['A tradeoff.', 'tradeoff', []],
+						['Kept.', 'must-fix', ['standards']],
 						['Lowered.', 'nit', ['security']],
-						['Not lowered.', 'tradeoff', []],
-						['Not moved.', 'must-fix', []]
+						['A nit.', 'nit', []],
+						['Below the threshold.', 'must-fix', []],
+						['Lowered with a nit.', 'nit', ['docs']]
 					]
+				);
+				// Only must-fix findings are asked about, never a tradeoff or a nit.
+				const [ask] = yield* clef.asks;
+				expect(Object.keys(ask?.questions ?? {})).toEqual([
+					'finding.1',
+					'finding.2',
+					'finding.3',
+					'finding.4',
+					'finding.6',
+					'finding.7'
+				]);
+				expect(ask?.state).toContain('Finding 3:\nLocation: src/a.ts:3\nClaim: Lowered.');
+			})
+		)
+	);
+
+	it.effect('merges duplicates up to the most severe kind and lowers nothing without Clef', () =>
+		withReviewers(() =>
+			Effect.gen(function* () {
+				const clef = yield* ClefFake;
+				yield* clef.answer('finding.1', { p: 1 });
+				yield* clef.fail(new ClefError({ status: null, detail: 'no answer' }));
+				yield* (yield* AgentFake).script(
+					{ step: 'verify' },
+					{
+						output: {
+							verdicts: [
+								{ index: 0, verdict: 'confirmed', reason: 'Real.' },
+								{ index: 1, verdict: 'duplicate', duplicateOf: 0, reason: 'Same.' }
+							],
+							previous: []
+						}
+					}
+				);
+				const result = yield* (yield* Reviewers).verify({
+					...verifyInput,
+					findings: [
+						found('comments', 'Merged up.', 'nit'),
+						found('security', 'Merged up, again.', 'must-fix')
+					],
+					previous: []
+				});
+				expect(result.verified.map((f) => [f.claim, f.severity, f.alsoReportedBy])).toEqual(
+					[['Merged up.', 'must-fix', ['security']]]
 				);
 			})
 		)

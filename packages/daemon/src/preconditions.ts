@@ -359,18 +359,20 @@ export const pushTarget = (pr: PrDetails): PushTarget | null => {
 
 /**
  * Checks that `ship fix` can work through `request.source` in the caller's checkout, and
- * loads its findings: the source exists and names a PR of the repository `origin` points
- * at, the project config is valid (the run needs it for its checks), the checkout is clean
- * with `HEAD` at the PR's head, the PR's branch can be pushed to unless `local`, and there
- * is at least one must-fix finding or nit.
+ * loads its findings: the project config is valid, the source exists and names a PR of the
+ * repository `origin` points at, the checkout is clean with `HEAD` at the PR's head, the
+ * PR's branch can be pushed to unless `local`, and there is at least one must-fix finding
+ * or nit. The run needs the project config for its checks, and loading the findings needs
+ * its Clef flag.
  *
  * Git failures past the first check are defects.
  */
 export const checkFixPreconditions = Effect.fn('checkFixPreconditions')(
 	function* (request: FindingsRequest) {
 		const repo = { cwd: request.cwd, env: request.env };
-		const { projectKey, pr, loaded } = yield* loadSource('fix', repo, request.source);
+		const projectKey = yield* originKey(repo);
 		const config = yield* loadProjectConfig(projectKey);
+		const { pr, loaded } = yield* loadSource('fix', repo, request.source, projectKey, config);
 		yield* requireCheckedOut(repo, pr);
 		const push = request.local ? null : pushTarget(pr);
 		if (!request.local && push === null) {
@@ -405,8 +407,15 @@ export const checkFixPreconditions = Effect.fn('checkFixPreconditions')(
 export const checkRecheckPreconditions = Effect.fn('checkRecheckPreconditions')(
 	function* (request: FindingsRequest) {
 		const repo = { cwd: request.cwd, env: request.env };
-		const { projectKey, pr, loaded } = yield* loadSource('recheck', repo, request.source);
+		const projectKey = yield* originKey(repo);
 		const config = yield* loadConfigOrDefaults(projectKey);
+		const { pr, loaded } = yield* loadSource(
+			'recheck',
+			repo,
+			request.source,
+			projectKey,
+			config
+		);
 		yield* requireCheckedOut(repo, pr);
 		yield* requireFindings('recheck', pr, loaded);
 		const baseSha = yield* prMergeBase(repo, pr);
@@ -427,14 +436,18 @@ const targetPr = (pr: PrDetails): TargetPr => ({
 	headSha: pr.headSha
 });
 
-/** Loads `source` and checks that its PR belongs to the repository `origin` points at. */
+/**
+ * Loads `source`, with Clef rating its unlabelled threads unless `config` turned it off,
+ * and checks that its PR belongs to `projectKey`, the repository `origin` points at.
+ */
 const loadSource = Effect.fnUntraced(function* (
 	command: 'fix' | 'recheck',
 	repo: Repo,
-	source: FindingsSource
+	source: FindingsSource,
+	projectKey: ProjectKey,
+	config: ResolvedConfig
 ) {
-	const projectKey = yield* originKey(repo);
-	const { pr, loaded } = yield* loadFindings(repo, source).pipe(
+	const { pr, loaded } = yield* loadFindings(repo, source, { config }).pipe(
 		Effect.catchTags({
 			ReviewNotFound: (error) =>
 				Effect.fail(
@@ -464,7 +477,7 @@ const loadSource = Effect.fnUntraced(function* (
 		})
 	);
 	yield* requireOriginPr(command, pr, projectKey);
-	return { projectKey, pr, loaded };
+	return { pr, loaded };
 });
 
 /** Fails when the source has no must-fix finding or nit to work through. */

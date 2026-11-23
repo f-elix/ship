@@ -11,7 +11,7 @@
  */
 import { createEffectEventStreamLogic, createEffectLogic, setupEffect } from '@xstate/effect';
 import { Effect, Schema } from 'effect';
-import { baselineStep, ChecksOutput, checksStep } from './check-steps.ts';
+import { baselineStep, checksFailedText, ChecksOutput, checksStep } from './check-steps.ts';
 import { withCheckpointScope } from './checkpoint.ts';
 import { baselineFailures, failingChecks } from './checks.ts';
 import { implementStep, planName } from './implementer.ts';
@@ -86,13 +86,16 @@ const afterBaseline = (context: PrimitiveRunState, output: ChecksOutput): Primit
 	context: { ...context, checks: [...context.checks, ...output.passes] }
 });
 
-/** Failing checks at the cap fail the run, with the work left uncommitted. */
+/**
+ * Failing checks at the cap, or failing again on a re-run after Clef rated them unrelated
+ * to the change, fail the run, with the work left uncommitted.
+ */
 const afterChecks = (context: PrimitiveRunState, output: ChecksOutput): PrimitiveNext => {
 	const next = { ...context, checks: [...context.checks, ...output.passes] };
 	if (output.passed) return { target: 'done', context: next };
 	const last = output.passes.at(-1);
 	const failing = last === undefined ? [] : failingChecks(last, baselineFailures(next.checks));
-	return fail(next, `Checks still fail after the check fixes: ${failing.join(', ')}`);
+	return fail(next, checksFailedText(output, failing));
 };
 
 /**

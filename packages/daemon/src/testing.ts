@@ -127,7 +127,8 @@ export const fixture = Effect.gen(function* () {
 		{ locks: { cpu: 2 } },
 		{
 			checks: [{ name: 'caller-env', run: 'test "$SHIP_CALLER" = yes' }],
-			reviewers: { disable: otherReviewers, clef: false }
+			reviewers: { disable: otherReviewers },
+			clef: false
 		}
 	);
 

@@ -91,7 +91,7 @@ const withHarness = <A, E>(body: Effect.Effect<A, E, Harness | Scope.Scope>) =>
 const config = Effect.map(
 	decodeProjectConfig({
 		checks: [{ name: 'test', run: 'pnpm test' }],
-		reviewers: { clef: false }
+		clef: false
 	}),
 	(project) =>
 		resolveConfig(Schema.decodeUnknownSync(GlobalConfig, configParseOptions)({}), project)

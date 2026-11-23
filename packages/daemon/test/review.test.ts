@@ -114,9 +114,7 @@ const withHarness = <A, E>(
 const newReview = (post: boolean) =>
 	Effect.gen(function* () {
 		const store = yield* RunStore;
-		const projectConfig = yield* decodeProjectConfig({ reviewers: { clef: false } }).pipe(
-			Effect.orDie
-		);
+		const projectConfig = yield* decodeProjectConfig({ clef: false }).pipe(Effect.orDie);
 		const info = yield* store.createReview({
 			projectKey,
 			repoDir: '/repo',

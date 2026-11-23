@@ -1,7 +1,13 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect } from 'effect';
-import { baselineStep, checksStep, type ChecksInput } from '../src/index.ts';
-import { AgentFake, ChecksFake, exitCodesByCheck, GitFake } from '../src/testing.ts';
+import { Effect, Schema } from 'effect';
+import {
+	baselineStep,
+	ChecksOutput,
+	checksStep,
+	ClefError,
+	type ChecksInput
+} from '../src/index.ts';
+import { AgentFake, ChecksFake, ClefFake, exitCodesByCheck, GitFake } from '../src/testing.ts';
 import { resolvedConfig } from './fixtures.ts';
 import { CheckpointValues, recordingKit, scopeWith, withSteps } from './step-harness.ts';
 
@@ -167,4 +173,169 @@ describe('checksStep', () => {
 			dirty
 		)
 	);
+
+	/** Clef rates the failure of the `index`th failing check unrelated with probability `p`. */
+	const unrelated = (index: number, p: number) =>
+		Effect.gen(function* () {
+			yield* (yield* ClefFake).answer(`check.${index}`, {
+				pick: p >= 0.5 ? 'unrelated' : 'change',
+				probabilities: { change: 1 - p, unrelated: p }
+			});
+		});
+
+	const changed = { ...dirty, diff: '+const a = 1;' };
+
+	it.effect('re-runs with no fix when Clef rates every failure unrelated, then commits', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1, 0] }));
+				yield* unrelated(0, 0.7);
+				const recorded = yield* recordingKit;
+
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
+
+				expect(output).toMatchObject({ passed: true, unrelated: false });
+				expect(output.passes.map((pass) => pass.attempt)).toEqual([0, 1]);
+				expect(yield* (yield* AgentFake).calls).toEqual([]);
+				const { commits } = yield* (yield* GitFake).state;
+				expect(commits.map((commit) => commit.message)).toEqual(['Add a']);
+				const [ask] = yield* (yield* ClefFake).asks;
+				expect(Object.keys(ask?.questions ?? {})).toEqual(['check.0']);
+				expect(ask?.state).toContain(
+					'Check 0: test\nCommand: vitest run\nExit code: 1\nOutput (tail):\ntest failed'
+				);
+				expect(ask?.state).toContain('- added src/a.ts');
+				expect(ask?.state).toContain('+const a = 1;');
+			}),
+			changed
+		)
+	);
+
+	it.effect('ends unrelated, without a fix, when the re-run fails too', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1, 1, 0] }));
+				yield* unrelated(0, 0.9);
+				const recorded = yield* recordingKit;
+
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
+
+				expect(output).toMatchObject({ passed: false, unrelated: true });
+				expect(output.passes).toHaveLength(2);
+				expect(yield* (yield* AgentFake).calls).toEqual([]);
+				expect((yield* (yield* GitFake).state).commits).toEqual([]);
+			}),
+			changed
+		)
+	);
+
+	it.effect('fixes as before unless Clef rates every failure unrelated', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* (yield* ChecksFake).respond(
+					yield* exitCodesByCheck({ lint: [1, 0], test: [1, 0] })
+				);
+				yield* unrelated(0, 0.9);
+				yield* unrelated(1, 0.69);
+				const agent = yield* AgentFake;
+				yield* agent.script({ step: 'fixChecks' }, { costUsd: 0.2 });
+				const recorded = yield* recordingKit;
+
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
+
+				expect(output).toMatchObject({ passed: true, unrelated: false });
+				expect(output.passes.map((pass) => pass.attempt)).toEqual([0, 1]);
+				expect(yield* agent.calls).toHaveLength(1);
+			}),
+			changed
+		)
+	);
+
+	it.effect('fixes as before without a Clef answer', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1, 0] }));
+				yield* unrelated(0, 1);
+				yield* (yield* ClefFake).fail(new ClefError({ status: null, detail: 'no answer' }));
+				const agent = yield* AgentFake;
+				yield* agent.script({ step: 'fixChecks' }, { costUsd: 0.2 });
+				const recorded = yield* recordingKit;
+
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
+
+				expect(output.passed).toBe(true);
+				expect(yield* agent.calls).toHaveLength(1);
+			}),
+			changed
+		)
+	);
+
+	it.effect('fixes as before, without asking Clef, when the change cannot be read', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1, 0] }));
+				yield* (yield* GitFake).fail('diff', 'fatal: bad object');
+				const agent = yield* AgentFake;
+				yield* agent.script({ step: 'fixChecks' }, { costUsd: 0.2 });
+				const recorded = yield* recordingKit;
+
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
+
+				expect(output).toMatchObject({ passed: true, unrelated: false });
+				expect(yield* agent.calls).toHaveLength(1);
+				expect(yield* (yield* ClefFake).asks).toEqual([]);
+				expect((yield* CheckpointValues).get('cause/0')).toBe(false);
+			}),
+			changed
+		)
+	);
+
+	it.effect('asks Clef nothing when no fix is allowed', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* (yield* ChecksFake).respond(yield* exitCodesByCheck({ test: [1] }));
+				const recorded = yield* recordingKit;
+
+				const output = yield* checksStep.run(checksInput(0), recorded.kit);
+
+				expect(output).toMatchObject({ passed: false, unrelated: false });
+				expect(yield* (yield* ClefFake).asks).toEqual([]);
+			}),
+			changed
+		)
+	);
+
+	it.effect("keeps Clef's checkpointed rating on resume", () =>
+		withSteps(
+			Effect.gen(function* () {
+				const values = yield* CheckpointValues;
+				values.set('pass/0', {
+					baseline: false,
+					round: 0,
+					attempt: 0,
+					results: [{ name: 'test', exitCode: 1, durationMs: 5, outputTail: 'failed' }]
+				});
+				values.set('cause/0', true);
+				const recorded = yield* recordingKit;
+
+				const output = yield* checksStep.run(checksInput(), recorded.kit);
+
+				expect(output.passed).toBe(true);
+				expect(output.passes.map((pass) => pass.attempt)).toEqual([0, 1]);
+				expect(yield* (yield* AgentFake).calls).toEqual([]);
+				expect(yield* (yield* ClefFake).asks).toEqual([]);
+			}),
+			changed
+		)
+	);
+});
+
+describe('ChecksOutput', () => {
+	it('decodes an output stored before Clef rated failures as not unrelated', () => {
+		expect(Schema.decodeUnknownSync(ChecksOutput)({ passes: [], passed: false })).toEqual({
+			passes: [],
+			passed: false,
+			unrelated: false
+		});
+	});
 });

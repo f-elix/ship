@@ -1,4 +1,4 @@
-import { Context, Effect, FileSystem, Layer, Result, Schema, Struct } from 'effect';
+import { Context, Effect, FileSystem, Layer, Schema, Struct } from 'effect';
 import { fileURLToPath } from 'node:url';
 import {
 	Agent,
@@ -8,7 +8,14 @@ import {
 	type AgentError,
 	type TranscriptTarget
 } from './agent.ts';
-import { Clef, type ClefError, type CloudflareCredentials } from './clef.ts';
+import {
+	changeState,
+	Clef,
+	type ClefScope,
+	type NoulQuestion,
+	type ScoreQuestion
+} from './clef.ts';
+import type { Models } from './config.ts';
 import { REPO_RULES_WIN, reviewerConventionFiles, type ConventionScope } from './conventions.ts';
 import {
 	Finding,
@@ -22,6 +29,7 @@ import { planDirs, truncateDiff } from './prompt.ts';
 import { parseReviewerMarkdown, ReviewerFileError } from './reviewer-markdown.ts';
 import type { ReviewerDef } from './reviewer.ts';
 import { routeDeterministic, type ReviewChanges, type RoutedReviewer } from './router.ts';
+import type { ShipHome } from './ship-paths.ts';
 import { NonNegativeInt, type Env } from './values.ts';
 
 // --- Built-in briefs ---
@@ -79,28 +87,48 @@ export interface ReviewDelta extends ReviewChanges {
 	readonly commits: ReadonlyArray<Commit>;
 }
 
+/**
+ * How risky Clef rates a change, which picks the reviewers' model: `trivial` the cheap
+ * `reviewTrivial`, `routine` the configured `review`, `risky` the strong `reviewRisky`.
+ */
+export const ReviewRisk = Schema.Literals(['trivial', 'routine', 'risky']);
+export type ReviewRisk = typeof ReviewRisk.Type;
+
+/**
+ * The model reviewers run on for a change rated `risk`; `null`, no rating, is the configured
+ * `review` model. A reviewer's own `model` still wins.
+ */
+export const modelForRisk = (
+	models: Pick<Models, 'review' | 'reviewTrivial' | 'reviewRisky'>,
+	risk: ReviewRisk | null
+): string => {
+	switch (risk) {
+		case 'trivial':
+			return models.reviewTrivial;
+		case 'risky':
+			return models.reviewRisky;
+		case 'routine':
+		case null:
+			return models.review;
+	}
+};
+
 export interface RouteInput {
+	/** Whether the project asks Clef. */
+	readonly scope: ClefScope;
 	readonly reviewers: ReadonlyArray<ReviewerDef>;
 	/**
 	 * What routing looks at. Round 1: `base..HEAD`. Later rounds: `lastReviewedSha..HEAD`,
 	 * the fix commits, so only reviewers the fix touched are routed again.
 	 */
 	readonly changes: ReviewDelta;
-	/**
-	 * Clef, when the project's `reviewers.clef` is on and Cloudflare credentials are saved;
-	 * `null` routes with the deterministic triggers only.
-	 */
-	readonly clef: null | { readonly credentials: CloudflareCredentials };
 }
 
 export interface RouteResult {
 	/** Deterministic picks first, then Clef's additions. */
 	readonly reviewers: ReadonlyArray<RoutedReviewer>;
-	/**
-	 * Why Clef failed, if it did. Routing then keeps the deterministic picks: Clef may
-	 * only add reviewers, so its failure must not block the review.
-	 */
-	readonly clefError: ClefError | null;
+	/** How risky Clef rates `changes`; `null` when Clef gave no answer. */
+	readonly risk: ReviewRisk | null;
 }
 
 export interface ReviewInput extends ReviewSubject {
@@ -127,6 +155,8 @@ export interface ReviewerReport {
 }
 
 export interface VerifyInput extends ReviewSubject {
+	/** Whether the project asks Clef, which lowers taste-only must-fix findings to nits. */
+	readonly scope: ClefScope;
 	readonly round: number;
 	/** Every finding reported this round. */
 	readonly findings: ReadonlyArray<Finding>;
@@ -178,9 +208,10 @@ export interface ReviewersShape {
 	) => Effect.Effect<ReadonlyArray<ReviewerDef>, ReviewerFileError>;
 	/**
 	 * Picks the reviewers for `changes`: every one whose triggers match, then the ones Clef
-	 * adds. Clef never removes a deterministic pick.
+	 * adds, and asks Clef how risky the change is, in the same call. Clef never removes a
+	 * deterministic pick; without its answer, routing keeps the deterministic picks only.
 	 */
-	readonly route: (input: RouteInput) => Effect.Effect<RouteResult>;
+	readonly route: (input: RouteInput) => Effect.Effect<RouteResult, never, ShipHome>;
 	/**
 	 * Runs the reviewers in parallel, read-only. Each sees only the subject and its own
 	 * brief, never another reviewer's output. Fails when any reviewer fails.
@@ -191,11 +222,12 @@ export interface ReviewersShape {
 	/**
 	 * One agent pass over the round's findings: dedupes, checks each against the code,
 	 * drops disproved ones, matches the rest to earlier rounds, and checks whether the
-	 * previous findings are fixed.
+	 * previous findings are fixed. Meanwhile Clef rates each must-fix finding of the round,
+	 * and a kept must-fix it rates only a formatter, linter or taste remark becomes a nit.
 	 */
 	readonly verify: (
 		input: VerifyInput
-	) => Effect.Effect<VerifyResult, AgentError | ReviewerFileError>;
+	) => Effect.Effect<VerifyResult, AgentError | ReviewerFileError, ShipHome>;
 }
 
 export const DEFAULT_REVIEW_CONCURRENCY = 4;
@@ -241,9 +273,7 @@ export const VerifierOutput = Schema.Struct({
 			/** For `duplicate`: the index of the finding it repeats. */
 			duplicateOf: Schema.optionalKey(NonNegativeInt),
 			/** For `confirmed`: the id of the previous finding or known tradeoff it is the same problem as. */
-			repeats: Schema.optionalKey(Schema.String),
-			/** For `confirmed`: `nit` for a must-fix that is only a formatter, linter or taste remark. */
-			severity: Schema.optionalKey(Severity)
+			repeats: Schema.optionalKey(Schema.String)
 		})
 	),
 	previous: Schema.Array(
@@ -398,7 +428,7 @@ export const verifierPrompt = (
 		'',
 		'## Output',
 		'',
-		'Give one verdict per finding, by index: `confirmed`, `disproved` or `duplicate` (with `duplicateOf`, the index of the finding it repeats), and a reason. Mark a duplicate only between findings of the same kind: a tradeoff with a tradeoff, or a must-fix or nit with a must-fix or nit. For a confirmed finding that is the same problem as a previous finding, or the same tradeoff as a known one, set `repeats` to that id. Set `severity` to `nit` only to lower a must-fix that is a formatter, linter or taste remark; never move a finding into or out of `tradeoff`. A kept finding takes the highest severity among the duplicates merged into it; its `severity` lowers that merged result. Then give each previous finding, by id, a status, `fixed` or `unfixed`, with evidence.'
+		'Give one verdict per finding, by index: `confirmed`, `disproved` or `duplicate` (with `duplicateOf`, the index of the finding it repeats), and a reason. Mark a duplicate only between findings of the same kind: a tradeoff with a tradeoff, or a must-fix or nit with a must-fix or nit. For a confirmed finding that is the same problem as a previous finding, or the same tradeoff as a known one, set `repeats` to that id. Then give each previous finding, by id, a status, `fixed` or `unfixed`, with evidence.'
 	].join('\n');
 
 /**
@@ -431,9 +461,11 @@ type Verdict = VerifierOutput['verdicts'][number];
 /**
  * Builds the round's verified findings from the verifier's verdicts. Ship assigns ids
  * (`r<round>-<n>`) and merges duplicates into the finding they repeat, which takes the
- * highest severity among them. The verifier may lower a must-fix to a nit and nothing
- * else: any other `severity` is ignored, so a finding never moves into or out of
- * `tradeoff`.
+ * highest severity among them. `lowered` holds the indexes of the must-fix findings Clef
+ * rated only a formatter, linter or taste remark: a kept must-fix becomes a nit when every
+ * must-fix merged into it is among them, so one real defect among the duplicates keeps it a
+ * must-fix. Nothing else changes a severity, so a finding never moves into or out of
+ * `tradeoff` and is never raised.
  *
  * A finding with no verdict is kept, as is a duplicate of a finding that was not kept or
  * of another kind (a tradeoff and a must-fix or nit): a finding is dropped only when the
@@ -443,7 +475,8 @@ type Verdict = VerifierOutput['verdicts'][number];
  */
 export const assembleVerified = (
 	input: Pick<VerifyInput, 'round' | 'findings' | 'previous' | 'knownTradeoffs'>,
-	output: VerifierOutput
+	output: VerifierOutput,
+	lowered: ReadonlySet<number>
 ): Effect.Effect<Omit<VerifyResult, 'cost'>, AgentOutputMismatch> =>
 	Effect.gen(function* () {
 		const verdicts = new Map<number, Verdict>();
@@ -502,8 +535,9 @@ export const assembleVerified = (
 			return ids.has(verdict.repeats) ? FindingId.make(verdict.repeats) : undefined;
 		};
 
-		const kept = new Map<number, { finding: Finding; repeats?: FindingId; lowered: boolean }>();
-		const merged = new Map<number, Array<Finding>>();
+		const kept = new Map<number, { finding: Finding; repeats?: FindingId }>();
+		/** The indexes of the findings merged into each kept one. */
+		const merged = new Map<number, Array<number>>();
 		const disproved: Array<DisprovedFinding> = [];
 		input.findings.forEach((finding, index) => {
 			const verdict = verdicts.get(index);
@@ -514,16 +548,12 @@ export const assembleVerified = (
 			if (verdict?.verdict === 'duplicate') {
 				const target = mergeTarget(index);
 				if (target !== null) {
-					merged.set(target, [...(merged.get(target) ?? []), finding]);
+					merged.set(target, [...(merged.get(target) ?? []), index]);
 					return;
 				}
 			}
 			const repeats = repeatsOf(finding, verdict);
-			kept.set(index, {
-				finding,
-				...(repeats === undefined ? {} : { repeats }),
-				lowered: verdict?.severity === 'nit'
-			});
+			kept.set(index, { finding, ...(repeats === undefined ? {} : { repeats }) });
 		});
 
 		let counter = 0;
@@ -535,12 +565,16 @@ export const assembleVerified = (
 		for (const [index, entry] of kept) {
 			// Already listed for the PR under the known tradeoff's id.
 			if (entry.finding.severity === 'tradeoff' && entry.repeats !== undefined) continue;
-			const duplicates = merged.get(index) ?? [];
+			const group = [index, ...(merged.get(index) ?? [])];
+			const duplicates = group.slice(1).flatMap((other) => input.findings[other] ?? []);
 			const reported = duplicates.reduce(
 				(severity, duplicate) => mostSevere(severity, duplicate.severity),
 				entry.finding.severity
 			);
-			const severity = entry.lowered && reported === 'must-fix' ? 'nit' : reported;
+			const tasteOnly = group
+				.filter((member) => input.findings[member]?.severity === 'must-fix')
+				.every((member) => lowered.has(member));
+			const severity = reported === 'must-fix' && tasteOnly ? 'nit' : reported;
 			verified.push({
 				...entry.finding,
 				severity,
@@ -583,6 +617,77 @@ export const assembleVerified = (
 
 /** The evidence of a previous finding the verifier gave no status. */
 const NO_STATUS = 'The verifier gave no status for this finding, so it counts as unfixed.';
+
+// --- Clef questions ---
+
+/** Clef adds a reviewer at this probability or above. */
+export const ROUTE_THRESHOLD = 0.5;
+/**
+ * Clef lowers a must-fix to a nit at this probability or above: higher than routing's,
+ * since a wrong lowering hides a defect.
+ */
+export const LOWER_THRESHOLD = 0.7;
+/** A risk score below this is `trivial`, above {@link RISKY_SCORE} `risky`. */
+export const TRIVIAL_SCORE = 0.5;
+export const RISKY_SCORE = 1.5;
+/** How much of a reviewer's brief stands in for a missing `description`. */
+const MAX_BRIEF_SUMMARY_CHARS = 300;
+
+/** The brief's first paragraph that is not a heading, on one line and cut to a summary. */
+const firstParagraph = (brief: string): string => {
+	const paragraph = brief.split(/\n\s*\n/u).find((part) => !part.trim().startsWith('#')) ?? '';
+	const text = paragraph.replace(/\s+/gu, ' ').trim();
+	return text.length > MAX_BRIEF_SUMMARY_CHARS
+		? `${text.slice(0, MAX_BRIEF_SUMMARY_CHARS)}…`
+		: text;
+};
+
+const reviewerQuestion = (reviewer: ReviewerDef): NoulQuestion => ({
+	type: 'noul',
+	instructions: `Does this code change clearly touch what the "${reviewer.name}" code reviewer covers: ${reviewer.description ?? firstParagraph(reviewer.brief)}`
+});
+
+/** The levels of the risk score, lowest first, in {@link ReviewRisk} order. */
+const RISK_QUESTION: ScoreQuestion = {
+	type: 'score',
+	instructions:
+		'How risky is this code change to review: how likely is a defect that a quick review would miss?',
+	criteria: [
+		'trivial: documentation, comments, formatting, renames or configuration values, with no change to behaviour',
+		'routine: an ordinary change to behaviour, contained to a few modules',
+		'risky: security, data integrity, concurrency, error handling across modules, public interfaces, migrations, or many modules at once'
+	]
+};
+
+const riskOf = (score: number): ReviewRisk =>
+	score < TRIVIAL_SCORE ? 'trivial' : score > RISKY_SCORE ? 'risky' : 'routine';
+
+/**
+ * Routing's questions: one per reviewer the triggers did not pick, and the change's risk.
+ * A type alias, not an interface, so that it fits `ClefQuestions`' index signature.
+ */
+type RouteQuestions = {
+	readonly [id: `reviewer.${string}`]: NoulQuestion;
+	readonly risk: ScoreQuestion;
+};
+
+/** The must-fix findings of a round as Clef's `state`, numbered by their index. */
+const findingsState = (findings: ReadonlyArray<readonly [number, Finding]>): string =>
+	findings
+		.map(([index, finding]) =>
+			[
+				`Finding ${index}:`,
+				`Location: ${finding.file}${finding.line === undefined ? '' : `:${finding.line}`}`,
+				`Claim: ${finding.claim}`,
+				`Evidence: ${finding.evidence}`
+			].join('\n')
+		)
+		.join('\n\n');
+
+const tasteQuestion = (index: number): NoulQuestion => ({
+	type: 'noul',
+	instructions: `Is finding ${index} only a formatter, linter or taste remark that points at no defect in behaviour?`
+});
 
 // --- Implementation ---
 
@@ -633,33 +738,64 @@ const make = (briefsDir: string) =>
 			const deterministic = routeDeterministic(input.reviewers, input.changes);
 			const picked = new Set(deterministic.map((routed) => routed.reviewer.name));
 			const candidates = input.reviewers.filter((reviewer) => !picked.has(reviewer.name));
-			if (input.clef === null || candidates.length === 0) {
-				return { reviewers: deterministic, clefError: null } satisfies RouteResult;
-			}
-			const outcome = yield* clef
-				.pick({
-					candidates,
-					changes: input.changes,
-					credentials: input.clef.credentials
-				})
-				.pipe(Effect.result);
-			if (Result.isFailure(outcome)) {
-				return {
-					reviewers: deterministic,
-					clefError: outcome.failure
-				} satisfies RouteResult;
-			}
-			const added = outcome.success.flatMap((pick): ReadonlyArray<RoutedReviewer> => {
-				const reviewer = candidates.find((candidate) => candidate.name === pick.name);
-				return reviewer === undefined
-					? []
-					: [{ reviewer, reasons: [`clef: p=${pick.probability.toFixed(2)}`] }];
+			const questions: RouteQuestions = {
+				...Object.fromEntries(
+					candidates.map((reviewer) => [
+						`reviewer.${reviewer.name}`,
+						reviewerQuestion(reviewer)
+					])
+				),
+				risk: RISK_QUESTION
+			};
+			const answers = yield* clef.ask(input.scope, {
+				decision: 'Routing',
+				state: changeState(input.changes.files, input.changes.diff),
+				questions
 			});
-			return {
-				reviewers: [...deterministic, ...added],
-				clefError: null
-			} satisfies RouteResult;
+			if (answers === null) {
+				return { reviewers: deterministic, risk: null } satisfies RouteResult;
+			}
+			const added = candidates.flatMap((reviewer): ReadonlyArray<RoutedReviewer> => {
+				const p = answers[`reviewer.${reviewer.name}`]?.p ?? 0;
+				return p >= ROUTE_THRESHOLD
+					? [{ reviewer, reasons: [`clef: p=${p.toFixed(2)}`] }]
+					: [];
+			});
+			const risk = riskOf(answers.risk.score);
+			yield* Effect.logInfo(
+				`Review risk: ${risk} (clef: score=${answers.risk.score.toFixed(2)})`
+			);
+			return { reviewers: [...deterministic, ...added], risk } satisfies RouteResult;
 		});
+
+		/**
+		 * The indexes of the round's must-fix findings that Clef rates only a formatter,
+		 * linter or taste remark; none without its answer.
+		 */
+		const tasteOnly = (input: VerifyInput) =>
+			Effect.gen(function* () {
+				const mustFix = input.findings.flatMap((finding, index) =>
+					finding.severity === 'must-fix' ? [[index, finding] as const] : []
+				);
+				const answers = yield* clef.ask(input.scope, {
+					decision: 'Verifying without lowering must-fix findings',
+					state: findingsState(mustFix),
+					questions: Object.fromEntries(
+						mustFix.map(([index]) => [`finding.${index}`, tasteQuestion(index)])
+					)
+				});
+				const lowered = new Set<number>();
+				if (answers === null) return lowered;
+				for (const [index, finding] of mustFix) {
+					const p = answers[`finding.${index}`]?.p ?? 0;
+					if (p < LOWER_THRESHOLD) continue;
+					lowered.add(index);
+					yield* Effect.logInfo(
+						`Taste-only must-fix (clef: p=${p.toFixed(2)}): ${finding.reviewer} ${finding.file}: ${finding.claim}`
+					);
+				}
+				return lowered;
+			});
 
 		const review = Effect.fn('Reviewers.review')(function* (input: ReviewInput) {
 			return yield* Effect.forEach(
@@ -710,21 +846,27 @@ const make = (briefsDir: string) =>
 			const brief = yield* fs
 				.readFileString(briefPath)
 				.pipe(Effect.mapError(fileError(briefPath)));
-			const result = yield* agent.runStructured(
-				{
-					step: 'verify',
-					prompt: verifierPrompt(brief.trim(), input),
-					model: input.model,
-					access: 'read-only',
-					cwd: input.context.cwd,
-					env: input.context.env,
-					additionalDirectories: readableDirs(input),
-					timeoutMs: input.timeoutMs,
-					transcript: input.context.transcript
-				},
-				VerifierOutput
+			const [result, lowered] = yield* Effect.all(
+				[
+					agent.runStructured(
+						{
+							step: 'verify',
+							prompt: verifierPrompt(brief.trim(), input),
+							model: input.model,
+							access: 'read-only',
+							cwd: input.context.cwd,
+							env: input.context.env,
+							additionalDirectories: readableDirs(input),
+							timeoutMs: input.timeoutMs,
+							transcript: input.context.transcript
+						},
+						VerifierOutput
+					),
+					tasteOnly(input)
+				],
+				{ concurrency: 'unbounded' }
 			);
-			const assembled = yield* assembleVerified(input, result.output).pipe(
+			const assembled = yield* assembleVerified(input, result.output, lowered).pipe(
 				Effect.mapError(billedTo(result))
 			);
 			return {
