@@ -18,3 +18,13 @@ export const ACTIONS: Record<ActionKind, ActionLabel> = {
 	archive: { label: 'Archive', tooltip: 'Moves it to Closed' },
 	unarchive: { label: 'Move back to the inbox', tooltip: 'Moves it out of Closed' }
 };
+
+/**
+ * The action ⌘↵ starts among a deliverable's `actions`: the primary one, unless it stops
+ * work. A stray chord must never cancel a run, so a deliverable whose primary action is
+ * `cancel` has no shortcut.
+ */
+export const shortcutAction = (actions: ReadonlyArray<ActionKind>): ActionKind | null => {
+	const primary = actions[0];
+	return primary === undefined || ACTIONS[primary].danger === true ? null : primary;
+};

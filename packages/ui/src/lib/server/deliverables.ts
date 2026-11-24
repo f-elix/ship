@@ -17,8 +17,10 @@ import { parsePrUrl } from '@ship/core/pr-url';
 import { DateTime, Schema } from 'effect';
 
 /**
- * A deliverable's id: `pr:<url>`, `branch:<project>#<branch>`, `review:<id>` for a
- * `ship post` run whose review has no known PR, or `run:<id>` for a run that belongs to
+ * A deliverable's id: `branch:<project>#<branch>` for the work on a branch, before and
+ * after it has a PR, so that opening the PR keeps the archive marks and the selection
+ * that name it; `pr:<url>` for a PR that no run names a branch of; `review:<id>` for a
+ * `ship post` run whose review has no known PR; or `run:<id>` for a run that belongs to
  * none of these.
  */
 export const DeliverableId = Schema.NonEmptyString.pipe(Schema.brand('DeliverableId'));
@@ -164,7 +166,8 @@ export interface Grouping {
  * names a PR belongs to the PR's deliverable, and so does every run on a branch that a
  * `ship run` or `ship pr` opened that PR from. A `ship post` run belongs to the PR of the
  * review it posts, else to that review. A run with no PR belongs to its branch; review,
- * fix and recheck runs name no branch, so without a PR such a run stands alone.
+ * fix and recheck runs name no branch, so without a PR such a run stands alone. The work
+ * on a branch keeps the branch's id once it has a PR; see {@link DeliverableId}.
  */
 export const deliverablesOf = (runs: ReadonlyArray<RunInfo>): ReadonlyArray<Deliverable> =>
 	groupingOf(runs).deliverables;
@@ -196,10 +199,16 @@ export const groupingOf = (runs: ReadonlyArray<RunInfo>): Grouping => {
 		return branch === null ? null : (branchPrs.get(branchKey(run.projectKey, branch)) ?? null);
 	};
 
+	// The PR a branch's runs belong to takes the branch's id. `branchPrs` names one PR per
+	// branch, so no two deliverables share an id; an older PR of the branch keeps `pr:`.
+	const prBranches = new Map([...branchPrs].map(([branch, pr]) => [pr, branch]));
 	const groups = new Map<DeliverableId, Array<RunInfo>>();
 	const keyOf = (run: RunInfo): DeliverableId => {
 		const pr = prOf(run);
-		if (pr !== null) return DeliverableId.make(`pr:${pr}`);
+		if (pr !== null) {
+			const branch = prBranches.get(pr);
+			return DeliverableId.make(branch === undefined ? `pr:${pr}` : `branch:${branch}`);
+		}
 		const branch = branchOf(run);
 		if (branch !== null)
 			return DeliverableId.make(`branch:${branchKey(run.projectKey, branch)}`);

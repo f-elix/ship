@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { ACTIONS } from '#lib/actions.ts';
+	import { ACTIONS, shortcutAction } from '#lib/actions.ts';
 	import { relTime } from '#lib/format.ts';
 	import { plural, shortSha } from '@ship/core/event-lines';
 	import type { ActionKind, DeliverableSummary } from '#lib/server/deliverables.ts';
@@ -113,7 +113,9 @@
 				<button
 					class={['btn', ACTIONS[primary].danger && 'danger']}
 					disabled={busy}
-					title={`${ACTIONS[primary].tooltip}  (⌘↵)`}
+					title={shortcutAction(d.actions) === primary
+						? `${ACTIONS[primary].tooltip}  (⌘↵)`
+						: ACTIONS[primary].tooltip}
 					onclick={() => onact(primary)}>{ACTIONS[primary].label}</button
 				>
 				{#each secondary as action (action)}

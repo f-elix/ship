@@ -14,6 +14,7 @@ import { ReviewId, type RunEvent, type RunInfo } from '@ship/core/contract';
 import { FindingId } from '@ship/core/finding';
 import {
 	at,
+	FEATURE_ID,
 	finding,
 	fixRun,
 	PR_URL,
@@ -63,7 +64,7 @@ describe('deliverablesOf', () => {
 
 		const deliverable = only([ship, review, post, fix, implement]);
 
-		expect(deliverable.id).toBe(PR_ID);
+		expect(deliverable.id).toBe(FEATURE_ID);
 		expect(deliverable.prUrl).toBe(PR_URL);
 		expect(deliverable.branch).toBe('feature');
 		expect(deliverable.runs.map((run) => run.runId)).toEqual(
@@ -78,6 +79,21 @@ describe('deliverablesOf', () => {
 		expect(deliverablesOf([newer, older]).map((deliverable) => deliverable.id)).toEqual([
 			`branch:${PROJECT}#older`,
 			`branch:${PROJECT}#newer`
+		]);
+	});
+
+	it('keys a PR that no run names a branch of by its URL', () => {
+		expect(only([reviewRun(1), fixRun(2)]).id).toBe(PR_ID);
+	});
+
+	it('keeps the PR a branch opened before under its URL, apart from the branch’s PR', () => {
+		const OLD_PR = 'https://github.com/f-elix/example/pull/6';
+		const old = shipRun(1, { prUrl: OLD_PR });
+		const current = shipRun(2, { prUrl: PR_URL });
+
+		expect(deliverablesOf([old, current]).map((deliverable) => deliverable.id)).toEqual([
+			FEATURE_ID,
+			`pr:${OLD_PR}`
 		]);
 	});
 
@@ -118,8 +134,26 @@ describe('withRun', () => {
 		const after = withRun(before, opened);
 
 		expect(after.deliverables).toEqual(deliverablesOf([opened, implement, fix]));
-		expect(ids(after.deliverables)).toEqual([PR_ID]);
-		expect(after.deliverableOfRun.get(implement.runId)).toBe(PR_ID);
+		expect(ids(after.deliverables)).toEqual([FEATURE_ID]);
+		expect(after.deliverableOfRun.get(fix.runId)).toBe(FEATURE_ID);
+	});
+
+	it('keeps a branch’s id and archive mark when its PR opens', () => {
+		const ship = shipRun(1, { updatedAt: at(2) });
+		const before = groupingOf([ship]);
+		const archived: ArchiveMarks = new Map([
+			[before.deliverables[0]!.id, { archived: true, at: at(5) }]
+		]);
+		expect(summarize(before.deliverables[0]!, archived).stage).toBe('closed');
+
+		// The run reports the PR it opened without its update time moving past the mark.
+		const after = withRun(before, { ...ship, prUrl: PR_URL });
+
+		expect(ids(after.deliverables)).toEqual([FEATURE_ID]);
+		expect(summarize(after.deliverables[0]!, archived)).toMatchObject({
+			stage: 'closed',
+			prUrl: PR_URL
+		});
 	});
 
 	it('adds a new run to its deliverable', () => {
@@ -129,7 +163,7 @@ describe('withRun', () => {
 		const after = withRun(groupingOf([ship]), recheck);
 
 		expect(after.deliverables).toEqual(deliverablesOf([ship, recheck]));
-		expect(after.deliverableOfRun.get(recheck.runId)).toBe(PR_ID);
+		expect(after.deliverableOfRun.get(recheck.runId)).toBe(FEATURE_ID);
 	});
 });
 
@@ -237,7 +271,7 @@ describe('summarize', () => {
 
 	it('follows the latest mark until a run changes after it', () => {
 		const run = shipRun(1, { prUrl: PR_URL });
-		const archived: ArchiveMarks = new Map([[PR_ID, { archived: true, at: at(5) }]]);
+		const archived: ArchiveMarks = new Map([[FEATURE_ID, { archived: true, at: at(5) }]]);
 
 		expect(summaryOf([run], archived).stage).toBe('closed');
 		expect(summaryOf([run, fixRun(6)], archived).stage).toBe('ready');
@@ -245,16 +279,14 @@ describe('summarize', () => {
 
 	it('lets an unarchive override archiving a cancelled deliverable', () => {
 		const run = shipRun(1, { status: 'cancelled' });
-		const id = DeliverableId.make(`branch:${PROJECT}#feature`);
-		const unarchived: ArchiveMarks = new Map([[id, { archived: false, at: at(5) }]]);
+		const unarchived: ArchiveMarks = new Map([[FEATURE_ID, { archived: false, at: at(5) }]]);
 
 		expect(summaryOf([run], unarchived).stage).toBe('ready');
 	});
 
 	it('never closes a deliverable ship works on', () => {
 		const run = shipRun(1, { status: 'running', state: 'review.running' });
-		const id = DeliverableId.make(`branch:${PROJECT}#feature`);
-		const archived: ArchiveMarks = new Map([[id, { archived: true, at: at(5) }]]);
+		const archived: ArchiveMarks = new Map([[FEATURE_ID, { archived: true, at: at(5) }]]);
 
 		expect(summaryOf([run], archived).stage).toBe('working');
 	});

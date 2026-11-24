@@ -2,7 +2,8 @@
 	import { replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import { ACTIONS } from '#lib/actions.ts';
+	import { isHttpError } from '@sveltejs/kit';
+	import { ACTIONS, shortcutAction } from '#lib/actions.ts';
 	import Detail from '#lib/components/Detail.svelte';
 	import List from '#lib/components/List.svelte';
 	import type { ActionKind, DeliverableSummary, Stage } from '#lib/server/deliverables.ts';
@@ -20,6 +21,8 @@
 	let toasts = $state<Array<{ id: number; text: string }>>([]);
 	/** Why the last action was refused, shown on that deliverable's status card. */
 	let refusal = $state<{ id: string; text: string } | null>(null);
+	/** Why the last action found the daemon unreachable, until the live list hears from it. */
+	let unreachable = $state<string | null>(null);
 	let toastId = 0;
 
 	const all = $derived(live.current ?? []);
@@ -59,6 +62,12 @@
 		return () => clearTimeout(timer);
 	});
 
+	// A new list comes from the daemon, so it is reachable again.
+	$effect(() => {
+		void live.current;
+		unreachable = null;
+	});
+
 	// The same for the open deliverable, which a lost daemon fails too.
 	$effect(() => {
 		const query = detail;
@@ -84,12 +93,6 @@
 		replaceState(url, {});
 	};
 
-	const move = (delta: number) => {
-		const i = visible.findIndex((d) => d.id === selected?.id);
-		const next = visible[Math.min(visible.length - 1, Math.max(0, i + delta))];
-		if (next) select(next.id);
-	};
-
 	const toast = (text: string) => {
 		const id = ++toastId;
 		toasts.push({ id, text });
@@ -106,22 +109,38 @@
 			const result = await act({ id: d.id, action });
 			if (result.ok) toast(`${ACTIONS[action].label}: done`);
 			else refusal = { id: d.id, text: result.detail };
-		} catch {
-			refusal = {
-				id: d.id,
-				text: `${ACTIONS[action].label} failed; see the ship ui output.`
-			};
+		} catch (e) {
+			// The UI server answers with an HTTP error whose message is meant for the developer.
+			if (isHttpError(e, 503)) unreachable = e.body.message;
+			else {
+				refusal = {
+					id: d.id,
+					text: isHttpError(e)
+						? e.body.message
+						: `${ACTIONS[action].label} failed; see the ship ui output.`
+				};
+			}
 		} finally {
 			busy = false;
 		}
 		void deliverable(d.id).refresh();
 	};
 
-	/** ⌘↵ anywhere starts the open deliverable's main action; j/k belong to the list. */
+	/**
+	 * ⌘↵ starts the open deliverable's main action, see {@link shortcutAction}, unless focus
+	 * is on a form control or on a button that would do something else. The list row of the
+	 * open deliverable, where j/k leave focus, only selects what the chord acts on, so the
+	 * chord works there. j/k belong to the list.
+	 */
 	const onkeydown = (e: KeyboardEvent) => {
 		if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey)) return;
-		const primary = selected?.actions[0];
-		if (selected && primary) void run(selected, primary);
+		const control =
+			e.target instanceof Element
+				? e.target.closest('button, input, select, textarea')
+				: null;
+		if (control !== null && control.getAttribute('aria-current') !== 'true') return;
+		const action = selected === null ? null : shortcutAction(selected.actions);
+		if (selected && action) void run(selected, action);
 	};
 </script>
 
@@ -143,12 +162,11 @@
 		{now}
 		connected={live.connected}
 		onselect={select}
-		onmove={move}
 	/>
 	<main bind:this={pane}>
-		{#if live.error}
+		{#if live.error || unreachable}
 			<p class="banner" role="alert">
-				{live.error.message} Reconnecting…
+				{live.error?.message ?? unreachable} Reconnecting…
 			</p>
 		{/if}
 		{#if selected}

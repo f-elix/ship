@@ -14,6 +14,7 @@ import { Deferred, Effect, Fiber, Stream } from 'effect';
 import {
 	at,
 	DaemonFake,
+	FEATURE_ID,
 	finding,
 	fixRun,
 	PR_URL,
@@ -24,6 +25,7 @@ import {
 	withInboxTest
 } from './support.ts';
 
+/** The deliverable of review, fix and recheck runs on {@link PR_URL}, which name no branch. */
 const PR_ID = DeliverableId.make(`pr:${PR_URL}`);
 const REVIEW = ReviewId.make('review-1');
 
@@ -96,7 +98,7 @@ describe('Inbox.deliverables', () => {
 			);
 			const [first, second] = yield* Fiber.join(fiber);
 
-			expect(first!.map((d) => d.id)).toEqual([PR_ID]);
+			expect(first!.map((d) => d.id)).toEqual([FEATURE_ID]);
 			expect(second!.map((d) => [d.title, d.stage])).toEqual([
 				['other', 'working'],
 				['feature', 'ready']
@@ -138,7 +140,7 @@ describe('Inbox.deliverables', () => {
 			expect((yield* Fiber.join(second))._tag).toBe('DaemonUnreachable');
 
 			const [again] = yield* Stream.runCollect(Stream.take(inbox.deliverables, 1));
-			expect(again!.map((d) => d.id)).toEqual([PR_ID]);
+			expect(again!.map((d) => d.id)).toEqual([FEATURE_ID]);
 			expect(yield* watches).toBe(2);
 		}).pipe(withInboxTest())
 	);
@@ -152,7 +154,7 @@ describe('Inbox.deliverables', () => {
 			const fiber = yield* forkWatching(inbox.deliverables, (s) =>
 				Stream.runCollect(Stream.take(s, 2))
 			);
-			expect(yield* inbox.act(PR_ID, 'archive')).toEqual({ ok: true, runId: null });
+			expect(yield* inbox.act(FEATURE_ID, 'archive')).toEqual({ ok: true, runId: null });
 			const [before, after] = yield* Fiber.join(fiber);
 
 			expect(before![0]!.stage).toBe('ready');
@@ -169,7 +171,7 @@ describe('Inbox.deliverable', () => {
 			yield* daemon.put(shipRun(1, { prUrl: PR_URL }), [created, committed]);
 			yield* daemon.put(unposted(3), []);
 
-			const detail = yield* inbox.deliverable(PR_ID);
+			const detail = yield* inbox.deliverable(FEATURE_ID);
 
 			expect(detail.summary).toMatchObject({
 				stage: 'decide',
@@ -192,7 +194,7 @@ describe('Inbox.deliverable', () => {
 	it.effect('fails for a deliverable no run makes up', () =>
 		Effect.gen(function* () {
 			const inbox = yield* Inbox;
-			const error = yield* Effect.flip(inbox.deliverable(PR_ID));
+			const error = yield* Effect.flip(inbox.deliverable(FEATURE_ID));
 			expect(error._tag).toBe('DeliverableNotFound');
 		}).pipe(withInboxTest())
 	);
@@ -206,7 +208,7 @@ describe('Inbox.act', () => {
 			yield* daemon.put(shipRun(1, { prUrl: PR_URL }), []);
 			yield* daemon.put({ ...unposted(2), cwd: '/checkout' }, []);
 
-			expect(yield* inbox.act(PR_ID, 'fix')).toEqual({ ok: true, runId: 'run-new' });
+			expect(yield* inbox.act(FEATURE_ID, 'fix')).toEqual({ ok: true, runId: 'run-new' });
 			expect(yield* daemon.calls).toEqual([
 				{
 					rpc: 'fix',
@@ -228,7 +230,7 @@ describe('Inbox.act', () => {
 			yield* daemon.put(shipRun(1, { prUrl: PR_URL }), []);
 			yield* daemon.put({ ...unposted(2), cwd: '/checkout' }, []);
 
-			expect(yield* inbox.act(PR_ID, 'recheck')).toEqual({ ok: true, runId: 'run-new' });
+			expect(yield* inbox.act(FEATURE_ID, 'recheck')).toEqual({ ok: true, runId: 'run-new' });
 			expect(yield* daemon.calls).toEqual([
 				{
 					rpc: 'recheck',
@@ -248,11 +250,14 @@ describe('Inbox.act', () => {
 			const inbox = yield* Inbox;
 			const daemon = yield* DaemonFake;
 			yield* daemon.put(shipRun(1, { prUrl: PR_URL }), [created]);
-			const stage = Effect.map(inbox.deliverable(PR_ID), (detail) => detail.summary.stage);
+			const stage = Effect.map(
+				inbox.deliverable(FEATURE_ID),
+				(detail) => detail.summary.stage
+			);
 
-			expect(yield* inbox.act(PR_ID, 'archive')).toEqual({ ok: true, runId: null });
+			expect(yield* inbox.act(FEATURE_ID, 'archive')).toEqual({ ok: true, runId: null });
 			expect(yield* stage).toBe('closed');
-			expect(yield* inbox.act(PR_ID, 'unarchive')).toEqual({ ok: true, runId: null });
+			expect(yield* inbox.act(FEATURE_ID, 'unarchive')).toEqual({ ok: true, runId: null });
 			expect(yield* stage).toBe('ready');
 			expect(yield* daemon.calls).toEqual([]);
 		}).pipe(withInboxTest())
@@ -287,7 +292,7 @@ describe('Inbox.act', () => {
 				new PreconditionFailed({ reason: 'dirty-tree', detail: 'Commit or stash first.' })
 			);
 
-			expect(yield* inbox.act(PR_ID, 'fix')).toEqual({
+			expect(yield* inbox.act(FEATURE_ID, 'fix')).toEqual({
 				ok: false,
 				_tag: 'PreconditionFailed',
 				detail: 'Commit or stash first.'
@@ -338,7 +343,7 @@ describe('Inbox.act', () => {
 			const daemon = yield* DaemonFake;
 			yield* daemon.put(shipRun(1, { prUrl: PR_URL }), []);
 
-			expect(yield* inbox.act(PR_ID, 'post')).toMatchObject({
+			expect(yield* inbox.act(FEATURE_ID, 'post')).toMatchObject({
 				ok: false,
 				_tag: 'ActionUnavailable'
 			});

@@ -4,7 +4,7 @@
  * in-memory archive.
  */
 import { Archive } from '#lib/server/archive.ts';
-import type { ArchiveMarks } from '#lib/server/deliverables.ts';
+import { type ArchiveMarks, DeliverableId } from '#lib/server/deliverables.ts';
 import { Inbox, make as makeInbox } from '#lib/server/inbox.ts';
 import {
 	type FixRunInfo,
@@ -34,6 +34,8 @@ import { RpcTest } from 'effect/rpc';
 
 export const PROJECT = ProjectKey.make('github.com/f-elix/example');
 export const PR_URL = 'https://github.com/f-elix/example/pull/7';
+/** The deliverable of the fixture runs on branch `feature`, with or without {@link PR_URL}. */
+export const FEATURE_ID = DeliverableId.make(`branch:${PROJECT}#feature`);
 
 /** The `minute`th minute of a fixed day: runs made later sort newer. */
 export const at = (minute: number) => DateTime.makeUnsafe(Date.UTC(2026, 0, 1, 12, minute));

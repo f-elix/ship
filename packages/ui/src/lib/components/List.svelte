@@ -11,8 +11,7 @@
 		projects,
 		now,
 		connected,
-		onselect,
-		onmove
+		onselect
 	}: {
 		/** The deliverables of the chosen project, in list order. */
 		items: ReadonlyArray<DeliverableSummary>;
@@ -23,25 +22,32 @@
 		now: number;
 		connected: boolean;
 		onselect: (id: string) => void;
-		/** Selects the item `delta` places away in list order. */
-		onmove: (delta: number) => void;
 	} = $props();
 
 	const active = $derived(items.filter((d) => d.stage !== 'closed'));
 	const closed = $derived(items.filter((d) => d.stage === 'closed'));
 	const working = $derived(items.filter((d) => d.stage === 'working').length);
 	let showClosed = $state(false);
+	/** The items that have a row: the closed ones only while their section is open. */
+	const rendered = $derived(showClosed ? [...active, ...closed] : active);
+
+	/** Selects the row `delta` places away from the selected one, staying in the list. */
+	const move = (delta: number) => {
+		const i = rendered.findIndex((d) => d.id === selectedId);
+		const next = rendered[Math.min(rendered.length - 1, Math.max(0, i + delta))];
+		if (next) onselect(next.id);
+	};
 
 	/**
-	 * j/k and the arrow keys move the selection while the list has focus, and focus follows
-	 * it, so the shortcuts never take keys from the rest of the page.
+	 * j/k and the arrow keys move the selection through the rows while the list has focus,
+	 * and focus follows it, so the shortcuts never take keys from the rest of the page.
 	 */
 	const onkeydown = async (e: KeyboardEvent & { currentTarget: HTMLElement }) => {
 		if (e.target instanceof HTMLSelectElement || e.metaKey || e.ctrlKey || e.altKey) return;
 		const delta = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1 }[e.key];
 		if (delta === undefined) return;
 		e.preventDefault();
-		onmove(delta);
+		move(delta);
 		const list = e.currentTarget;
 		await tick();
 		list.querySelector<HTMLElement>('[aria-current="true"]')?.focus();

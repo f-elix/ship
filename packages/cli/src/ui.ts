@@ -1,8 +1,9 @@
 import { Console, Effect, Schema } from 'effect';
 import { Command, Flag } from 'effect/cli';
 import { spawn } from 'node:child_process';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { createServer, type RequestListener, type Server } from 'node:http';
+import { createServer, type RequestListener, type Server, type ServerResponse } from 'node:http';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { cliError, connectDaemon, type ShipCliError } from './connection.ts';
 import { Invocation } from './invocation.ts';
@@ -49,26 +50,96 @@ const loadHandler = Effect.fnUntraced(function* (origin: string) {
 	return module.handler;
 });
 
-/** The `Host` values of a page `server` served: its address, by IP or by name. */
-const hostsOf = (server: Server): ReadonlySet<string> => {
-	const address = server.address();
-	if (typeof address !== 'object' || address === null) return new Set();
-	return new Set([`127.0.0.1:${address.port}`, `localhost:${address.port}`]);
+/** A new launch token: 256 random bits, URL-safe. */
+const newToken = () => randomBytes(32).toString('base64url');
+
+/** Whether `candidate` is `token`, compared in constant time. */
+const isToken = (candidate: string | null, token: string): boolean => {
+	if (candidate === null) return false;
+	const given = Buffer.from(candidate);
+	const expected = Buffer.from(token);
+	return given.length === expected.length && timingSafeEqual(given, expected);
 };
 
+/** The value of cookie `name` in a `Cookie` header, or `null` when it is not there. */
+const cookieOf = (header: string | undefined, name: string): string | null => {
+	for (const pair of (header ?? '').split(';')) {
+		const separator = pair.indexOf('=');
+		if (separator !== -1 && pair.slice(0, separator).trim() === name) {
+			return pair.slice(separator + 1).trim();
+		}
+	}
+	return null;
+};
+
+const redirect = (response: ServerResponse, status: 303 | 307, location: URL) =>
+	response.writeHead(status, { location: location.href }).end();
+
 /**
- * Serves `handler` on 127.0.0.1 at `port` (0 picks a free one) until the scope closes. A
- * request naming another host is refused, so a web page cannot reach the UI through a DNS
- * name rebound to 127.0.0.1.
+ * Answers one request to the UI served on 127.0.0.1, letting only the browser that opened
+ * the launch URL through to `handler`:
+ *
+ * - A `Host` that names `localhost` is redirected to the same path on 127.0.0.1, the only
+ *   origin the UI accepts remote calls from. Any other host is refused, so a web page
+ *   cannot reach the UI through a DNS name rebound to 127.0.0.1.
+ * - A request whose `token` parameter is `token` gets it back as an `HttpOnly`,
+ *   `SameSite=Strict` cookie, and is redirected to the same URL without the parameter,
+ *   which keeps the token out of the history and the address bar.
+ * - A request with that cookie reaches `handler`; any other is refused.
+ *
+ * The cookie's name holds the port, because cookies ignore ports: two `ship ui` would
+ * otherwise overwrite each other's.
  */
-export const serve = (handler: RequestListener, port: number) =>
-	Effect.acquireRelease(
+const gate =
+	(handler: RequestListener, token: string): RequestListener =>
+	(request, response) => {
+		const port = request.socket.localPort;
+		const origin = `http://127.0.0.1:${port}`;
+		const url = URL.parse(request.url ?? '/', origin);
+		if (url === null) return response.writeHead(400).end();
+		// The path and query alone, so a target in absolute form, or a path that starts with
+		// `//`, cannot redirect off 127.0.0.1.
+		const here = new URL(origin);
+		here.pathname = url.pathname;
+		here.search = url.search;
+		switch (request.headers.host) {
+			case `localhost:${port}`:
+				return redirect(response, 307, here);
+			case `127.0.0.1:${port}`:
+				break;
+			default:
+				return response.writeHead(403).end();
+		}
+		const cookie = `ship-ui-${port}`;
+		if (isToken(here.searchParams.get('token'), token)) {
+			here.searchParams.delete('token');
+			response.setHeader(
+				'set-cookie',
+				`${cookie}=${token}; HttpOnly; SameSite=Strict; Path=/`
+			);
+			return redirect(response, 303, here);
+		}
+		if (isToken(cookieOf(request.headers.cookie, cookie), token)) {
+			return handler(request, response);
+		}
+		response.writeHead(403).end();
+	};
+
+/** A running UI: the URL that opens it, which carries the launch token, and its port. */
+export interface Launch {
+	readonly url: string;
+	readonly port: number;
+}
+
+/**
+ * Serves `handler` on 127.0.0.1 at `port` (0 picks a free one) until the scope closes,
+ * behind a new launch token; see {@link gate}.
+ */
+export const serve = Effect.fnUntraced(function* (handler: RequestListener, port: number) {
+	const token = newToken();
+	const server = yield* Effect.acquireRelease(
 		Effect.callback<Server, ShipCliError>((resume) => {
-			const server = createServer((request, response) => {
-				if (hostsOf(server).has(request.headers.host ?? ''))
-					return handler(request, response);
-				response.writeHead(403).end();
-			});
+			const server = createServer(gate(handler, token));
 			server.once('error', (error: NodeJS.ErrnoException) =>
 				resume(
 					Effect.fail(
@@ -90,6 +161,16 @@ export const serve = (handler: RequestListener, port: number) =>
 				server.closeAllConnections();
 			})
 	);
+	const address = server.address();
+	// A server listening on a TCP port reports its address as an object.
+	if (typeof address !== 'object' || address === null) {
+		return yield* Effect.die(new Error(`the UI server reports no port: ${String(address)}`));
+	}
+	return {
+		url: `http://127.0.0.1:${address.port}/?token=${token}`,
+		port: address.port
+	} satisfies Launch;
+});
 
 export const ui = Command.make(
 	'ui',
@@ -105,11 +186,10 @@ export const ui = Command.make(
 		)
 	},
 	Effect.fn('ship.ui')(function* ({ port, noOpen }) {
-		const url = `http://127.0.0.1:${port}`;
-		const handler = yield* loadHandler(url);
+		const handler = yield* loadHandler(`http://127.0.0.1:${port}`);
 		// Starts the daemon if needed and checks its version; the UI then only connects to it.
 		yield* connectDaemon();
-		yield* serve(handler, port);
+		const { url } = yield* serve(handler, port);
 		yield* Console.error(`ship: the inbox is at ${url}; Ctrl-C stops it`);
 		if (!noOpen) yield* openBrowser(url);
 		return yield* Effect.never;
