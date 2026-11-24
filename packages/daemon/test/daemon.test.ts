@@ -270,6 +270,37 @@ describe('daemon', () => {
 	);
 
 	it.live(
+		'ends an open watch when it shuts down, on a stop request or otherwise',
+		() =>
+			Effect.gen(function* () {
+				const fx = yield* fixture;
+				const services = yield* fakes;
+				for (const stopRequest of [true, false]) {
+					const scope = yield* Scope.make();
+					const running = yield* daemon(fx.home, services).pipe(Scope.provide(scope));
+					const rpc = yield* client(fx.home);
+					yield* rpc.run(fx.request);
+					const opened = yield* Deferred.make<void>();
+					const watch = yield* rpc.watch({}).pipe(
+						Stream.runForEach(() => Deferred.succeed(opened, undefined)),
+						Effect.exit,
+						Effect.forkScoped
+					);
+					yield* Deferred.await(opened);
+
+					if (stopRequest) {
+						yield* rpc.stop({ force: true });
+						yield* running.stopRequested;
+					}
+					// An open watch would hold the close for the server's 2 second graceful timeout.
+					yield* Scope.close(scope, Exit.void).pipe(Effect.timeout('1 second'));
+					expect(Exit.isSuccess(yield* Fiber.join(watch))).toBe(true);
+				}
+			}).pipe(Effect.scoped),
+		TIMEOUT
+	);
+
+	it.live(
 		'reports runs waiting for a lock as waiting, and limits lists after deriving it',
 		() =>
 			Effect.gen(function* () {
@@ -306,6 +337,8 @@ describe('daemon', () => {
 				expect(yield* ids({ status: ['waiting'], limit: 1 })).toEqual([waiting]);
 				expect(yield* ids({ status: ['running'], limit: 1 })).toEqual([holder]);
 				expect([...(yield* ids({}))].sort()).toEqual([...runs].sort());
+				const watched = yield* rpc.watch({}).pipe(Stream.take(2), Stream.runCollect);
+				expect(watched.find((info) => info.runId === waiting)?.status).toBe('waiting');
 			}).pipe(Effect.scoped),
 		TIMEOUT
 	);

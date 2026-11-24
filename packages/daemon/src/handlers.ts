@@ -54,7 +54,10 @@ export class DaemonControl extends Context.Service<
 	DaemonControl,
 	{
 		readonly version: string;
-		/** Completed by `stop`; the daemon then shuts down. */
+		/**
+		 * Completed by `stop`, which makes the daemon shut down, and when it shuts down for
+		 * another reason.
+		 */
 		readonly shutdown: Deferred.Deferred<void>;
 	}
 >()('@ship/daemon/DaemonControl') {}
@@ -425,6 +428,13 @@ export const handlers = ShipRpcs.toLayer(
 				follow === false
 					? Stream.fromIterableEffect(store.events(runId, fromSeq))
 					: store.follow(runId, fromSeq),
+
+			watch: ({ projectKey }) =>
+				store.watch(projectKey).pipe(
+					Stream.map(withLiveStatus),
+					// The watch ends on shutdown so that it does not hold up the server's graceful close.
+					Stream.interruptWhen(Deferred.await(control.shutdown))
+				),
 
 			runChecks: ({ cwd, env }) =>
 				Stream.unwrap(

@@ -50,7 +50,7 @@ export class DaemonAlreadyRunning extends Schema.TaggedError<DaemonAlreadyRunnin
 
 export interface DaemonHandle {
 	readonly paths: ShipPaths;
-	/** Completes when a `stop` request asks the daemon to shut down. */
+	/** Completes when a `stop` request asks the daemon to shut down, or when it shuts down. */
 	readonly stopRequested: Effect.Effect<void>;
 }
 
@@ -231,9 +231,11 @@ export const startDaemon = Effect.fn('startDaemon')(function* (options: DaemonOp
 	yield* Effect.addFinalizer(() =>
 		fs.remove(paths.socket, { force: true }).pipe(Effect.ignore({ log: true }))
 	);
-	// Runs before the server closes, so event streams end with `RunInterrupted`.
+	// Runs before the server closes, so event streams end with `RunInterrupted` and watches end.
 	yield* Effect.addFinalizer(() =>
-		Effect.andThen(host.shutdown, store.markInterrupted).pipe(
+		Deferred.succeed(shutdown, undefined).pipe(
+			Effect.andThen(host.shutdown),
+			Effect.andThen(store.markInterrupted),
 			Effect.tap((ids) =>
 				ids.length > 0 ? Effect.logInfo(`Interrupted ${ids.length} runs`) : Effect.void
 			)

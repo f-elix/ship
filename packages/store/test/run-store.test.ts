@@ -14,10 +14,11 @@ import {
 	SNAPSHOT_VERSION,
 	StoredReview,
 	type PersistedRunSnapshot,
+	type RunInfo,
 	type RunState,
 	type Summary
 } from '@ship/core';
-import { DateTime, Deferred, Effect, Fiber, Layer, Option, Schema, Stream } from 'effect';
+import { DateTime, Deferred, Effect, Fiber, Layer, Option, Queue, Schema, Stream } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { TestClock } from 'effect/testing';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -428,6 +429,61 @@ describe('RunStore', () => {
 			expect(yield* store.list({ status: [] })).toEqual([]);
 		}).pipe(Effect.provide(TestLayer))
 	);
+
+	describe('watch', () => {
+		/** Collects what `watch` emits into a queue, from a fiber that lives as long as the test. */
+		const watching = (projectKey?: ProjectKey) =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const emitted = yield* Queue.unbounded<RunInfo>();
+				yield* store.watch(projectKey).pipe(
+					Stream.runForEach((run) => Queue.offer(emitted, run)),
+					Effect.forkScoped
+				);
+				return emitted;
+			});
+
+		it.effect('emits the listed runs first, then a run again when an event is appended', () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const a = yield* store.create(newRun);
+				yield* TestClock.adjust('1 second');
+				const b = yield* store.create(newRun);
+				const emitted = yield* watching();
+				const snapshot = [yield* Queue.take(emitted), yield* Queue.take(emitted)];
+				expect(snapshot.map((run) => run.runId)).toEqual([b.runId, a.runId]);
+
+				yield* store.append(a.runId, stateChanged('review'));
+				yield* store.append(a.runId, stateChanged('checks'));
+				yield* TestClock.adjust('1 second');
+				expect(yield* Queue.take(emitted)).toEqual(yield* store.get(a.runId));
+				// The burst of two events emitted the run once.
+				yield* TestClock.adjust('1 second');
+				expect(yield* Queue.size(emitted)).toBe(0);
+			}).pipe(Effect.scoped, Effect.provide(TestLayer))
+		);
+
+		it.effect("leaves out another project's runs", () =>
+			Effect.gen(function* () {
+				const store = yield* RunStore;
+				const other = yield* store.create({
+					...newRun,
+					projectKey: ProjectKey.make('github.com/f-elix/other')
+				});
+				const mine = yield* store.create(newRun);
+				const emitted = yield* watching(projectKey);
+				// Once the snapshot is out, the watch is subscribed.
+				expect((yield* Queue.take(emitted)).runId).toBe(mine.runId);
+
+				yield* store.append(other.runId, stateChanged('review'));
+				yield* store.append(mine.runId, stateChanged('review'));
+				yield* TestClock.adjust('1 second');
+				expect((yield* Queue.take(emitted)).runId).toBe(mine.runId);
+				yield* TestClock.adjust('1 second');
+				expect(yield* Queue.size(emitted)).toBe(0);
+			}).pipe(Effect.scoped, Effect.provide(TestLayer))
+		);
+	});
 
 	it.effect('creates a primitive run whose log starts with PrimitiveRunCreated', () =>
 		Effect.gen(function* () {
