@@ -148,7 +148,7 @@ export interface GhShape {
 	) => Effect.Effect<void, GhError>;
 	/**
 	 * The state of each PR in `urls`, keyed by the URL as given; a URL that names no PR is
-	 * left out. The URLs are PRs of one GitHub host, read in one call per 50.
+	 * left out. The PRs are read in one call per GitHub host and per 50 PRs.
 	 */
 	readonly prStates: (
 		repo: GitRepo,
@@ -549,12 +549,9 @@ const make = Effect.gen(function* () {
 		]);
 	});
 
-	const prStatesChunk = (repo: GitRepo, urls: Arr.NonEmptyReadonlyArray<string>) =>
+	/** Reads the states of `urls`, PRs on `host`, in one GraphQL query. */
+	const prStatesChunk = (repo: GitRepo, host: string, urls: Arr.NonEmptyReadonlyArray<string>) =>
 		Effect.gen(function* () {
-			const [first] = urls;
-			const host = parsePrUrl(first)?.host;
-			if (host === undefined)
-				return yield* Effect.die(new Error(`Not a pull request URL: ${first}`));
 			const args = [
 				'api',
 				'graphql',
@@ -577,8 +574,18 @@ const make = Effect.gen(function* () {
 		repo: GitRepo,
 		urls: ReadonlyArray<string>
 	) {
-		const states = yield* Effect.forEach(Arr.chunksOf(urls, PR_STATES_CHUNK), (chunk) =>
-			prStatesChunk(repo, chunk)
+		const prs = urls.flatMap((url) => {
+			const host = parsePrUrl(url)?.host;
+			return host === undefined ? [] : [{ url, host }];
+		});
+		const chunks = Object.entries(Arr.groupBy(prs, (pr) => pr.host)).flatMap(([host, onHost]) =>
+			Arr.chunksOf(
+				onHost.map((pr) => pr.url),
+				PR_STATES_CHUNK
+			).map((chunk) => ({ host, chunk }))
+		);
+		const states = yield* Effect.forEach(chunks, ({ host, chunk }) =>
+			prStatesChunk(repo, host, chunk)
 		);
 		return new Map(states.flat());
 	});

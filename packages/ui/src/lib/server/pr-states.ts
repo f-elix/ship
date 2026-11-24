@@ -6,7 +6,18 @@
 import { Gh } from '@ship/core/gh';
 import { prRepoKey } from '@ship/core/pr-url';
 import { processEnv } from '@ship/daemon/client';
-import { Context, Effect, Layer, Option, Stream, SubscriptionRef } from 'effect';
+import {
+	Context,
+	Deferred,
+	Effect,
+	Layer,
+	Option,
+	Queue,
+	Ref,
+	type Scope,
+	Stream,
+	SubscriptionRef
+} from 'effect';
 import type { KnownPrStates } from './deliverables.ts';
 
 /** A deliverable's PR, and a checkout of its repository to run `gh` in. */
@@ -26,7 +37,25 @@ export interface PrStatesApi {
 	 * and the states of that repository's PRs stay as they were known.
 	 */
 	readonly refresh: (prs: ReadonlyArray<PrToRead>) => Effect.Effect<void>;
+	/**
+	 * Refreshes the PRs of the latest list that `prs` emits, until the scope closes: as soon
+	 * as the first list comes, then every {@link EVERY}, and {@link SETTLE} after a burst of
+	 * later lists ends. Every list after the first counts as a change, so the caller emits
+	 * one only when a PR may have changed.
+	 */
+	readonly follow: (
+		prs: Stream.Stream<ReadonlyArray<PrToRead>>
+	) => Effect.Effect<void, never, Scope.Scope>;
 }
+
+/** How often `follow` reads the PR states again. */
+const EVERY = '60 seconds';
+
+/**
+ * How long `follow` waits for a burst of lists to end before it reads: a run that ends
+ * usually changes its PR, and sends several updates as it ends.
+ */
+const SETTLE = '2 seconds';
 
 /**
  * Returns `known` with the states in `read` laid over it, or `None` when `read` changes
@@ -72,10 +101,41 @@ export const make = Effect.gen(function* () {
 		yield* SubscriptionRef.updateSome(ref, (known) => withRead(known, read));
 	});
 
+	const follow = Effect.fn('PrStates.follow')(function* (
+		prs: Stream.Stream<ReadonlyArray<PrToRead>>
+	) {
+		const latest = yield* Ref.make<ReadonlyArray<PrToRead>>([]);
+		const firstList = yield* Deferred.make<void>();
+		const changed = yield* Queue.sliding<void>(1);
+		yield* prs.pipe(
+			Stream.runForEach((list) =>
+				Effect.gen(function* () {
+					yield* Ref.set(latest, list);
+					const isFirst = yield* Deferred.succeed(firstList, undefined);
+					if (!isFirst) yield* Queue.offer(changed, undefined);
+				})
+			),
+			Effect.forkScoped
+		);
+		// One fiber does every read, so two reads never overlap.
+		yield* Stream.fromEffect(Deferred.await(firstList)).pipe(
+			Stream.concat(
+				Stream.merge(
+					// `tick` emits at once, right after the first list was read, so that emission is dropped.
+					Stream.drop(Stream.tick(EVERY), 1),
+					Stream.debounce(Stream.fromQueue(changed), SETTLE)
+				)
+			),
+			Stream.runForEach(() => Effect.flatMap(Ref.get(latest), refresh)),
+			Effect.forkScoped
+		);
+	});
+
 	return {
 		states: SubscriptionRef.changes(ref),
 		current: SubscriptionRef.get(ref),
-		refresh
+		refresh,
+		follow
 	} satisfies PrStatesApi;
 });
 

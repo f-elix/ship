@@ -583,16 +583,22 @@ esac
 
 	it.effect('reads PR states in one GraphQL call, leaving out URLs that name no PR', () =>
 		Effect.gen(function* () {
-			// What GitHub answers: `null` for a URL that names nothing, `{}` for an issue.
+			// What GitHub answers: `null` for a URL that names nothing.
 			const { repo, argv } = yield* listingGh(
-				'{"data":{"p0":{"url":"https://github.example.com/o/r/pull/1","state":"MERGED"},"p1":{"url":"https://github.example.com/o/r/pull/2","state":"OPEN"},"p2":{"url":"https://github.example.com/o/r/pull/3","state":"CLOSED"},"p3":null,"p4":{}}}\n'
+				'{"data":{"p0":{"url":"https://github.example.com/o/r/pull/1","state":"MERGED"},"p1":{"url":"https://github.example.com/o/r/pull/2","state":"OPEN"},"p2":{"url":"https://github.example.com/o/r/pull/3","state":"CLOSED"},"p3":null}}\n'
 			);
 			const gh = yield* Gh;
 			const urls = [1, 2, 3, 4].map((n) => `https://github.example.com/o/r/pull/${n}`);
 
+			// URLs that name no PR, first, in the middle and last.
 			const states = yield* gh.prStates(repo, [
-				...urls,
-				'https://github.example.com/o/r/issues/5'
+				'https://github.example.com/o/r/issues/5',
+				urls[0]!,
+				urls[1]!,
+				'not a url',
+				urls[2]!,
+				urls[3]!,
+				'https://github.example.com/o/r'
 			]);
 
 			expect(states).toEqual(
@@ -605,10 +611,40 @@ esac
 			const call = argv();
 			expect(call).toMatch(/^api graphql --hostname github\.example\.com -f query=query\(/u);
 			expect(call).toContain('p0: resource(url: $u0) { ... on PullRequest { url state } }');
-			// The URLs are variables, never part of the query.
+			// The URLs are variables, never part of the query, and only the PRs are asked for.
 			expect(call).toMatch(
-				/ -f u0=https:\/\/github\.example\.com\/o\/r\/pull\/1 -f u1=.* -f u4=https:\/\/github\.example\.com\/o\/r\/issues\/5$/u
+				/ -f u0=https:\/\/github\.example\.com\/o\/r\/pull\/1 -f u1=.* -f u3=https:\/\/github\.example\.com\/o\/r\/pull\/4$/u
 			);
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('reads PR states in one call per GitHub host', () =>
+		Effect.gen(function* () {
+			// The fake `gh` gives every call the same answer.
+			const { repo, argv } = yield* listingGh(
+				'{"data":{"p0":{"state":"MERGED"},"p1":{"state":"OPEN"}}}\n'
+			);
+			const gh = yield* Gh;
+			const dotCom = ['https://github.com/o/r/pull/1', 'https://github.com/o/s/pull/3'];
+			const enterprise = 'https://github.example.com/o/r/pull/2';
+
+			const states = yield* gh.prStates(repo, [dotCom[0]!, enterprise, dotCom[1]!]);
+
+			expect(states).toEqual(
+				new Map([
+					[dotCom[0], 'merged'],
+					[dotCom[1], 'open'],
+					[enterprise, 'merged']
+				])
+			);
+			const calls = argv().split(/^(?=api graphql )/mu);
+			expect(calls).toHaveLength(2);
+			expect(calls[0]).toMatch(/^api graphql --hostname github\.com /u);
+			expect(calls[0]).toMatch(
+				/ -f u0=https:\/\/github\.com\/o\/r\/pull\/1 -f u1=https:\/\/github\.com\/o\/s\/pull\/3\n$/u
+			);
+			expect(calls[1]).toMatch(/^api graphql --hostname github\.example\.com /u);
+			expect(calls[1]).toMatch(/ -f u0=https:\/\/github\.example\.com\/o\/r\/pull\/2$/u);
 		}).pipe(Effect.scoped, Effect.provide(GhLive))
 	);
 

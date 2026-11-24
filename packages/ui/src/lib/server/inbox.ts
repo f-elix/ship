@@ -23,6 +23,7 @@ import {
 	type Deliverable,
 	type DeliverableId,
 	type DeliverableSummary,
+	type Grouping,
 	type KnownPrStates,
 	type Offer,
 	type RunWithEvents
@@ -88,15 +89,6 @@ export interface InboxApi {
 /** How long the list waits for a burst of run updates to end before it re-emits. */
 const SETTLE = '50 millis';
 
-/** How often the PR states are read again. */
-const PR_STATES_EVERY = '60 seconds';
-
-/**
- * How long the PR states wait for a burst of run updates to end before they are read: a
- * run that ends usually changes its PR, and sends several updates as it ends.
- */
-const PR_STATES_SETTLE = '2 seconds';
-
 /** Lists each deliverable's PR, with the checkout of its latest run to run `gh` in. */
 const prsOf = (deliverables: ReadonlyArray<Deliverable>): ReadonlyArray<PrToRead> =>
 	deliverables.flatMap((deliverable) =>
@@ -104,6 +96,20 @@ const prsOf = (deliverables: ReadonlyArray<Deliverable>): ReadonlyArray<PrToRead
 			? []
 			: [{ prUrl: deliverable.prUrl, cwd: deliverable.runs[0]!.cwd }]
 	);
+
+/**
+ * Whether the deliverables with a PR have the same runs in `a` and `b`. {@link withRun}
+ * keeps every run that an update does not change, so a new run object means a run of a
+ * deliverable with a PR changed, and its PR state may have too.
+ */
+const samePrRuns = (a: Grouping, b: Grouping) => {
+	const runsOf = (grouping: Grouping) =>
+		grouping.deliverables.flatMap((deliverable) =>
+			deliverable.prUrl === null ? [] : deliverable.runs
+		);
+	const [before, after] = [runsOf(a), runsOf(b)];
+	return before.length === after.length && before.every((run, i) => run === after[i]);
+};
 
 const unreachable = (error: RpcClientError.RpcClientError) =>
 	new DaemonUnreachable({ detail: error.message, cause: error });
@@ -121,49 +127,27 @@ export const make = Effect.gen(function* () {
 	const archive = yield* Archive;
 	const prStates = yield* PrStates;
 
-	/** A run of a deliverable with a PR changed: its PR state may have too. */
-	const prRunChanged = yield* Queue.sliding<void>(1);
-
 	/**
-	 * Reads the PR states when the inbox starts, then every {@link PR_STATES_EVERY}, and
-	 * soon after a run of a deliverable with a PR changes. A lost daemon skips one read:
-	 * the list says so already.
+	 * The runs grouped: the list's, then again after each update the daemon sends. While it
+	 * runs, `prStates` follows the deliverables' PRs.
 	 */
-	const readPrStates = rpc.list({}).pipe(
-		Effect.flatMap((runs) => prStates.refresh(prsOf(deliverablesOf(runs)))),
-		Effect.catchTag('RpcClientError', (error) =>
-			Effect.logDebug('Cannot list the runs to read their PR states', error)
-		)
-	);
-	yield* Stream.merge(
-		Stream.tick(PR_STATES_EVERY),
-		Stream.fromQueue(prRunChanged).pipe(Stream.debounce(PR_STATES_SETTLE))
-	).pipe(
-		Stream.runForEach(() => readPrStates),
-		Effect.forkScoped
-	);
-
-	/** The runs grouped: the list's, then again after each update the daemon sends. */
 	const groupings = Stream.unwrap(
-		Effect.map(rpc.list({}), (initial) =>
-			rpc.watch({}).pipe(
-				Stream.scanEffect(
-					() => groupingOf(initial),
-					(grouping, run) => {
-						const next = withRun(grouping, run);
-						const id = next.deliverableOfRun.get(run.runId);
-						const owner = next.deliverables.find(
-							(deliverable) => deliverable.id === id
-						);
-						return owner?.prUrl == null
-							? Effect.succeed(next)
-							: Effect.as(Queue.offer(prRunChanged, undefined), next);
-					}
-				),
+		Effect.gen(function* () {
+			const initial = yield* rpc.list({});
+			const latest = yield* Queue.sliding<Grouping>(1);
+			yield* prStates.follow(
+				Stream.fromQueue(latest).pipe(
+					Stream.changesWith(samePrRuns),
+					Stream.map((grouping) => prsOf(grouping.deliverables))
+				)
+			);
+			return rpc.watch({}).pipe(
+				Stream.scan(() => groupingOf(initial), withRun),
+				Stream.tap((grouping) => Queue.offer(latest, grouping)),
 				// `watch` ends when the daemon shuts down.
 				Stream.concat(Stream.fail(new DaemonUnreachable({ detail: 'the daemon stopped' })))
-			)
-		)
+			);
+		})
 	).pipe(Stream.catchTag('RpcClientError', (error) => Stream.fail(unreachable(error))));
 
 	/**

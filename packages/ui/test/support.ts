@@ -278,7 +278,7 @@ const daemonFake = Layer.unwrap(
  * the real `PrStates` over the fake GitHub. Each fake stays in context, for tests to drive
  * and inspect.
  */
-export const inboxFakes = (
+const inboxFakes = (
 	options: { readonly marks?: ArchiveMarks; readonly git?: Partial<FakeGitState> } = {}
 ) =>
 	Layer.mergeAll(
