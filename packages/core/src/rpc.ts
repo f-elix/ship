@@ -350,6 +350,16 @@ export class ShipRpcs extends RpcGroup.make(
 		stream: true
 	}),
 	/**
+	 * Streams the runs that `list` returns for `projectKey`, then each run again whenever an event is
+	 * appended to it. Ends when the daemon shuts down, before it interrupts the active runs,
+	 * so a client lists the runs again once it reconnects. Interrupting the stream detaches.
+	 */
+	Rpc.make('watch', {
+		payload: { projectKey: Schema.optionalKey(ProjectKey) },
+		success: RunInfo,
+		stream: true
+	}),
+	/**
 	 * Runs the project's checks once in `cwd` with `env`, as the baseline does: no fix
 	 * commands, checks using `{files}` skipped, the baseline timeout per command, and the
 	 * daemon's lock permits shared with every run. Streams the pass's events. Reads the

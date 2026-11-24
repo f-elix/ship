@@ -123,6 +123,13 @@ export interface RunStoreShape extends RunJournalShape {
 	/** Most recently updated first. */
 	readonly list: (filter?: RunFilter) => Effect.Effect<ReadonlyArray<RunInfo>>;
 	/**
+	 * Streams the runs that `list` returns for `projectKey` (every project when absent), then each
+	 * run again whenever an event is appended to it. Events are gathered for
+	 * {@link WATCH_WINDOW}, up to 1024 of them, and each run they touched is emitted once.
+	 * The stream never ends.
+	 */
+	readonly watch: (projectKey?: ProjectKey) => Stream.Stream<RunInfo>;
+	/**
 	 * Sets every `running` run to `interrupted` and appends `RunInterrupted` to each.
 	 * Returns the interrupted runs' ids.
 	 */
@@ -266,6 +273,14 @@ const newRunId = Effect.gen(function* () {
 });
 
 const nowMillis = Effect.map(DateTime.now, DateTime.toEpochMillis);
+
+/** How long `watch` gathers appended events before emitting the runs they touched. */
+const WATCH_WINDOW = '100 millis';
+
+/** The distinct run ids of `envelopes`, in the order they first appear. */
+const runIdsOf = (envelopes: ReadonlyArray<RunEventEnvelope>): ReadonlyArray<RunId> => [
+	...new Set(envelopes.map((envelope) => envelope.runId))
+];
 
 // --- Implementation ---
 
@@ -635,17 +650,49 @@ const make = Effect.gen(function* () {
 		return yield* toRunInfo(yield* findRun(runId));
 	}, orDieStorage);
 
-	const list = Effect.fn('RunStore.list')(function* (filter: RunFilter = {}) {
+	const list = Effect.fn('RunStore.list')(function* (filter: RunFilter | undefined) {
+		const { projectKey, status, limit = -1 } = filter ?? {};
 		const clauses = [
-			...(filter.projectKey === undefined ? [] : [sql`project_key = ${filter.projectKey}`]),
-			...(filter.status === undefined ? [] : [sql.in('status', filter.status)])
+			...(projectKey === undefined ? [] : [sql`project_key = ${projectKey}`]),
+			...(status === undefined ? [] : [sql.in('status', status)])
 		];
-		const limit = filter.limit ?? -1;
 		const rows = yield* sql`
 			SELECT * FROM runs WHERE ${sql.and(clauses)} ORDER BY updated_at DESC, id DESC LIMIT ${limit}
 		`;
 		return yield* Effect.forEach(rows, (row) => Effect.flatMap(decodeRunRow(row), toRunInfo));
 	}, orDieStorage);
+
+	/** The runs among `runIds` in `projectKey` (any project when absent), in `runIds` order. */
+	const runsAmong = Effect.fn('RunStore.runsAmong')(function* (
+		runIds: ReadonlyArray<RunId>,
+		projectKey: ProjectKey | undefined
+	) {
+		const clauses = [
+			sql.in('id', runIds),
+			...(projectKey === undefined ? [] : [sql`project_key = ${projectKey}`])
+		];
+		const rows = yield* sql`SELECT * FROM runs WHERE ${sql.and(clauses)}`;
+		const runs = yield* Effect.forEach(rows, (row) =>
+			Effect.flatMap(decodeRunRow(row), toRunInfo)
+		);
+		const byId = new Map(runs.map((run) => [run.runId, run]));
+		return runIds.flatMap((runId) => byId.get(runId) ?? []);
+	}, orDieStorage);
+
+	const watch = (projectKey?: ProjectKey): Stream.Stream<RunInfo> =>
+		Stream.unwrap(
+			Effect.gen(function* () {
+				// Subscribe before listing so no run changed in between is missed.
+				const subscription = yield* PubSub.subscribe(appended);
+				const snapshot = yield* list(projectKey === undefined ? {} : { projectKey });
+				const changed = Stream.fromSubscription(subscription).pipe(
+					Stream.groupedWithin(1024, WATCH_WINDOW),
+					Stream.mapEffect((envelopes) => runsAmong(runIdsOf(envelopes), projectKey)),
+					Stream.flattenIterable
+				);
+				return Stream.concat(Stream.fromIterable(snapshot), changed);
+			})
+		);
 
 	/**
 	 * Writes `set` and bumps `updated_at`, inside a transaction. Fails with `InvalidRunStatus`
@@ -744,6 +791,7 @@ const make = Effect.gen(function* () {
 		reviews: { save: saveReview, get: getReview, byPr: reviewsByPr },
 		get,
 		list,
+		watch,
 		finish,
 		markInterrupted,
 		interrupt,

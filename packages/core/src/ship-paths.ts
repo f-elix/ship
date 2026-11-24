@@ -27,6 +27,8 @@ export const shipPaths = (home: string) => {
 		pidFile: `${home}/daemon.pid`,
 		/** Where the daemon writes its log. */
 		daemonLog: `${home}/daemon.log`,
+		/** The deliverables the developer archived or unarchived in `ship ui`. */
+		uiArchive: `${home}/ui/archive.json`,
 		runs,
 		run,
 		transcripts: (runId: RunId) => `${run(runId)}/transcripts`

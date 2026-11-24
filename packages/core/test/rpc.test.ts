@@ -22,6 +22,7 @@ const Handlers = ShipRpcs.toLayer({
 	status: (payload) => Effect.fail(new RunNotFound({ runId: payload.runId })),
 	list: notUsed,
 	stop: notUsed,
+	watch: () => Stream.die('not used in this test'),
 	runChecks: () => Stream.die('not used in this test'),
 	events: (payload) =>
 		Stream.fromIterable([

@@ -1,4 +1,5 @@
 import type { CheckEvent, ChecksAborted } from '@ship/core/contract';
+import { seconds } from '@ship/core/event-lines';
 import {
 	ConfigLoader,
 	detectProjectConfig,
@@ -13,7 +14,6 @@ import { dirname, resolve } from 'node:path';
 import { cliError, connectDaemon } from './connection.ts';
 import { setExitCode } from './exit-code.ts';
 import { Invocation } from './invocation.ts';
-import { seconds } from './render.ts';
 
 /** Lines of a failing check's output shown by `ship init --write`. */
 const TAIL_LINES = 20;

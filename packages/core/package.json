@@ -9,7 +9,12 @@
 		"./contract": "./src/contract.ts",
 		"./conventions": "./src/conventions.ts",
 		"./credentials": "./src/credentials.ts",
+		"./event-lines": "./src/event-lines.ts",
+		"./finding": "./src/finding.ts",
+		"./gh": "./src/gh.ts",
+		"./git": "./src/git.ts",
 		"./init": "./src/init.ts",
+		"./pr-url": "./src/pr-url.ts",
 		"./testing": "./src/testing.ts"
 	},
 	"dependencies": {

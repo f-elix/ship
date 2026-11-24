@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Schema, Stream } from 'effect';
+import { Array as Arr, Context, Effect, Layer, Schema, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 import type { GitRepo } from './git.ts';
 import { parsePrUrl, PR_URL } from './pr-url.ts';
@@ -65,6 +65,9 @@ export interface ReviewThread {
 	/** The first comment's URL. */
 	readonly url: string;
 }
+
+/** Where a pull request stands on GitHub; a draft PR is `open`. */
+export type PrState = 'open' | 'merged' | 'closed';
 
 /** What a posted review says about the PR; GitHub never gets an `APPROVE` from ship. */
 export type ReviewEvent = 'COMMENT' | 'REQUEST_CHANGES';
@@ -143,6 +146,14 @@ export interface GhShape {
 		repo: GitRepo,
 		input: { readonly prUrl: string; readonly threadId: string }
 	) => Effect.Effect<void, GhError>;
+	/**
+	 * The state of each PR in `urls`, keyed by the URL as given; a URL that names no PR is
+	 * left out. The PRs are read in one call per GitHub host and per 50 PRs.
+	 */
+	readonly prStates: (
+		repo: GitRepo,
+		urls: ReadonlyArray<string>
+	) => Effect.Effect<ReadonlyMap<string, PrState>, GhError>;
 }
 
 const PrList = Schema.fromJsonString(
@@ -235,6 +246,42 @@ const ListedThread = Schema.fromJsonString(
 		})
 	})
 );
+
+/** How many PRs `prStates` reads in one GraphQL query. */
+const PR_STATES_CHUNK = 50;
+
+/**
+ * A query that reads the state of `count` PRs, one aliased `resource` per URL: `p<i>` reads
+ * the URL in variable `u<i>`. `resource` is `null` for a URL that names nothing, and `{}`
+ * for one that names something other than a PR.
+ */
+const prStatesQuery = (count: number) => {
+	const indexes = Array.from({ length: count }, (_, i) => i);
+	const variables = indexes.map((i) => `$u${i}: URI!`).join(', ');
+	const fields = indexes
+		.map((i) => `  p${i}: resource(url: $u${i}) { ... on PullRequest { url state } }`)
+		.join('\n');
+	return `query(${variables}) {\n${fields}\n}`;
+};
+
+const PrStatesResponse = Schema.fromJsonString(
+	Schema.Struct({
+		data: Schema.Record(
+			Schema.String,
+			Schema.NullOr(
+				Schema.Struct({
+					state: Schema.optionalKey(Schema.Literals(['OPEN', 'MERGED', 'CLOSED']))
+				})
+			)
+		)
+	})
+);
+
+const PR_STATES: Record<'OPEN' | 'MERGED' | 'CLOSED', PrState> = {
+	OPEN: 'open',
+	MERGED: 'merged',
+	CLOSED: 'closed'
+};
 
 const PostedReview = Schema.fromJsonString(Schema.Struct({ html_url: Url }));
 
@@ -502,6 +549,47 @@ const make = Effect.gen(function* () {
 		]);
 	});
 
+	/** Reads the states of `urls`, PRs on `host`, in one GraphQL query. */
+	const prStatesChunk = (repo: GitRepo, host: string, urls: Arr.NonEmptyReadonlyArray<string>) =>
+		Effect.gen(function* () {
+			const args = [
+				'api',
+				'graphql',
+				'--hostname',
+				host,
+				'-f',
+				`query=${prStatesQuery(urls.length)}`,
+				...urls.flatMap((url, i) => ['-f', `u${i}=${url}`])
+			];
+			const response = yield* Schema.decodeUnknownEffect(PrStatesResponse)(
+				yield* run(repo, args)
+			).pipe(Effect.mapError(unexpected(repo, args)));
+			return urls.flatMap((url, i): ReadonlyArray<readonly [string, PrState]> => {
+				const state = response.data[`p${i}`]?.state;
+				return state === undefined ? [] : [[url, PR_STATES[state]]];
+			});
+		});
+
+	const prStates = Effect.fn('Gh.prStates')(function* (
+		repo: GitRepo,
+		urls: ReadonlyArray<string>
+	) {
+		const prs = urls.flatMap((url) => {
+			const host = parsePrUrl(url)?.host;
+			return host === undefined ? [] : [{ url, host }];
+		});
+		const chunks = Object.entries(Arr.groupBy(prs, (pr) => pr.host)).flatMap(([host, onHost]) =>
+			Arr.chunksOf(
+				onHost.map((pr) => pr.url),
+				PR_STATES_CHUNK
+			).map((chunk) => ({ host, chunk }))
+		);
+		const states = yield* Effect.forEach(chunks, ({ host, chunk }) =>
+			prStatesChunk(repo, host, chunk)
+		);
+		return new Map(states.flat());
+	});
+
 	return Gh.of({
 		findPr,
 		createPr,
@@ -511,7 +599,8 @@ const make = Effect.gen(function* () {
 		submitReview,
 		findReview,
 		reviewThreads,
-		resolveThread
+		resolveThread,
+		prStates
 	});
 });
 
