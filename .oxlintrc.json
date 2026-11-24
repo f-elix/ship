@@ -11,5 +11,5 @@
 		],
 		"typescript/no-explicit-any": "warn"
 	},
-	"ignorePatterns": ["dist/**"]
+	"ignorePatterns": ["dist/**", "prototypes/**"]
 }
