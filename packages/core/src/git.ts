@@ -57,10 +57,19 @@ export interface GitShape {
 	 * whichever exists locally or on `origin`.
 	 */
 	readonly defaultBranch: (repo: GitRepo) => Effect.Effect<string, GitError>;
+	/**
+	 * The branch the checked-out branch is based on, and its PR's base: its upstream when
+	 * that is another branch (`git switch -c feature origin/develop`, or
+	 * `git branch -u origin/develop`), else the default branch.
+	 */
+	readonly baseBranch: (repo: GitRepo) => Effect.Effect<string, GitError>;
 	/** The checked-out branch, or `null` on a detached HEAD. */
 	readonly currentBranch: (repo: GitRepo) => Effect.Effect<string | null, GitError>;
 	readonly headSha: (repo: GitRepo) => Effect.Effect<GitSha, GitError>;
-	/** `merge-base HEAD <default>`, preferring `origin/<default>` over the local branch. */
+	/**
+	 * `merge-base HEAD <base>`, for the base `baseBranch` names: the upstream ref, or
+	 * `origin/<default>` over the local default branch.
+	 */
 	readonly baseSha: (repo: GitRepo) => Effect.Effect<GitSha, GitError>;
 	/** No staged, unstaged or untracked (and not ignored) changes. */
 	readonly isClean: (repo: GitRepo) => Effect.Effect<boolean, GitError>;
@@ -109,7 +118,10 @@ export interface GitShape {
 		repo: GitRepo,
 		options: { readonly base: GitSha; readonly message: string }
 	) => Effect.Effect<GitSha, GitError>;
-	/** `git push -u origin <branch>`. */
+	/**
+	 * `git push origin <branch>`, setting `origin/<branch>` as its upstream unless it has
+	 * one, so an upstream naming the base branch is kept.
+	 */
 	readonly push: (repo: GitRepo, branch: string) => Effect.Effect<void, GitError>;
 	/**
 	 * Pushes HEAD to branch `ref` of `remote`, a remote name or URL, without force and
@@ -361,6 +373,33 @@ const make = Effect.gen(function* () {
 		return (yield* defaultBranchRef(repo)).name;
 	});
 
+	/**
+	 * The checked-out branch's upstream, when it tracks another branch that still exists:
+	 * the branch's name on its remote and the ref to compare against.
+	 */
+	const upstreamBaseRef = Effect.fnUntraced(function* (repo: GitRepo) {
+		const branch = yield* currentBranch(repo);
+		if (branch === null) return null;
+		const [ref = '', remoteRef = ''] = (yield* runLine(repo, [
+			'for-each-ref',
+			'--format=%(upstream)%00%(upstream:remoteref)',
+			'--end-of-options',
+			`refs/heads/${branch}`
+		])).split('\0');
+		if (ref === '' || !remoteRef.startsWith('refs/heads/')) return null;
+		const name = remoteRef.slice('refs/heads/'.length);
+		if (name === branch || !(yield* refExists(repo, ref))) return null;
+		return { name, ref };
+	});
+
+	const baseBranchRef = Effect.fnUntraced(function* (repo: GitRepo) {
+		return (yield* upstreamBaseRef(repo)) ?? (yield* defaultBranchRef(repo));
+	});
+
+	const baseBranch = Effect.fn('Git.baseBranch')(function* (repo: GitRepo) {
+		return (yield* baseBranchRef(repo)).name;
+	});
+
 	const currentBranch = Effect.fn('Git.currentBranch')(function* (repo: GitRepo) {
 		const output = yield* runWith(repo, ['symbolic-ref', '--quiet', '--short', 'HEAD'], [0, 1]);
 		return output.exitCode === 0 ? output.stdout.trim() : null;
@@ -371,7 +410,7 @@ const make = Effect.gen(function* () {
 	});
 
 	const baseSha = Effect.fn('Git.baseSha')(function* (repo: GitRepo) {
-		const { ref } = yield* defaultBranchRef(repo);
+		const { ref } = yield* baseBranchRef(repo);
 		const args = ['merge-base', 'HEAD', ref];
 		return yield* toSha(repo, args, yield* runLine(repo, args));
 	});
@@ -492,7 +531,14 @@ const make = Effect.gen(function* () {
 	});
 
 	const push = Effect.fn('Git.push')(function* (repo: GitRepo, branch: string) {
-		yield* run(repo, ['push', '--quiet', '--set-upstream', 'origin', branch]);
+		const tracks = yield* succeeds(repo, [
+			'config',
+			'--get',
+			'--end-of-options',
+			`branch.${branch}.merge`
+		]);
+		const upstream = tracks ? [] : ['--set-upstream'];
+		yield* run(repo, ['push', '--quiet', ...upstream, '--end-of-options', 'origin', branch]);
 	});
 
 	const pushHead = Effect.fn('Git.pushHead')(function* (
@@ -572,6 +618,7 @@ const make = Effect.gen(function* () {
 		originUrl,
 		projectKey,
 		defaultBranch,
+		baseBranch,
 		currentBranch,
 		headSha,
 		baseSha,

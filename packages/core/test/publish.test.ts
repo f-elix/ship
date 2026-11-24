@@ -72,6 +72,21 @@ describe('prStep', () => {
 		)
 	);
 
+	it.effect('opens the PR against the base branch', () =>
+		withSteps(
+			Effect.gen(function* () {
+				yield* scriptText;
+				const recorded = yield* recordingKit;
+
+				yield* prStep.run(prInput({ squash: false }), recorded.kit);
+
+				const [pr] = yield* (yield* GhFake).prs;
+				expect(pr).toMatchObject({ head: 'feature', base: 'develop' });
+			}),
+			{ ...twoCommits, baseBranch: 'develop' }
+		)
+	);
+
 	it.effect('updates the branch PR a previous attempt opened instead of opening another', () =>
 		withSteps(
 			Effect.gen(function* () {

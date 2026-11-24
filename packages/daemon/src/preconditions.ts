@@ -105,7 +105,7 @@ export interface BranchRequest {
  * Checks that `ship checks` or `ship pr` can work on the caller's branch: as
  * `checkPreconditions`, except that the plan is optional and `ship pr` takes the default
  * config when the project has none. The run's range starts at the merge base of `HEAD`
- * and the default branch.
+ * and the base branch, see `Git.baseBranch`.
  *
  * Git failures past the first check are defects.
  */

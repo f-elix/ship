@@ -52,6 +52,60 @@ describe('Git', () => {
 		}).pipe(Effect.scoped, Effect.provide(GitLive))
 	);
 
+	it.effect('bases the branch on its upstream when that is another branch', () =>
+		Effect.gen(function* () {
+			const { git: run, repo } = yield* tempRepo;
+			const git = yield* Git;
+			run('switch', '--quiet', '-c', 'develop', 'main');
+			run('commit', '--quiet', '--allow-empty', '-m', 'Develop work');
+			run('push', '--quiet', '-u', 'origin', 'develop');
+			const develop = run('rev-parse', 'HEAD');
+
+			run('switch', '--quiet', '-c', 'topic', 'origin/develop');
+			run('commit', '--quiet', '--allow-empty', '-m', 'Topic work');
+			expect(yield* git.baseBranch(repo)).toBe('develop');
+			expect(yield* git.baseSha(repo)).toBe(develop);
+
+			// Pushing keeps the upstream, so the base survives the first push.
+			yield* git.push(repo, 'topic');
+			expect(run('rev-parse', '--abbrev-ref', 'topic@{upstream}')).toBe('origin/develop');
+			expect(yield* git.baseBranch(repo)).toBe('develop');
+
+			// Tracking its own name on origin falls back to the default branch.
+			run('branch', '--quiet', '-u', 'origin/topic');
+			expect(yield* git.baseBranch(repo)).toBe('main');
+		}).pipe(Effect.scoped, Effect.provide(GitLive))
+	);
+
+	it.effect('falls back to the default branch without an upstream or when it is gone', () =>
+		Effect.gen(function* () {
+			const { git: run, repo } = yield* tempRepo;
+			const git = yield* Git;
+			expect(yield* git.baseBranch(repo)).toBe('main');
+
+			run('push', '--quiet', 'origin', 'main:gone');
+			run('fetch', '--quiet', 'origin');
+			run('branch', '--quiet', '-u', 'origin/gone');
+			run('push', '--quiet', 'origin', '--delete', 'gone');
+			run('fetch', '--quiet', '--prune', 'origin');
+			expect(yield* git.baseBranch(repo)).toBe('main');
+		}).pipe(Effect.scoped, Effect.provide(GitLive))
+	);
+
+	it.effect('bases the branch on a local upstream branch', () =>
+		Effect.gen(function* () {
+			const { git: run, repo } = yield* tempRepoWithoutOrigin;
+			const git = yield* Git;
+			run('switch', '--quiet', '-c', 'develop', 'main');
+			run('commit', '--quiet', '--allow-empty', '-m', 'Develop work');
+			const develop = run('rev-parse', 'HEAD');
+			run('switch', '--quiet', '--track', '-c', 'topic', 'develop');
+			run('commit', '--quiet', '--allow-empty', '-m', 'Topic work');
+			expect(yield* git.baseBranch(repo)).toBe('develop');
+			expect(yield* git.baseSha(repo)).toBe(develop);
+		}).pipe(Effect.scoped, Effect.provide(GitLive))
+	);
+
 	it.effect('falls back to main or master without origin, and the root as project key', () =>
 		Effect.gen(function* () {
 			const { work, git: run, repo } = yield* tempRepoWithoutOrigin;

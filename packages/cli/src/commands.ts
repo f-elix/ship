@@ -344,7 +344,7 @@ const checks = Command.make(
 	}, Effect.scoped)
 ).pipe(
 	Command.withDescription(
-		`Run the checks on the files the branch changed since it left the default branch, fix failing ones, and commit the fixes. Needs a clean tree on a feature branch. ${STREAMS}`
+		`Run the checks on the files the branch changed since it left its base branch, fix failing ones, and commit the fixes. Needs a clean tree on a feature branch. ${STREAMS}`
 	)
 );
 

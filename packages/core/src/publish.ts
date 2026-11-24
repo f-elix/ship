@@ -49,7 +49,7 @@ const publish = (
 			yield* git.squash(input, { base: input.baseSha, message: squashMessage });
 		}
 		yield* git.push(input, input.branch);
-		const base = yield* git.defaultBranch(input);
+		const base = yield* git.baseBranch(input);
 		const context = yield* agentContext(input);
 		const result = yield* pr.open({
 			repo: { cwd: input.cwd, env: input.env },

@@ -69,6 +69,8 @@ export interface FakeGitState {
 	readonly repoRoot: string;
 	readonly originUrl: string | null;
 	readonly defaultBranch: string;
+	/** What `baseBranch` returns; `defaultBranch` when absent. */
+	readonly baseBranch?: string;
 	readonly branch: string | null;
 	readonly baseSha: GitSha;
 	readonly headSha: GitSha;
@@ -170,6 +172,8 @@ const makeGitFake = (initial: Partial<FakeGitState>) =>
 					projectKeyOf({ remoteUrl: s.originUrl, repoRoot: s.repoRoot })
 				),
 			defaultBranch: () => Effect.map(read('defaultBranch'), (s) => s.defaultBranch),
+			baseBranch: () =>
+				Effect.map(read('baseBranch'), (s) => s.baseBranch ?? s.defaultBranch),
 			currentBranch: () => Effect.map(read('currentBranch'), (s) => s.branch),
 			headSha: () => Effect.map(read('headSha'), (s) => s.headSha),
 			baseSha: () => Effect.map(read('baseSha'), (s) => s.baseSha),
