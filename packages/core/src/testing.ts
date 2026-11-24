@@ -41,6 +41,7 @@ import {
 	GhError,
 	type CreatePrInput,
 	type GhShape,
+	type PrState,
 	type ReviewThread,
 	type SubmitReviewInput
 } from './gh.ts';
@@ -509,6 +510,8 @@ export interface FakePr extends CreatePrInput {
 	readonly maintainerCanModify?: boolean;
 	/** The repository of the PR's branch; the PR's own repository when absent. */
 	readonly headRepository?: { readonly owner: string; readonly name: string } | null;
+	/** Where the PR stands; `open` when absent. */
+	readonly state?: PrState;
 }
 
 /** A review thread in the fake GitHub, resolved or not. */
@@ -555,6 +558,10 @@ export interface GhFakeShape {
 	readonly afterResolve: (hook: Effect.Effect<void>) => Effect.Effect<void>;
 	/** Every `resolveThread` call's thread id, in order, including repeats. */
 	readonly resolveCalls: Effect.Effect<ReadonlyArray<string>>;
+	/** Merges or closes a PR, or reopens it, as someone on GitHub would. */
+	readonly setState: (url: string, state: PrState) => Effect.Effect<void>;
+	/** Lists the URLs that each `prStates` call asked for, in call order. */
+	readonly prStatesCalls: Effect.Effect<ReadonlyArray<ReadonlyArray<string>>>;
 	/** Makes `method` fail with a `GhError` carrying `stderr`, until cleared with `succeed`. */
 	readonly fail: (method: keyof GhShape, stderr: string) => Effect.Effect<void>;
 	readonly succeed: (method: keyof GhShape) => Effect.Effect<void>;
@@ -570,6 +577,7 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 			const threads = yield* Ref.make<ReadonlyArray<FakeThread>>([]);
 			const resolveHook = yield* Ref.make<Effect.Effect<void>>(Effect.void);
 			const resolveCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+			const prStatesCalls = yield* Ref.make<ReadonlyArray<ReadonlyArray<string>>>([]);
 
 			const addThread: GhFakeShape['addThread'] = (thread) =>
 				Ref.modify(threads, (current): [FakeThread, ReadonlyArray<FakeThread>] => {
@@ -710,6 +718,19 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 							yield* Effect.flatten(Ref.get(resolveHook));
 						})
 					),
+				prStates: (_repo, urls) =>
+					Effect.andThen(guard('prStates'), () =>
+						Effect.gen(function* () {
+							yield* Ref.update(prStatesCalls, (current) => [...current, urls]);
+							const current = yield* Ref.get(prs);
+							return new Map(
+								urls.flatMap((url): ReadonlyArray<readonly [string, PrState]> => {
+									const pr = current.find((candidate) => candidate.url === url);
+									return pr === undefined ? [] : [[url, pr.state ?? 'open']];
+								})
+							);
+						})
+					),
 				findReview: (_repo, { prUrl, marker }) =>
 					Effect.andThen(guard('findReview'), () =>
 						Effect.map(
@@ -732,6 +753,8 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 				addThread,
 				afterResolve: (hook) => Ref.set(resolveHook, hook),
 				resolveCalls: Ref.get(resolveCalls),
+				setState: (url, state) => update(url, (pr) => ({ ...pr, state })),
+				prStatesCalls: Ref.get(prStatesCalls),
 				fail: (method, stderr) =>
 					Ref.update(failures, (current) => ({
 						...current,

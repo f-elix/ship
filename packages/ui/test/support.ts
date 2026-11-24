@@ -1,11 +1,12 @@
 /**
  * Fixture runs, and the inbox over a fake daemon: real `ShipRpcs` handlers over
- * in-memory runs, reached through `RpcTest`'s in-memory client, plus fake git and an
- * in-memory archive.
+ * in-memory runs, reached through `RpcTest`'s in-memory client, plus fake git, an
+ * in-memory archive and a fake GitHub.
  */
 import { Archive } from '#lib/server/archive.ts';
 import { type ArchiveMarks, DeliverableId } from '#lib/server/deliverables.ts';
 import { Inbox, make as makeInbox } from '#lib/server/inbox.ts';
+import { make as makePrStates, PrStates } from '#lib/server/pr-states.ts';
 import {
 	type FixRunInfo,
 	GitSha,
@@ -25,7 +26,7 @@ import {
 	SnapshotNotResumable
 } from '@ship/core/contract';
 import { FindingId, type Severity, type VerifiedFinding } from '@ship/core/finding';
-import { type FakeGitState, GitFake } from '@ship/core/testing';
+import { type FakeGitState, GhFake, GitFake } from '@ship/core/testing';
 import { DaemonClient } from '@ship/daemon/client';
 import { Context, DateTime, Effect, Layer, PubSub, Ref, Stream } from 'effect';
 import { RpcTest } from 'effect/rpc';
@@ -270,18 +271,26 @@ const daemonFake = Layer.unwrap(
 	})
 );
 
+// --- The inbox ---
+
 /**
- * The inbox's real `make` over the fake daemon, fake git and in-memory archive marks.
- * The fakes stay in context, for tests to drive and inspect.
+ * The fakes the inbox runs over: the fake daemon, fake git, in-memory archive marks, and
+ * the real `PrStates` over the fake GitHub. Each fake stays in context, for tests to drive
+ * and inspect.
  */
-export const inboxTest = (
+export const inboxFakes = (
 	options: { readonly marks?: ArchiveMarks; readonly git?: Partial<FakeGitState> } = {}
 ) =>
-	Layer.effect(Inbox, makeInbox).pipe(
-		Layer.provideMerge(
-			Layer.mergeAll(daemonFake, GitFake.layer(options.git), Archive.layerTest(options.marks))
-		)
+	Layer.mergeAll(
+		daemonFake,
+		GitFake.layer(options.git),
+		Archive.layerTest(options.marks),
+		Layer.effect(PrStates, makePrStates).pipe(Layer.provideMerge(GhFake.layer))
 	);
+
+/** The inbox's real `make` over {@link inboxFakes}, which stay in context. */
+export const inboxTest = (options?: Parameters<typeof inboxFakes>[0]) =>
+	Layer.effect(Inbox, makeInbox).pipe(Layer.provideMerge(inboxFakes(options)));
 
 /** Provides {@link inboxTest} to `effect`. */
 export const withInboxTest =

@@ -7,6 +7,7 @@ import {
 	BUILTIN_SKILLS_DIR,
 	FindingId,
 	Gh,
+	GhError,
 	parsePrUrl,
 	Pr,
 	prRepoKey,
@@ -577,6 +578,66 @@ esac
 			expect(call).toMatch(/^api graphql --hostname github\.example\.com -f query=mutation/u);
 			expect(call).toContain('resolveReviewThread(input: { threadId: $threadId })');
 			expect(call).toMatch(/-f threadId=PRRT_open$/u);
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('reads PR states in one GraphQL call, leaving out URLs that name no PR', () =>
+		Effect.gen(function* () {
+			// What GitHub answers: `null` for a URL that names nothing, `{}` for an issue.
+			const { repo, argv } = yield* listingGh(
+				'{"data":{"p0":{"url":"https://github.example.com/o/r/pull/1","state":"MERGED"},"p1":{"url":"https://github.example.com/o/r/pull/2","state":"OPEN"},"p2":{"url":"https://github.example.com/o/r/pull/3","state":"CLOSED"},"p3":null,"p4":{}}}\n'
+			);
+			const gh = yield* Gh;
+			const urls = [1, 2, 3, 4].map((n) => `https://github.example.com/o/r/pull/${n}`);
+
+			const states = yield* gh.prStates(repo, [
+				...urls,
+				'https://github.example.com/o/r/issues/5'
+			]);
+
+			expect(states).toEqual(
+				new Map([
+					[urls[0], 'merged'],
+					[urls[1], 'open'],
+					[urls[2], 'closed']
+				])
+			);
+			const call = argv();
+			expect(call).toMatch(/^api graphql --hostname github\.example\.com -f query=query\(/u);
+			expect(call).toContain('p0: resource(url: $u0) { ... on PullRequest { url state } }');
+			// The URLs are variables, never part of the query.
+			expect(call).toMatch(
+				/ -f u0=https:\/\/github\.example\.com\/o\/r\/pull\/1 -f u1=.* -f u4=https:\/\/github\.example\.com\/o\/r\/issues\/5$/u
+			);
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('reads more than 50 PR states in calls of 50', () =>
+		Effect.gen(function* () {
+			const { repo, argv } = yield* listingGh('{"data":{}}\n');
+			const gh = yield* Gh;
+			const urls = Array.from({ length: 51 }, (_, i) => `https://github.com/o/r/pull/${i}`);
+
+			yield* gh.prStates(repo, urls);
+
+			// The query spans lines, so each call starts at its `api graphql`.
+			const calls = argv().split(/^(?=api graphql )/mu);
+			expect(calls).toHaveLength(2);
+			expect(calls[0]).toContain(' -f u49=https://github.com/o/r/pull/49\n');
+			expect(calls[0]).not.toContain('$u50');
+			expect(calls[1]).toMatch(/ -f u0=https:\/\/github\.com\/o\/r\/pull\/50$/u);
+		}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
+
+	it.effect('fails with GhError when GitHub answers a PR state it does not know', () =>
+		Effect.gen(function* () {
+			const { repo } = yield* listingGh('{"data":{"p0":{"state":"DRAFT"}}}\n');
+			const gh = yield* Gh;
+
+			const failed = yield* Effect.flip(gh.prStates(repo, ['https://github.com/o/r/pull/1']));
+
+			expect(failed).toBeInstanceOf(GhError);
+			expect(failed.stderr).toMatch(/^Unexpected output: /u);
 		}).pipe(Effect.scoped, Effect.provide(GhLive))
 	);
 

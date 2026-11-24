@@ -7,7 +7,8 @@ import {
 	summarize,
 	withRun,
 	type ArchiveMarks,
-	type Deliverable
+	type Deliverable,
+	type KnownPrStates
 } from '#lib/server/deliverables.ts';
 import { describe, expect, it } from '@effect/vitest';
 import { ReviewId, type RunEvent, type RunInfo } from '@ship/core/contract';
@@ -27,6 +28,7 @@ import {
 } from './support.ts';
 
 const NO_MARKS: ArchiveMarks = new Map();
+const NO_PR_STATES: KnownPrStates = new Map();
 const PR_ID = DeliverableId.make(`pr:${PR_URL}`);
 const REVIEW = ReviewId.make('review-1');
 
@@ -36,7 +38,8 @@ const only = (runs: ReadonlyArray<RunInfo>): Deliverable => {
 	return deliverable!;
 };
 
-const summaryOf = (runs: ReadonlyArray<RunInfo>, marks = NO_MARKS) => summarize(only(runs), marks);
+const summaryOf = (runs: ReadonlyArray<RunInfo>, marks = NO_MARKS, prStates = NO_PR_STATES) =>
+	summarize(only(runs), marks, prStates);
 
 describe('deliverablesOf', () => {
 	it('groups the runs about one PR, newest first', () => {
@@ -144,13 +147,13 @@ describe('withRun', () => {
 		const archived: ArchiveMarks = new Map([
 			[before.deliverables[0]!.id, { archived: true, at: at(5) }]
 		]);
-		expect(summarize(before.deliverables[0]!, archived).stage).toBe('closed');
+		expect(summarize(before.deliverables[0]!, archived, NO_PR_STATES).stage).toBe('closed');
 
 		// The run reports the PR it opened without its update time moving past the mark.
 		const after = withRun(before, { ...ship, prUrl: PR_URL });
 
 		expect(ids(after.deliverables)).toEqual([FEATURE_ID]);
-		expect(summarize(after.deliverables[0]!, archived)).toMatchObject({
+		expect(summarize(after.deliverables[0]!, archived, NO_PR_STATES)).toMatchObject({
 			stage: 'closed',
 			prUrl: PR_URL
 		});
@@ -289,6 +292,68 @@ describe('summarize', () => {
 		const archived: ArchiveMarks = new Map([[FEATURE_ID, { archived: true, at: at(5) }]]);
 
 		expect(summaryOf([run], archived).stage).toBe('working');
+	});
+
+	it('closes a deliverable whose PR was merged', () => {
+		const merged: KnownPrStates = new Map([[PR_URL, 'merged']]);
+
+		expect(summaryOf([shipRun(1, { prUrl: PR_URL })], NO_MARKS, merged)).toMatchObject({
+			stage: 'closed',
+			tone: 'neutral',
+			tag: 'merged',
+			headline: 'PR merged.',
+			actions: ['unarchive']
+		});
+	});
+
+	it('closes a deliverable whose PR was closed, whatever its latest run left', () => {
+		const closed: KnownPrStates = new Map([[PR_URL, 'closed']]);
+
+		expect(
+			summaryOf(
+				[shipRun(1, { prUrl: PR_URL }), fixRun(2, { status: 'failed' })],
+				NO_MARKS,
+				closed
+			)
+		).toMatchObject({ stage: 'closed', tag: 'closed', headline: 'PR closed.' });
+	});
+
+	it('reopens a merged PR’s deliverable on an unarchive newer than its runs', () => {
+		const merged: KnownPrStates = new Map([[PR_URL, 'merged']]);
+		const unarchived: ArchiveMarks = new Map([[FEATURE_ID, { archived: false, at: at(5) }]]);
+		const run = shipRun(1, { prUrl: PR_URL });
+
+		expect(summaryOf([run], unarchived, merged)).toMatchObject({
+			stage: 'ready',
+			tag: 'merged',
+			headline: 'PR merged.'
+		});
+		// A run after the unarchive closes it again.
+		expect(summaryOf([run, fixRun(6)], unarchived, merged).stage).toBe('closed');
+	});
+
+	it('never closes a deliverable ship works on, even with its PR merged', () => {
+		const merged: KnownPrStates = new Map([[PR_URL, 'merged']]);
+		const run = shipRun(1, { prUrl: PR_URL, status: 'running', state: 'review.running' });
+
+		expect(summaryOf([run], NO_MARKS, merged)).toMatchObject({
+			stage: 'working',
+			headline: 'Reviewing.'
+		});
+	});
+
+	it('keeps an open PR, or one of unknown state, where its runs put it', () => {
+		const open: KnownPrStates = new Map([[PR_URL, 'open']]);
+		const elsewhere: KnownPrStates = new Map([['https://github.com/o/r/pull/1', 'merged']]);
+		const run = shipRun(1, { prUrl: PR_URL });
+		const expected = {
+			stage: 'ready',
+			tag: 'PR open',
+			headline: 'The PR is up, with no finding left.'
+		};
+
+		expect(summaryOf([run], NO_MARKS, open)).toMatchObject(expected);
+		expect(summaryOf([run], NO_MARKS, elsewhere)).toMatchObject(expected);
 	});
 });
 

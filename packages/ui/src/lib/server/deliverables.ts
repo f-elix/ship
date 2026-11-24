@@ -13,6 +13,7 @@ import {
 } from '@ship/core/contract';
 import { plural } from '@ship/core/event-lines';
 import type { FindingId, VerifiedFinding } from '@ship/core/finding';
+import type { PrState } from '@ship/core/gh';
 import { parsePrUrl } from '@ship/core/pr-url';
 import { DateTime, Schema } from 'effect';
 
@@ -28,8 +29,9 @@ export type DeliverableId = typeof DeliverableId.Type;
 
 /**
  * Where a deliverable stands for the developer: ship needs a decision, produced something
- * to look at, or is still working; or it is closed, because the developer archived it or
- * because it was cancelled before producing anything.
+ * to look at, or is still working; or it is closed, because the developer archived it,
+ * because it was cancelled before producing anything, or because its PR was merged or
+ * closed.
  */
 export type Stage = 'decide' | 'ready' | 'working' | 'closed';
 
@@ -59,6 +61,12 @@ export interface ArchiveMark {
 
 /** Every deliverable's latest {@link ArchiveMark}, by id. */
 export type ArchiveMarks = ReadonlyMap<DeliverableId, ArchiveMark>;
+
+/**
+ * Maps each deliverable's `prUrl` to the state that GitHub last gave for the PR. A PR that
+ * is missing from it has no known state, and its deliverable stands where its runs put it.
+ */
+export type KnownPrStates = ReadonlyMap<string, PrState>;
 
 /** The runs that made one deliverable, newest first, and what they were about. */
 export interface Deliverable {
@@ -341,23 +349,41 @@ const produced = (run: RunInfo): boolean => {
 const isAbandoned = (deliverable: Deliverable): boolean =>
 	latestRun(deliverable).status === 'cancelled' && !deliverable.runs.some(produced);
 
+/** Returns the PR's known state when it is merged or closed, else `null`. */
+const endedPr = (
+	deliverable: Deliverable,
+	prStates: KnownPrStates
+): Exclude<PrState, 'open'> | null => {
+	const state = deliverable.prUrl === null ? undefined : prStates.get(deliverable.prUrl);
+	return state === 'merged' || state === 'closed' ? state : null;
+};
+
 /**
  * Whether the deliverable is archived. The developer's latest mark decides until a run
- * changes after it; an abandoned deliverable is archived without one.
+ * changes after it; a deliverable that is abandoned, or whose PR was merged or closed, is
+ * archived without one.
  */
-const isArchived = (deliverable: Deliverable, marks: ArchiveMarks): boolean => {
+const isArchived = (
+	deliverable: Deliverable,
+	marks: ArchiveMarks,
+	prStates: KnownPrStates
+): boolean => {
 	const mark = marks.get(deliverable.id);
 	if (mark !== undefined && millis(mark.at) >= millis(lastActivity(deliverable))) {
 		return mark.archived;
 	}
-	return isAbandoned(deliverable);
+	return isAbandoned(deliverable) || endedPr(deliverable, prStates) !== null;
 };
 
 /** Where the deliverable stands; see {@link Stage}. A deliverable ship works on is never closed. */
-export const stageOf = (deliverable: Deliverable, marks: ArchiveMarks): Stage => {
+export const stageOf = (
+	deliverable: Deliverable,
+	marks: ArchiveMarks,
+	prStates: KnownPrStates
+): Stage => {
 	const latest = latestRun(deliverable);
 	if (isActive(latest)) return 'working';
-	if (isArchived(deliverable, marks)) return 'closed';
+	if (isArchived(deliverable, marks, prStates)) return 'closed';
 	switch (latest.status) {
 		case 'escalated':
 		case 'failed':
@@ -452,10 +478,15 @@ const outcome = (run: RunInfo): string => {
 	}
 };
 
-/** One sentence about the deliverable's output, from its latest run. */
-export const headlineOf = (deliverable: Deliverable): string => {
+/**
+ * One sentence about the deliverable's output: what its latest run is doing, else that its
+ * PR was merged or closed, else what its latest run produced.
+ */
+export const headlineOf = (deliverable: Deliverable, prStates: KnownPrStates): string => {
 	const latest = latestRun(deliverable);
 	if (isActive(latest)) return activity(latest);
+	const ended = endedPr(deliverable, prStates);
+	if (ended !== null) return `PR ${ended}.`;
 	switch (latest.status) {
 		case 'interrupted':
 			return 'Interrupted when the daemon stopped. Resume to continue where it was.';
@@ -475,13 +506,18 @@ export const headlineOf = (deliverable: Deliverable): string => {
 	}
 };
 
-const toneAndTag = (deliverable: Deliverable, stage: Stage): readonly [Tone, string] => {
+const toneAndTag = (
+	deliverable: Deliverable,
+	stage: Stage,
+	prStates: KnownPrStates
+): readonly [Tone, string] => {
 	const latest = latestRun(deliverable);
+	const ended = endedPr(deliverable, prStates);
 	switch (stage) {
 		case 'working':
 			return ['live', latest.status === 'waiting' ? 'waiting' : 'working'];
 		case 'closed':
-			return ['neutral', 'closed'];
+			return ['neutral', ended ?? 'closed'];
 		case 'decide':
 			if (latest.status === 'failed' || latest.status === 'interrupted') {
 				return ['error', latest.status];
@@ -502,7 +538,7 @@ const toneAndTag = (deliverable: Deliverable, stage: Stage): readonly [Tone, str
 				case 'recheck':
 					return ['ok', 'rechecked'];
 				default:
-					return ['ok', deliverable.prUrl === null ? 'done' : 'PR open'];
+					return ['ok', deliverable.prUrl === null ? 'done' : (ended ?? 'PR open')];
 			}
 	}
 };
@@ -573,10 +609,17 @@ const titleOf = (deliverable: Deliverable): string => {
 	return deliverable.id.slice(deliverable.id.indexOf(':') + 1);
 };
 
-/** The deliverable as the inbox lists it, given the developer's archive marks. */
-export const summarize = (deliverable: Deliverable, marks: ArchiveMarks): DeliverableSummary => {
-	const stage = stageOf(deliverable, marks);
-	const [tone, tag] = toneAndTag(deliverable, stage);
+/**
+ * Summarizes the deliverable as the inbox lists it, given the developer's archive marks and
+ * the known PR states.
+ */
+export const summarize = (
+	deliverable: Deliverable,
+	marks: ArchiveMarks,
+	prStates: KnownPrStates
+): DeliverableSummary => {
+	const stage = stageOf(deliverable, marks, prStates);
+	const [tone, tag] = toneAndTag(deliverable, stage, prStates);
 	return {
 		id: deliverable.id,
 		projectName: lastSegment(deliverable.projectKey),
@@ -586,7 +629,7 @@ export const summarize = (deliverable: Deliverable, marks: ArchiveMarks): Delive
 		stage,
 		tone,
 		tag,
-		headline: headlineOf(deliverable),
+		headline: headlineOf(deliverable, prStates),
 		updatedAt: DateTime.formatIso(lastActivity(deliverable)),
 		actions: offersOf(deliverable, stage).map((offer) => offer.action)
 	};

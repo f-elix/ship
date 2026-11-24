@@ -204,6 +204,7 @@ describe('detailOf', () => {
 			{ info: shipped, events: shipEvents }
 		],
 		new Map(),
+		new Map(),
 		null
 	);
 
@@ -238,6 +239,7 @@ describe('detailOf', () => {
 		const after = detailOf(
 			only([later, rechecked, shipped]),
 			[{ info: later, events: [] }],
+			new Map(),
 			new Map(),
 			null
 		);

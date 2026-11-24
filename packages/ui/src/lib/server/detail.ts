@@ -14,6 +14,7 @@ import {
 	type ArchiveMarks,
 	type Deliverable,
 	type DeliverableSummary,
+	type KnownPrStates,
 	type OpenFindings,
 	type RunWithEvents
 } from './deliverables.ts';
@@ -137,6 +138,7 @@ export const detailOf = (
 	deliverable: Deliverable,
 	runs: ReadonlyArray<RunWithEvents>,
 	marks: ArchiveMarks,
+	prStates: KnownPrStates,
 	files: ReadonlyArray<ChangedFile> | null
 ): DeliverableDetail => {
 	const events = eventsOf(runs);
@@ -162,7 +164,7 @@ export const detailOf = (
 	}
 	const latest = deliverable.runs[0]!;
 	return {
-		summary: summarize(deliverable, marks),
+		summary: summarize(deliverable, marks, prStates),
 		findings: openFindings(runs),
 		resolved: [...resolved.values()],
 		disproved,

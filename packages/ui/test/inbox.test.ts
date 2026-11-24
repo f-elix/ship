@@ -1,5 +1,5 @@
 import { DeliverableId } from '#lib/server/deliverables.ts';
-import { Inbox } from '#lib/server/inbox.ts';
+import { Inbox, make as makeInbox } from '#lib/server/inbox.ts';
 import { describe, expect, it } from '@effect/vitest';
 import {
 	InvalidRunStatus,
@@ -10,13 +10,16 @@ import {
 	RunNotFound,
 	SnapshotNotResumable
 } from '@ship/core/contract';
-import { Deferred, Effect, Fiber, Stream } from 'effect';
+import { GhFake } from '@ship/core/testing';
+import { Deferred, Effect, Fiber, Layer, Stream } from 'effect';
+import { TestClock } from 'effect/testing';
 import {
 	at,
 	DaemonFake,
 	FEATURE_ID,
 	finding,
 	fixRun,
+	inboxFakes,
 	PR_URL,
 	PROJECT,
 	reviewRun,
@@ -159,6 +162,100 @@ describe('Inbox.deliverables', () => {
 
 			expect(before![0]!.stage).toBe('ready');
 			expect(after![0]!).toMatchObject({ stage: 'closed', actions: ['unarchive'] });
+		}).pipe(withInboxTest())
+	);
+});
+
+/** Opens a PR in the fake GitHub, as ship would have, and returns its URL. */
+const openPr = Effect.gen(function* () {
+	const github = yield* GhFake;
+	const pr = yield* github.addPr({
+		base: 'main',
+		head: 'feature',
+		title: 'Add it',
+		body: '',
+		draft: false
+	});
+	return pr.url;
+});
+
+/**
+ * Moves the test clock on by `seconds`, a tenth of a second at a time, so that each timer
+ * the inbox starts on the way fires in order, as it would on a real clock.
+ */
+const advance = (seconds: number) =>
+	Effect.repeat(TestClock.adjust('100 millis'), { times: seconds * 10 - 1 });
+
+// The test clock drives the 60-second reads and the wait after a run changes.
+describe('Inbox PR states', () => {
+	it.effect('reads the PR states when it starts, then every 60 seconds', () =>
+		Effect.gen(function* () {
+			const daemon = yield* DaemonFake;
+			const github = yield* GhFake;
+			const pr = yield* openPr;
+			yield* daemon.put(shipRun(1, { prUrl: pr }), [created]);
+
+			// The inbox starts once the PR's run exists.
+			yield* Effect.gen(function* () {
+				const inbox = yield* Inbox;
+				yield* advance(1);
+				expect(yield* github.prStatesCalls).toEqual([[pr]]);
+
+				yield* github.setState(pr, 'merged');
+				yield* advance(58);
+				expect(yield* github.prStatesCalls).toHaveLength(1);
+				yield* advance(2);
+				expect(yield* github.prStatesCalls).toHaveLength(2);
+				expect((yield* inbox.deliverable(FEATURE_ID)).summary).toMatchObject({
+					stage: 'closed',
+					tag: 'merged'
+				});
+			}).pipe(Effect.provide(Layer.effect(Inbox, makeInbox)));
+		}).pipe(Effect.provide(inboxFakes()))
+	);
+
+	it.effect('reads the PR states soon after a run of a deliverable with a PR changes', () =>
+		Effect.gen(function* () {
+			const inbox = yield* Inbox;
+			const daemon = yield* DaemonFake;
+			const github = yield* GhFake;
+			const pr = yield* openPr;
+			yield* Effect.forkChild(Stream.runDrain(inbox.deliverables));
+			yield* advance(1);
+
+			yield* daemon.put(shipRun(1, { prUrl: pr, status: 'running', state: 'pr' }));
+			yield* daemon.put(shipRun(1, { prUrl: pr }));
+			yield* advance(1);
+			expect(yield* github.prStatesCalls).toEqual([]);
+			yield* advance(2);
+			// The two updates of the run's burst give one read.
+			expect(yield* github.prStatesCalls).toEqual([[pr]]);
+
+			// A run of a deliverable without a PR gives no read, though a PR is known.
+			yield* daemon.put(shipRun(2, { planDir: '/plans/other', branch: 'other' }));
+			yield* advance(5);
+			expect(yield* github.prStatesCalls).toHaveLength(1);
+		}).pipe(withInboxTest())
+	);
+
+	it.effect('re-emits the list when a PR is merged on GitHub', () =>
+		Effect.gen(function* () {
+			const inbox = yield* Inbox;
+			const daemon = yield* DaemonFake;
+			const github = yield* GhFake;
+			const pr = yield* openPr;
+			yield* daemon.put(shipRun(1, { prUrl: pr }), [created]);
+
+			const fiber = yield* Effect.forkChild(
+				Stream.runCollect(Stream.take(inbox.deliverables, 2))
+			);
+			yield* advance(1);
+			yield* github.setState(pr, 'merged');
+			yield* advance(60);
+			const [before, after] = yield* Fiber.join(fiber);
+
+			expect(before![0]!).toMatchObject({ stage: 'ready', tag: 'PR open' });
+			expect(after![0]!).toMatchObject({ stage: 'closed', tag: 'merged' });
 		}).pipe(withInboxTest())
 	);
 });
