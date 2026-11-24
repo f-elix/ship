@@ -3,3 +3,5 @@ dist/
 *.db
 *.db-*
 .DS_Store
+.svelte-kit/
+packages/ui/build/

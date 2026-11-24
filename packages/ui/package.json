@@ -1,0 +1,32 @@
+{
+	"name": "@ship/ui",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"imports": {
+		"#lib/*": "./src/lib/*"
+	},
+	"exports": {
+		"./handler": "./build/handler.js"
+	},
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings"
+	},
+	"dependencies": {
+		"@effect/platform-node": "4.1.4",
+		"@ship/core": "workspace:*",
+		"@ship/daemon": "workspace:*",
+		"effect": "4.1.4"
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-node": "6.0.5",
+		"@sveltejs/kit": "3.4.0",
+		"@sveltejs/vite-plugin-svelte": "7.3.2",
+		"svelte": "5.59.1",
+		"svelte-check": "4.7.8",
+		"vite": "8.3.8"
+	}
+}

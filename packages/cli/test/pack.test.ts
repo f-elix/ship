@@ -74,3 +74,9 @@ test('the commands do not load the daemon, the Agent SDK or sqlite', () => {
 	).toEqual([]);
 	expect(loaded).toContain('effect/cli');
 }, 60_000);
+
+test('the package ships the UI server that `ship ui` loads', () => {
+	const files = packedFiles();
+	expect(files).toContain('dist/ui/handler.js');
+	expect([...files].some((path) => path.startsWith('dist/ui/client/_app/immutable/'))).toBe(true);
+}, 60_000);

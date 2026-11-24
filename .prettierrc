@@ -4,6 +4,20 @@
 	"printWidth": 100,
 	"useTabs": true,
 	"tabWidth": 4,
-	"plugins": ["prettier-plugin-organize-imports"],
-	"organizeImportsSkipDestructiveCodeActions": true
+	"plugins": ["prettier-plugin-organize-imports", "prettier-plugin-svelte"],
+	"organizeImportsSkipDestructiveCodeActions": true,
+	"overrides": [
+		{
+			"files": "*.md",
+			"options": {
+				"embeddedLanguageFormatting": "off"
+			}
+		},
+		{
+			"files": "*.svelte",
+			"options": {
+				"parser": "svelte"
+			}
+		}
+	]
 }

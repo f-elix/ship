@@ -10,10 +10,16 @@ import { DaemonLauncher, Invocation } from './invocation.ts';
 
 /** A failure the CLI reports as `ship: <message>` on stderr, exiting 1. */
 export class ShipCliError extends Schema.TaggedError<ShipCliError>()('ShipCliError', {
-	message: Schema.String
+	message: Schema.String,
+	cause: Schema.optionalKey(Schema.Defect())
 }) {}
 
-export const cliError = (message: string) => new ShipCliError({ message });
+/**
+ * A `ShipCliError` saying `message`; `cause` keeps the error it wraps for whoever handles
+ * it. The CLI prints only the message.
+ */
+export const cliError = (message: string, options?: { readonly cause: unknown }) =>
+	new ShipCliError({ message, ...options });
 
 export type Rpc = DaemonClient['Service'];
 

@@ -16,7 +16,7 @@ import {
 	type ShipPaths
 } from '@ship/core';
 import { RunStore } from '@ship/store';
-import { Context, Deferred, Effect, FileSystem, Layer, Schedule, Schema } from 'effect';
+import { Context, Deferred, Effect, FileSystem, Layer, Random, Schedule, Schema } from 'effect';
 import type { PlatformError } from 'effect/PlatformError';
 import { HttpRouter } from 'effect/http';
 import { RpcSerialization, RpcServer } from 'effect/rpc';
@@ -67,7 +67,7 @@ const listensSoon = (path: string) =>
 
 /**
  * Makes this process the owner of ship's home, before it touches the run store or the
- * socket. The pid file is the lock. It is written to a file of this process's own, then
+ * socket. The pid file is the lock. It is written to a file of this claim's own, then
  * hard-linked into place, which is atomic and fails when the file exists, so of two daemons
  * starting at once only one gets it, and it never holds a partial pid. A pid file whose
  * process is gone, or never listens on the socket, was left by a daemon that died: it is
@@ -78,8 +78,11 @@ const claimHome = Effect.fnUntraced(function* (paths: ShipPaths) {
 	const fs = yield* FileSystem.FileSystem;
 	const running = new DaemonAlreadyRunning({ socket: paths.socket });
 	const content = `${process.pid}\n`;
-	const mine = `${paths.pidFile}.${process.pid}`;
-	const aside = `${paths.pidFile}.${process.pid}.stale`;
+	// Named per claim, not per process: two daemons in one process (as in tests) would
+	// otherwise share the file, and one's cleanup would delete it under the other.
+	const claim = (yield* Random.nextIntBetween(0, 0xffffff)).toString(16).padStart(6, '0');
+	const mine = `${paths.pidFile}.${process.pid}.${claim}`;
+	const aside = `${mine}.stale`;
 	/** Whether `effect` succeeded, `false` when it failed with `tag`. */
 	const succeeds = (
 		effect: Effect.Effect<unknown, PlatformError>,

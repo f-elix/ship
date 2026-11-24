@@ -12,6 +12,7 @@ import {
 	type RunNotFound,
 	type UnknownEvent
 } from '@ship/core/contract';
+import { makeEventFormatter } from '@ship/core/event-lines';
 import { readDaemonPid } from '@ship/daemon/client';
 import { Console, Effect, Option, Schema, Stream } from 'effect';
 import { Argument, Command, Flag } from 'effect/cli';
@@ -31,13 +32,8 @@ import { conventions } from './conventions.ts';
 import { setExitCode } from './exit-code.ts';
 import { init } from './init.ts';
 import { Invocation } from './invocation.ts';
-import {
-	exitCodeFor,
-	exitCodeForSummary,
-	makeEventFormatter,
-	runDetails,
-	runTable
-} from './render.ts';
+import { exitCodeFor, exitCodeForSummary, runDetails, runTable } from './render.ts';
+import { ui } from './ui.ts';
 
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 const encodeSummary = Schema.encodeSync(Summary);
@@ -599,6 +595,7 @@ export const ship = Command.make('ship').pipe(
 		status,
 		list,
 		logs,
+		ui,
 		daemon,
 		init,
 		conventions,
