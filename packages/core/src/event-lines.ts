@@ -16,11 +16,14 @@ export const shortSha = (sha: string) => sha.slice(0, 7);
 export const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`;
 /** Keeps event lines to one line; `ship logs --json` has the full text. */
 const firstLine = (text: string) => text.split('\n', 1)[0] ?? '';
-/** Notes the review threads a fix or recheck left out, written by someone who may not push. */
+/**
+ * Notes the review threads a fix or recheck left out, written by someone who may not push
+ * and is no trusted bot.
+ */
 const ignoredNote = (urls: ReadonlyArray<string>) =>
 	urls.length === 0
 		? ''
-		: `; ignored ${plural(urls.length, 'thread')} by authors who may not push`;
+		: `; ignored ${plural(urls.length, 'thread')} by authors who may not push and are no trusted bots`;
 const clock = (at: DateTime.Utc) => DateTime.formatIso(at).slice(11, 19);
 
 /**

@@ -4,3 +4,4 @@ packages/cli/schemas/
 prototypes/
 .svelte-kit/
 packages/ui/build/
+packages/core/test/fixtures/coderabbit/

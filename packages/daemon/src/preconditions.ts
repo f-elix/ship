@@ -470,7 +470,7 @@ const loadSource = Effect.fnUntraced(function* (
 				Effect.fail(
 					failed(
 						'github-failed',
-						`Could not read the review threads: ${error.message}`,
+						`Could not read the review threads or reviews: ${error.message}`,
 						error
 					)
 				)

@@ -82,7 +82,10 @@ export const RunEvent = Schema.TaggedUnion({
 		source: FindingsSource,
 		/** The must-fix findings and nits the run fixes or rechecks. */
 		findings: Schema.Array(VerifiedFinding),
-		/** The open review threads left out because their author may not push to the repository. */
+		/**
+		 * The open review threads left out because their author may not push to the
+		 * repository and is no trusted bot.
+		 */
 		ignoredThreads: Schema.Array(Url)
 	},
 	/**

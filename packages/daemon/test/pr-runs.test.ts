@@ -486,6 +486,38 @@ describe('recheck run', () => {
 		)
 	);
 
+	it.effect(
+		'reports a fixed finding that has no thread, such as a review-body comment, without resolving it',
+		() =>
+			withHarness(
+				Effect.gen(function* () {
+					const agent = yield* AgentFake;
+					const gh = yield* GhFake;
+					const first = yield* openThread(1);
+					yield* agent.script(
+						{ step: 'verify' },
+						verifierSays({ t1: 'fixed', t2: 'fixed' })
+					);
+					const state = yield* newRecheck({ t1: first });
+
+					const summary = yield* Effect.flatMap(
+						startRecheck(state),
+						(handle) => handle.await
+					);
+
+					expect(summary).toMatchObject({ status: 'done', resolvedThreads: [first] });
+					if (summary.kind !== 'recheck') throw new Error('Expected a recheck summary');
+					expect(
+						summary.findings.map(({ finding, status }) => [finding.id, status])
+					).toEqual([
+						['t1', 'fixed'],
+						['t2', 'fixed']
+					]);
+					expect(yield* gh.resolveCalls).toEqual([first]);
+				})
+			)
+	);
+
 	it.effect('resolves nothing with --local', () =>
 		withHarness(
 			Effect.gen(function* () {

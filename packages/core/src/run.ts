@@ -246,7 +246,10 @@ export const FixSummary = Schema.Struct({
 	prUrl: Url,
 	/** The must-fix findings and nits the fix agent was given. */
 	findings: Schema.Array(VerifiedFinding),
-	/** The open review threads left out because their author may not push to the repository. */
+	/**
+	 * The open review threads left out because their author may not push to the repository
+	 * and is no trusted bot.
+	 */
 	ignoredThreads: Schema.Array(Url),
 	/** The commits the run made, oldest first. */
 	commits: Schema.Array(GitSha),
@@ -272,7 +275,10 @@ export const RecheckSummary = Schema.Struct({
 	findings: Schema.Array(RecheckedFinding),
 	/** The review threads the run resolved on GitHub. */
 	resolvedThreads: Schema.Array(Schema.String),
-	/** The open review threads left out because their author may not push to the repository. */
+	/**
+	 * The open review threads left out because their author may not push to the repository
+	 * and is no trusted bot.
+	 */
 	ignoredThreads: Schema.Array(Url),
 	costUsd: CostUsd,
 	/** Why the run failed, when `status` is `failed`. */

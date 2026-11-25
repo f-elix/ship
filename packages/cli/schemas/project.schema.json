@@ -66,6 +66,15 @@
 			"description": "Ask Cloudflare Clef for the decisions that deterministic rules leave open: which reviewers and convention topics a change needs, the reviewer model for its risk, whether a must-fix is only a taste remark, how severe an unlabelled review thread is, and whether failing checks are unrelated to the change. Each falls back to the deterministic behaviour when Clef is off or unavailable; needs `ship auth cloudflare`",
 			"default": true
 		},
+		"trustedBots": {
+			"type": "array",
+			"items": {
+				"type": "string",
+				"minLength": 1
+			},
+			"description": "Bot accounts whose review comments `ship fix` and `ship recheck` act on, by login (e.g. `coderabbitai`). A bot may not push to the repository, so its comments are ignored unless listed here",
+			"default": []
+		},
 		"pr": {
 			"type": "object",
 			"properties": {

@@ -475,6 +475,7 @@ esac
 			readonly login: string | null;
 			readonly body: string;
 			readonly association?: string;
+			readonly bot?: boolean;
 		}> = [{ login: 'octocat', body: `Fix ${id}.` }]
 	) =>
 		JSON.stringify({
@@ -485,7 +486,13 @@ esac
 			line: id === 'PRRT_file' ? null : 3,
 			comments: {
 				nodes: comments.map((comment, index) => ({
-					author: comment.login === null ? null : { login: comment.login },
+					author:
+						comment.login === null
+							? null
+							: {
+									__typename: comment.bot === true ? 'Bot' : 'User',
+									login: comment.login
+								},
 					authorAssociation: comment.association ?? 'MEMBER',
 					body: comment.body,
 					url: `https://github.com/o/r/pull/7#discussion_r${id}${index}`
@@ -509,6 +516,14 @@ esac
 						thread('PRRT_file', {}, [
 							{ login: null, body: 'Split this file.', association: 'NONE' }
 						]),
+						thread('PRRT_bot', {}, [
+							{
+								login: 'coderabbitai',
+								body: 'Guard this.',
+								association: 'NONE',
+								bot: true
+							}
+						]),
 						thread('PRRT_empty', {}, []),
 						''
 					].join('\n')
@@ -527,6 +542,7 @@ esac
 						line: 3,
 						author: 'octocat',
 						authorCanWrite: true,
+						authorIsBot: false,
 						body: 'Fix this.',
 						url: 'https://github.com/o/r/pull/7#discussion_rPRRT_open0'
 					},
@@ -536,8 +552,19 @@ esac
 						line: null,
 						author: null,
 						authorCanWrite: false,
+						authorIsBot: false,
 						body: 'Split this file.',
 						url: 'https://github.com/o/r/pull/7#discussion_rPRRT_file0'
+					},
+					{
+						id: 'PRRT_bot',
+						path: 'src/a.ts',
+						line: 3,
+						author: 'coderabbitai',
+						authorCanWrite: false,
+						authorIsBot: true,
+						body: 'Guard this.',
+						url: 'https://github.com/o/r/pull/7#discussion_rPRRT_bot0'
 					}
 				]);
 				const call = argv();
@@ -678,8 +705,70 @@ esac
 	);
 
 	const MARKER = '<!-- ship-review: 20261120-100000-abcdef-r1 -->';
-	const listed = (id: number, body: string | null) =>
-		JSON.stringify({ html_url: `https://github.com/o/r/pull/7#pullrequestreview-${id}`, body });
+	const listed = (
+		id: number,
+		body: string | null,
+		user: { readonly login: string; readonly type: string } | null = {
+			login: 'octocat',
+			type: 'User'
+		},
+		state = 'COMMENTED'
+	) =>
+		JSON.stringify({
+			html_url: `https://github.com/o/r/pull/7#pullrequestreview-${id}`,
+			body,
+			state,
+			user
+		});
+
+	it.effect(
+		"lists a PR's undismissed reviews across every page, naming a bot without `[bot]`",
+		() =>
+			Effect.gen(function* () {
+				const { repo, argv } = yield* listingGh(
+					[
+						listed(1, 'Looks good.'),
+						listed(2, null, { login: 'coderabbitai[bot]', type: 'Bot' }),
+						// Page 2: a deleted account's review, and a dismissed one.
+						listed(3, 'Old.', null),
+						listed(
+							4,
+							'Wrong.',
+							{ login: 'coderabbitai[bot]', type: 'Bot' },
+							'DISMISSED'
+						),
+						''
+					].join('\n')
+				);
+				const gh = yield* Gh;
+
+				const reviews = yield* gh.reviews(repo, 'https://github.example.com/o/r/pull/7');
+
+				expect(reviews).toEqual([
+					{
+						author: 'octocat',
+						authorIsBot: false,
+						body: 'Looks good.',
+						url: 'https://github.com/o/r/pull/7#pullrequestreview-1'
+					},
+					{
+						author: 'coderabbitai',
+						authorIsBot: true,
+						body: '',
+						url: 'https://github.com/o/r/pull/7#pullrequestreview-2'
+					},
+					{
+						author: null,
+						authorIsBot: false,
+						body: 'Old.',
+						url: 'https://github.com/o/r/pull/7#pullrequestreview-3'
+					}
+				]);
+				expect(argv()).toBe(
+					'api --hostname github.example.com --paginate repos/o/r/pulls/7/reviews --jq .[] | {html_url, body, state, user: (.user | if . == null then null else {login, type} end)}'
+				);
+			}).pipe(Effect.scoped, Effect.provide(GhLive))
+	);
 
 	it.effect('finds the first review whose body holds the marker, across every page', () =>
 		Effect.gen(function* () {
@@ -702,8 +791,8 @@ esac
 			});
 
 			expect(url).toBe('https://github.com/o/r/pull/7#pullrequestreview-3');
-			expect(argv()).toBe(
-				'api --hostname github.example.com --paginate repos/o/r/pulls/7/reviews --jq .[] | {html_url, body}'
+			expect(argv()).toMatch(
+				/^api --hostname github\.example\.com --paginate repos\/o\/r\/pulls\/7\/reviews --jq /u
 			);
 		}).pipe(Effect.scoped, Effect.provide(GhLive))
 	);

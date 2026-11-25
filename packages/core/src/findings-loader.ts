@@ -1,12 +1,24 @@
 /**
- * Loads a findings source: the findings, the PR they are about and the review thread each
- * finding was posted as.
+ * Loads a findings source: the findings, the PR they are about and the open review thread
+ * of each finding that has one.
  */
 import { Effect, Schema } from 'effect';
 import { Clef, type ChoiceQuestion, type ClefScope } from './clef.ts';
+import {
+	isCodeRabbitComment,
+	parseCodeRabbitReviewBody,
+	reviewCommentProse
+} from './coderabbit.ts';
 import { FindingId, VerifiedFinding, type Severity } from './finding.ts';
 import { FINDING_MARKER, parseFindingMarker, type FindingsSource } from './findings-source.ts';
-import { Gh, type GhError, type PrDetails, type ReviewThread } from './gh.ts';
+import {
+	botLogin,
+	Gh,
+	type GhError,
+	type PrDetails,
+	type PrReview,
+	type ReviewThread
+} from './gh.ts';
 import type { GitRepo } from './git.ts';
 import { ChangeIntent } from './reviewers.ts';
 import type { ShipHome } from './ship-paths.ts';
@@ -21,9 +33,18 @@ const LABELS: Readonly<Record<string, Severity>> = {
 };
 const LABEL = /^\*\*(Must-fix|Tradeoff|Nit)\*\* /u;
 
-/** A thread's comment without ship's finding markers. */
+/** A bot's or CodeRabbit's comment, which may hold a prompt for agents. */
+const isBotWritten = (thread: ReviewThread) =>
+	thread.authorIsBot || isCodeRabbitComment(thread.body);
+
+/**
+ * A thread's comment without ship's finding markers. A bot's or CodeRabbit's comment is
+ * only its prose, without its rating or its prompt for agents.
+ */
 const commentText = (thread: ReviewThread): string =>
-	thread.body.replace(new RegExp(FINDING_MARKER.source, 'gu'), '').trim();
+	isBotWritten(thread)
+		? reviewCommentProse(thread.body)
+		: thread.body.replace(new RegExp(FINDING_MARKER.source, 'gu'), '').trim();
 
 /** The severity ship labelled a thread with when it posted it, or `null` for no label. */
 const threadLabel = (thread: ReviewThread): Severity | null => {
@@ -59,11 +80,15 @@ export const threadFinding = (
 export const LoadedFindings = Schema.Struct({
 	/** The must-fix findings and nits; tradeoffs are never fixed or rechecked. */
 	findings: Schema.Array(VerifiedFinding),
-	/** The open review thread of each finding that has one, by finding id. */
+	/**
+	 * The open review thread of each finding that has one, by finding id. A comment from a
+	 * review's body has none.
+	 */
 	threads: Schema.Record(Schema.String, Schema.String),
 	/**
 	 * The URLs of the open threads left out because their author may not push to the
-	 * repository: anyone can comment on a public PR, and ship would act on what they say.
+	 * repository and is no trusted bot: anyone can comment on a public PR, and ship would
+	 * act on what they say.
 	 */
 	ignoredThreads: Schema.Array(Schema.String),
 	/** What the change sets out to do: the stored review's intent, or the PR's description. */
@@ -103,11 +128,40 @@ const storedFinding = Effect.fnUntraced(function* (thread: ReviewThread) {
 	return review?.findings.find((finding) => finding.id === marker.findingId) ?? null;
 });
 
-/** Splits `threads` into those whose author may push to the repository and the rest's URLs. */
-const byTrust = (threads: ReadonlyArray<ReviewThread>) => ({
-	trusted: threads.filter((thread) => thread.authorCanWrite),
-	ignoredThreads: threads.filter((thread) => !thread.authorCanWrite).map((thread) => thread.url)
-});
+/**
+ * What loading a source reads from the config: whether Clef is on, and the bots whose
+ * review comments are trusted.
+ */
+export interface FindingsScope extends ClefScope {
+	readonly config: ClefScope['config'] & {
+		/** Bot logins, with or without GitHub's `[bot]` suffix, in any case. */
+		readonly trustedBots: ReadonlyArray<string>;
+	};
+}
+
+/**
+ * Whether `account` is one of the bots that `scope` trusts. The account must be a bot: a user may
+ * take a bot's login, but not its account type.
+ */
+const isTrustedBot = (
+	scope: FindingsScope,
+	account: { readonly author: string | null; readonly authorIsBot: boolean }
+) =>
+	account.authorIsBot &&
+	account.author !== null &&
+	scope.config.trustedBots.some((bot) => botLogin(bot) === account.author);
+
+/**
+ * Splits `threads` into those whose author may push to the repository or is a trusted bot,
+ * and the rest's URLs.
+ */
+const byTrust = (scope: FindingsScope, threads: ReadonlyArray<ReviewThread>) => {
+	const trusted = (thread: ReviewThread) => thread.authorCanWrite || isTrustedBot(scope, thread);
+	return {
+		trusted: threads.filter(trusted),
+		ignoredThreads: threads.filter((thread) => !trusted(thread)).map((thread) => thread.url)
+	};
+};
 
 /** What Clef rates an unlabelled thread: a finding of either severity, or no finding. */
 type ThreadKind = 'must-fix' | 'nit' | 'none';
@@ -123,25 +177,35 @@ const THREAD_QUESTION: ChoiceQuestion<ThreadKind> = {
 	}
 };
 
+/** A review comment that ship has no label for, as Clef is asked about it. */
+interface UnlabelledComment {
+	readonly path: string;
+	readonly line: number | null;
+	/** The comment's text, as the finding would claim it. */
+	readonly text: string;
+	/** Where the comment is on GitHub, for the log. */
+	readonly url: string;
+}
+
 /**
- * What an unlabelled thread is, as Clef rates it: its most probable kind. Without Clef's
+ * What an unlabelled comment is, as Clef rates it: its most probable kind. Without Clef's
  * answer, a must-fix, as before Clef.
  */
-const threadKind = Effect.fnUntraced(function* (scope: ClefScope, thread: ReviewThread) {
+const commentKind = Effect.fnUntraced(function* (scope: ClefScope, comment: UnlabelledComment) {
 	const answers = yield* (yield* Clef).ask(scope, {
-		decision: 'Treating an unlabelled review thread as a must-fix',
+		decision: 'Treating an unlabelled review comment as a must-fix',
 		state: [
-			`File: ${thread.path}${thread.line === null ? '' : `:${thread.line}`}`,
+			`File: ${comment.path}${comment.line === null ? '' : `:${comment.line}`}`,
 			'',
 			'Comment:',
-			commentText(thread)
+			comment.text
 		].join('\n'),
 		questions: { kind: THREAD_QUESTION }
 	});
 	if (answers === null) return 'must-fix';
 	const { pick, probabilities } = answers.kind;
 	yield* Effect.logInfo(
-		`Review thread ${thread.url}: ${pick} (clef: p=${(probabilities[pick] ?? 0).toFixed(2)})`
+		`Review comment ${comment.url}: ${pick} (clef: p=${(probabilities[pick] ?? 0).toFixed(2)})`
 	);
 	return pick;
 });
@@ -155,7 +219,7 @@ const threadKind = Effect.fnUntraced(function* (scope: ClefScope, thread: Review
  * resolved.
  */
 const fromThreads = Effect.fnUntraced(function* (
-	scope: ClefScope,
+	scope: FindingsScope,
 	threads: ReadonlyArray<ReviewThread>
 ) {
 	const stored = yield* Effect.forEach(threads, storedFinding);
@@ -170,7 +234,20 @@ const fromThreads = Effect.fnUntraced(function* (
 		(thread, index): Effect.Effect<ThreadKind | Severity | null, never, Clef | ShipHome> => {
 			if (own[index] !== null) return Effect.succeed(null);
 			const label = threadLabel(thread);
-			return label === null ? threadKind(scope, thread) : Effect.succeed(label);
+			const text = commentText(thread);
+			// A bot's or CodeRabbit's comment with no prose left is no finding. Its claim
+			// would be empty, so the fix agent would have only the comment's URL to go on,
+			// and the page there holds the prompt that was stripped.
+			if (label === null && isBotWritten(thread) && text === '')
+				return Effect.succeed('none');
+			return label === null
+				? commentKind(scope, {
+						path: thread.path,
+						line: thread.line,
+						text,
+						url: thread.url
+					})
+				: Effect.succeed(label);
 		},
 		{ concurrency: 'unbounded' }
 	);
@@ -190,6 +267,55 @@ const fromThreads = Effect.fnUntraced(function* (
 	return { findings, threads: byFinding };
 });
 
+/**
+ * The comments that trusted bots listed only in their reviews' bodies, as findings of the
+ * kind that Clef rates each, reported by `github:<bot>` with the review's URL as evidence. Only
+ * each bot's latest review with a body counts: CodeRabbit lists the comments on the
+ * commits that it last reviewed, and an earlier review's comments cannot be resolved, so they
+ * would stay findings for good. A comment takes the id `cr-<hash>` from CodeRabbit's
+ * marker, so it keeps its id as the review is edited. None has a thread.
+ */
+const fromReviewBodies = Effect.fnUntraced(function* (
+	scope: FindingsScope,
+	reviews: ReadonlyArray<PrReview>
+) {
+	// A later review by the same bot replaces an earlier one.
+	const latest = new Map(
+		reviews.flatMap((review) =>
+			review.author !== null && review.body.trim() !== '' && isTrustedBot(scope, review)
+				? [[review.author, review] as const]
+				: []
+		)
+	);
+	const comments = [...latest].flatMap(([author, review]) =>
+		parseCodeRabbitReviewBody(review.body).map((comment) => ({ author, review, comment }))
+	);
+	const kinds = yield* Effect.forEach(
+		comments,
+		({ review, comment }) => commentKind(scope, { ...comment, url: review.url }),
+		{ concurrency: 'unbounded' }
+	);
+	return comments.flatMap(
+		({ author, review, comment }, index): ReadonlyArray<VerifiedFinding> => {
+			const kind = kinds[index] ?? 'none';
+			if (kind === 'none') return [];
+			return [
+				{
+					reviewer: `github:${author}`,
+					file: comment.path,
+					line: comment.line,
+					severity: kind,
+					claim: comment.text,
+					evidence: review.url,
+					id: FindingId.make(`cr-${comment.hash}`),
+					round: 1,
+					alsoReportedBy: []
+				}
+			];
+		}
+	);
+});
+
 /** A stored review's must-fix findings and nits, and the open threads it posted them as. */
 const fromReview = (review: StoredReview, threads: ReadonlyArray<ReviewThread>) => {
 	const findings = review.findings.filter(actionable);
@@ -206,15 +332,17 @@ const fromReview = (review: StoredReview, threads: ReadonlyArray<ReviewThread>) 
 
 /**
  * Loads `source` in `repo`: its PR, as GitHub has it now, and the findings with their
- * open threads. Clef rates the unlabelled threads of a PR, unless `scope`'s project
- * turned it off. Fails with `ReviewNotFound` for an unknown review, `ReviewWithoutPr` for a
- * review of a branch without a PR, `PrNotFound` when the PR cannot be read, and `GhError`
- * when its threads cannot.
+ * open threads. A PR's findings also count the open threads of the bots that `scope`
+ * trusts, and the comments that those bots listed in their latest review's body, which
+ * have no thread. Clef rates the unlabelled threads and comments of a PR, unless
+ * `scope`'s project turned it off. Fails with `ReviewNotFound` for an unknown review,
+ * `ReviewWithoutPr` for a review of a branch without a PR, `PrNotFound` when the PR cannot
+ * be read, and `GhError` when its threads or reviews cannot.
  */
 export const loadFindings = Effect.fn('loadFindings')(function* (
 	repo: GitRepo,
 	source: FindingsSource,
-	scope: ClefScope
+	scope: FindingsScope
 ): Effect.fn.Return<
 	{ readonly pr: PrDetails; readonly loaded: LoadedFindings },
 	ReviewNotFound | ReviewWithoutPr | PrNotFound | GhError,
@@ -231,12 +359,18 @@ export const loadFindings = Effect.fn('loadFindings')(function* (
 			);
 	if (source._tag === 'PrThreads') {
 		const pr = yield* viewPr(source.pr);
-		const { trusted, ignoredThreads } = byTrust(yield* gh.reviewThreads(repo, pr.url));
+		const { trusted, ignoredThreads } = byTrust(scope, yield* gh.reviewThreads(repo, pr.url));
 		const fromPr = yield* fromThreads(scope, trusted);
+		// Only a trusted bot's review body counts, so there is nothing to read without one.
+		const fromBodies =
+			scope.config.trustedBots.length === 0
+				? []
+				: yield* fromReviewBodies(scope, yield* gh.reviews(repo, pr.url));
 		return {
 			pr,
 			loaded: {
-				...fromPr,
+				findings: [...fromPr.findings, ...fromBodies],
+				threads: fromPr.threads,
 				ignoredThreads,
 				intent: ChangeIntent.cases.Description.make({ title: pr.title, body: pr.body })
 			}
@@ -248,6 +382,7 @@ export const loadFindings = Effect.fn('loadFindings')(function* (
 	const pr = yield* viewPr(prUrl);
 	// Only a posted review has threads on the PR.
 	const { trusted, ignoredThreads } = byTrust(
+		scope,
 		review.postedUrl === null ? [] : yield* gh.reviewThreads(repo, pr.url)
 	);
 	return {

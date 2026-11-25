@@ -41,6 +41,7 @@ import {
 	GhError,
 	type CreatePrInput,
 	type GhShape,
+	type PrReview,
 	type PrState,
 	type ReviewThread,
 	type SubmitReviewInput
@@ -534,8 +535,21 @@ export interface FakeReview extends SubmitReviewInput {
 export interface GhFakeShape {
 	/** Every PR ever opened, open or not, oldest first. */
 	readonly prs: Effect.Effect<ReadonlyArray<FakePr>>;
-	/** Every review posted, oldest first. */
+	/**
+	 * Every review that ship posted through `submitReview`, oldest first; `addReview` adds
+	 * the others.
+	 */
 	readonly reviews: Effect.Effect<ReadonlyArray<FakeReview>>;
+	/**
+	 * Submits a review on a PR as someone other than ship would, by a user unless
+	 * `authorIsBot`. `Gh.reviews` lists it after the reviews submitted before it.
+	 */
+	readonly addReview: (
+		review: Omit<PrReview, 'url' | 'authorIsBot'> & {
+			readonly prUrl: string;
+			readonly authorIsBot?: boolean;
+		}
+	) => Effect.Effect<PrReview>;
 	/** Adds an open PR, as if a previous attempt had opened it. */
 	readonly addPr: (pr: Omit<FakePr, 'url' | 'number'>) => Effect.Effect<FakePr>;
 	/** Moves a PR's head, as a push to its branch would. */
@@ -548,12 +562,15 @@ export interface GhFakeShape {
 	/** Every review thread, oldest first; posting a review opens one per inline comment. */
 	readonly threads: Effect.Effect<ReadonlyArray<FakeThread>>;
 	/**
-	 * Opens a review thread on a PR, as a reviewer commenting on GitHub would; one who may
-	 * push to the repository unless `authorCanWrite` says otherwise.
+	 * Opens a review thread on a PR, as a reviewer commenting on GitHub would; a user who
+	 * may push to the repository unless `authorCanWrite` and `authorIsBot` say otherwise.
 	 */
 	readonly addThread: (
-		thread: Omit<FakeThread, 'id' | 'url' | 'resolved' | 'outdated' | 'authorCanWrite'> &
-			Partial<Pick<FakeThread, 'resolved' | 'outdated' | 'authorCanWrite'>>
+		thread: Omit<
+			FakeThread,
+			'id' | 'url' | 'resolved' | 'outdated' | 'authorCanWrite' | 'authorIsBot'
+		> &
+			Partial<Pick<FakeThread, 'resolved' | 'outdated' | 'authorCanWrite' | 'authorIsBot'>>
 	) => Effect.Effect<FakeThread>;
 	/**
 	 * Runs `hook` inside every later `resolveThread`, after the thread is resolved: a hook
@@ -577,6 +594,18 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 		Effect.gen(function* () {
 			const prs = yield* Ref.make<ReadonlyArray<FakePr>>([]);
 			const reviews = yield* Ref.make<ReadonlyArray<FakeReview>>([]);
+			// What `Gh.reviews` lists: ship's reviews and everyone else's, oldest first.
+			const listed = yield* Ref.make<
+				ReadonlyArray<{ readonly prUrl: string; readonly review: PrReview }>
+			>([]);
+			const list = (prUrl: string, review: PrReview) =>
+				Ref.update(listed, (current) => [...current, { prUrl, review }]);
+			/** The next review's URL, numbered across every review listed so none share one. */
+			const reviewUrl = (prUrl: string) =>
+				Effect.map(
+					Ref.get(listed),
+					(current) => `${prUrl}#pullrequestreview-${current.length + 1}`
+				);
 			const submitHook = yield* Ref.make<Effect.Effect<void>>(Effect.void);
 			const threads = yield* Ref.make<ReadonlyArray<FakeThread>>([]);
 			const resolveHook = yield* Ref.make<Effect.Effect<void>>(Effect.void);
@@ -590,6 +619,7 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 						resolved: false,
 						outdated: false,
 						authorCanWrite: true,
+						authorIsBot: false,
 						...thread,
 						id: `PRRT_${n}`,
 						url: `${thread.prUrl}#discussion_r${n}`
@@ -677,10 +707,18 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 					),
 				submitReview: (_repo, input) =>
 					Effect.andThen(guard('submitReview'), () =>
-						Ref.modify(reviews, (current): [string, ReadonlyArray<FakeReview>] => {
-							const url = `${input.prUrl}#pullrequestreview-${current.length + 1}`;
-							return [url, [...current, { ...input, url }]];
-						}).pipe(
+						reviewUrl(input.prUrl).pipe(
+							Effect.tap((url) =>
+								Ref.update(reviews, (current) => [...current, { ...input, url }])
+							),
+							Effect.tap((url) =>
+								list(input.prUrl, {
+									author: 'ship-bot',
+									authorIsBot: false,
+									body: input.body,
+									url
+								})
+							),
 							Effect.tap(() =>
 								Effect.forEach(input.comments, (comment) =>
 									addThread({
@@ -693,6 +731,14 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 								)
 							),
 							Effect.tap(() => Effect.flatten(Ref.get(submitHook)))
+						)
+					),
+				reviews: (_repo, prUrl) =>
+					Effect.andThen(guard('reviews'), () =>
+						Effect.map(Ref.get(listed), (current) =>
+							current
+								.filter((entry) => entry.prUrl === prUrl)
+								.map(({ review }) => review)
 						)
 					),
 				reviewThreads: (_repo, prUrl) =>
@@ -738,18 +784,28 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 				findReview: (_repo, { prUrl, marker }) =>
 					Effect.andThen(guard('findReview'), () =>
 						Effect.map(
-							Ref.get(reviews),
+							Ref.get(listed),
 							(current) =>
 								current.find(
-									(review) =>
-										review.prUrl === prUrl && review.body.includes(marker)
-								)?.url ?? null
+									(entry) =>
+										entry.prUrl === prUrl && entry.review.body.includes(marker)
+								)?.review.url ?? null
 						)
 					)
 			};
 			const fake: GhFakeShape = {
 				prs: Ref.get(prs),
 				reviews: Ref.get(reviews),
+				addReview: ({ prUrl, authorIsBot = false, ...review }) =>
+					Effect.gen(function* () {
+						const added: PrReview = {
+							...review,
+							authorIsBot,
+							url: yield* reviewUrl(prUrl)
+						};
+						yield* list(prUrl, added);
+						return added;
+					}),
 				addPr: (pr) => add(pr),
 				setHead: (url, headSha) => update(url, (pr) => ({ ...pr, headSha })),
 				afterSubmit: (hook) => Ref.set(submitHook, hook),

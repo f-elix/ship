@@ -217,6 +217,9 @@ export interface PrConfig extends Schema.Schema.Type<typeof PrConfig> {}
 const CLEF_DESCRIPTION =
 	'Ask Cloudflare Clef for the decisions that deterministic rules leave open: which reviewers and convention topics a change needs, the reviewer model for its risk, whether a must-fix is only a taste remark, how severe an unlabelled review thread is, and whether failing checks are unrelated to the change. Each falls back to the deterministic behaviour when Clef is off or unavailable; needs `ship auth cloudflare`';
 
+const TRUSTED_BOTS_DESCRIPTION =
+	'Bot accounts whose review comments `ship fix` and `ship recheck` act on, by login (e.g. `coderabbitai`). A bot may not push to the repository, so its comments are ignored unless listed here';
+
 const uniqueCheckNames = Schema.makeFilter(
 	(checks: ReadonlyArray<Check>) =>
 		new Set(checks.map((check) => check.name)).size === checks.length,
@@ -234,6 +237,9 @@ export const ProjectConfig = Schema.Struct({
 	),
 	reviewers: ReviewersConfig.pipe(withDefault({})),
 	clef: Schema.Boolean.pipe(withDefault(true, CLEF_DESCRIPTION)),
+	trustedBots: Schema.Array(Schema.NonEmptyString).pipe(
+		withDefault([], TRUSTED_BOTS_DESCRIPTION)
+	),
 	pr: PrConfig.pipe(withDefault({})),
 	models: Schema.optionalKey(
 		Schema.Struct(Struct.map(modelFields, Schema.optionalKey)).annotate({
@@ -271,6 +277,8 @@ export const ResolvedConfig = Schema.Struct({
 	reviewers: ReviewersConfig,
 	// Runs created before `clef` existed resume with it on, the default.
 	clef: Schema.Boolean.pipe(withDefault(true)),
+	// Runs created before `trustedBots` existed resume trusting no bot, the default.
+	trustedBots: Schema.Array(Schema.NonEmptyString).pipe(withDefault([])),
 	pr: PrConfig
 });
 export interface ResolvedConfig extends Schema.Schema.Type<typeof ResolvedConfig> {}
@@ -286,6 +294,7 @@ export const resolveConfig = (global: GlobalConfig, project: ProjectConfig): Res
 		format: project.format ?? null,
 		reviewers: project.reviewers,
 		clef: project.clef,
+		trustedBots: project.trustedBots,
 		pr: project.pr
 	};
 };

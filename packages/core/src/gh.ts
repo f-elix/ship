@@ -54,15 +54,34 @@ export interface ReviewThread {
 	readonly path: string;
 	/** The line on the diff's new side, or `null` for a thread on the whole file. */
 	readonly line: number | null;
-	/** The first comment's author's login, or `null` when the account was deleted. */
+	/**
+	 * The first comment's author's login, or `null` when the account was deleted. A bot's
+	 * login has no `[bot]` suffix, e.g. `coderabbitai`.
+	 */
 	readonly author: string | null;
 	/**
 	 * The first comment's author owns the repository or may push to it: GitHub's
 	 * `authorAssociation` is `OWNER`, `MEMBER` or `COLLABORATOR`.
 	 */
 	readonly authorCanWrite: boolean;
+	/** The first comment's author is a GitHub App's bot account, not a user. */
+	readonly authorIsBot: boolean;
 	readonly body: string;
 	/** The first comment's URL. */
+	readonly url: string;
+}
+
+/** A review submitted on a PR: its summary body, without the inline comments. */
+export interface PrReview {
+	/**
+	 * The reviewer's login, or `null` when the account was deleted. A bot's login has no
+	 * `[bot]` suffix, as in {@link ReviewThread}.
+	 */
+	readonly author: string | null;
+	/** The reviewer is a GitHub App's bot account, not a user. */
+	readonly authorIsBot: boolean;
+	/** The review's body; empty for a review that only holds inline comments. */
+	readonly body: string;
 	readonly url: string;
 }
 
@@ -104,8 +123,8 @@ export class GhError extends Schema.TaggedError<GhError>()('GhError', {
 }
 
 /**
- * The few `gh` commands ship needs: opening and reading PRs, posting reviews, and reading
- * and resolving review threads. Bodies go through stdin, never argv.
+ * The few `gh` commands that ship needs: opening and reading PRs, posting and reading reviews,
+ * and reading and resolving review threads. Bodies go through stdin, never argv.
  */
 export interface GhShape {
 	/** The open PR whose head is `branch`, or `null`. */
@@ -133,6 +152,11 @@ export interface GhShape {
 		repo: GitRepo,
 		input: { readonly prUrl: string; readonly marker: string }
 	) => Effect.Effect<string | null, GhError>;
+	/** The PR's submitted reviews that no one dismissed, oldest first. */
+	readonly reviews: (
+		repo: GitRepo,
+		prUrl: string
+	) => Effect.Effect<ReadonlyArray<PrReview>, GhError>;
 	/**
 	 * The PR's review threads that are neither resolved nor outdated, oldest first: the
 	 * comments that still ask for something on the PR's current diff.
@@ -212,7 +236,7 @@ const REVIEW_THREADS_QUERY = `query($owner: String!, $name: String!, $number: In
           isOutdated
           path
           line
-          comments(first: 1) { nodes { author { login } authorAssociation body url } }
+          comments(first: 1) { nodes { author { __typename login } authorAssociation body url } }
         }
       }
     }
@@ -237,7 +261,9 @@ const ListedThread = Schema.fromJsonString(
 		comments: Schema.Struct({
 			nodes: Schema.Array(
 				Schema.Struct({
-					author: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+					author: Schema.NullOr(
+						Schema.Struct({ __typename: Schema.String, login: Schema.String })
+					),
 					authorAssociation: Schema.String,
 					body: Schema.String,
 					url: Url
@@ -285,10 +311,21 @@ const PR_STATES: Record<'OPEN' | 'MERGED' | 'CLOSED', PrState> = {
 
 const PostedReview = Schema.fromJsonString(Schema.Struct({ html_url: Url }));
 
-/** One line of `findReview`'s `--jq` output: a review's URL and body. */
+/** One line of `listReviews`' `--jq` output: a review's author, URL, body and state. */
 const ListedReview = Schema.fromJsonString(
-	Schema.Struct({ html_url: Url, body: Schema.NullOr(Schema.String) })
+	Schema.Struct({
+		html_url: Url,
+		body: Schema.NullOr(Schema.String),
+		state: Schema.String,
+		user: Schema.NullOr(Schema.Struct({ login: Schema.String, type: Schema.String }))
+	})
 );
+
+/**
+ * A bot's login as GraphQL and mentions write it, `<app>`, from REST's `<app>[bot]` or a
+ * config's spelling, lowercased: GitHub logins are case-insensitive.
+ */
+export const botLogin = (login: string): string => login.replace(/\[bot\]$/iu, '').toLowerCase();
 
 const make = Effect.gen(function* () {
 	const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -456,13 +493,9 @@ const make = Effect.gen(function* () {
 		return posted.html_url;
 	});
 
-	const findReview = Effect.fn('Gh.findReview')(function* (
-		repo: GitRepo,
-		input: { readonly prUrl: string; readonly marker: string }
-	) {
-		const pr = parsePrUrl(input.prUrl);
-		if (pr === null)
-			return yield* Effect.die(new Error(`Not a pull request URL: ${input.prUrl}`));
+	const listReviews = Effect.fnUntraced(function* (repo: GitRepo, prUrl: string) {
+		const pr = parsePrUrl(prUrl);
+		if (pr === null) return yield* Effect.die(new Error(`Not a pull request URL: ${prUrl}`));
 		// `--jq` prints one review per line, across every page `--paginate` fetches.
 		const args = [
 			'api',
@@ -471,18 +504,39 @@ const make = Effect.gen(function* () {
 			'--paginate',
 			`repos/${pr.owner}/${pr.name}/pulls/${pr.number}/reviews`,
 			'--jq',
-			'.[] | {html_url, body}'
+			'.[] | {html_url, body, state, user: (.user | if . == null then null else {login, type} end)}'
 		];
 		const stdout = yield* run(repo, args);
 		const lines = stdout.split('\n').filter((line) => line.trim() !== '');
-		const reviews = yield* Effect.forEach(lines, (line) =>
+		const listed = yield* Effect.forEach(lines, (line) =>
 			Schema.decodeUnknownEffect(ListedReview)(line).pipe(
 				Effect.mapError(unexpected(repo, args))
 			)
 		);
-		return (
-			reviews.find((review) => review.body?.includes(input.marker) ?? false)?.html_url ?? null
-		);
+		return listed.map((review) => {
+			const authorIsBot = review.user?.type === 'Bot';
+			const login = review.user?.login ?? null;
+			const listedReview: PrReview = {
+				author: authorIsBot && login !== null ? botLogin(login) : login,
+				authorIsBot,
+				body: review.body ?? '',
+				url: review.html_url
+			};
+			return { review: listedReview, dismissed: review.state === 'DISMISSED' };
+		});
+	});
+
+	const reviews = Effect.fn('Gh.reviews')(function* (repo: GitRepo, prUrl: string) {
+		const listed = yield* listReviews(repo, prUrl);
+		return listed.flatMap(({ review, dismissed }) => (dismissed ? [] : [review]));
+	});
+
+	const findReview = Effect.fn('Gh.findReview')(function* (
+		repo: GitRepo,
+		input: { readonly prUrl: string; readonly marker: string }
+	) {
+		const listed = yield* listReviews(repo, input.prUrl);
+		return listed.find(({ review }) => review.body.includes(input.marker))?.review.url ?? null;
 	});
 
 	const reviewThreads = Effect.fn('Gh.reviewThreads')(function* (repo: GitRepo, prUrl: string) {
@@ -521,8 +575,14 @@ const make = Effect.gen(function* () {
 					id: thread.id,
 					path: thread.path,
 					line: thread.line,
-					author: first.author?.login ?? null,
+					author:
+						first.author === null
+							? null
+							: first.author.__typename === 'Bot'
+								? botLogin(first.author.login)
+								: first.author.login,
 					authorCanWrite: WRITE_ASSOCIATIONS.has(first.authorAssociation),
+					authorIsBot: first.author?.__typename === 'Bot',
 					body: first.body,
 					url: first.url
 				}
@@ -598,6 +658,7 @@ const make = Effect.gen(function* () {
 		viewPr,
 		submitReview,
 		findReview,
+		reviews,
 		reviewThreads,
 		resolveThread,
 		prStates

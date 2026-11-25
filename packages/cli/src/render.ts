@@ -112,11 +112,17 @@ const reviewSummaryLines = (summary: ReviewSummary): Array<string> => [
 	...findingLines('nits', summary.nits)
 ];
 
-/** The threads left out as written by someone who may not push to the repository. */
+/**
+ * The threads left out as written by someone who may not push to the repository and is no
+ * trusted bot.
+ */
 const ignoredLines = (urls: ReadonlyArray<string>): Array<string> =>
 	urls.length === 0
 		? []
-		: ['ignored threads (author may not push):', ...urls.map((url) => `  ${url}`)];
+		: [
+				'ignored threads (author may not push, not a trusted bot):',
+				...urls.map((url) => `  ${url}`)
+			];
 
 const fixSummaryLines = (summary: FixSummary): Array<string> => [
 	`cost: ${usd(summary.costUsd)}`,

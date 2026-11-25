@@ -98,6 +98,7 @@ describe('ProjectConfig', () => {
 			checks: [],
 			reviewers: { disable: [] },
 			clef: true,
+			trustedBots: [],
 			pr: { draft: true, squash: true }
 		});
 	});
@@ -192,12 +193,21 @@ describe('ResolvedConfig', () => {
 		expect(resolved.pr).toEqual({ draft: true, squash: false });
 		expect(resolveConfig(global, decodeProject({})).format).toBeNull();
 		expect(resolveConfig(global, decodeProject({ clef: false })).clef).toBe(false);
+		expect(
+			resolveConfig(global, decodeProject({ trustedBots: ['coderabbitai'] })).trustedBots
+		).toEqual(['coderabbitai']);
 	});
 
 	it('decodes a snapshot written before `clef` existed with Clef on', () => {
 		const plain = JSON.parse(JSON.stringify(resolvedConfig)) as Record<string, unknown>;
 		delete plain['clef'];
 		expect(Schema.decodeUnknownSync(ResolvedConfig)(plain).clef).toBe(true);
+	});
+
+	it('decodes a snapshot written before `trustedBots` existed trusting no bot', () => {
+		const plain = JSON.parse(JSON.stringify(resolvedConfig)) as Record<string, unknown>;
+		delete plain['trustedBots'];
+		expect(Schema.decodeUnknownSync(ResolvedConfig)(plain).trustedBots).toEqual([]);
 	});
 
 	it('decodes from its plain JSON unchanged, as the store reads a snapshot', () => {
