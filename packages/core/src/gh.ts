@@ -137,6 +137,11 @@ export interface GhShape {
 	) => Effect.Effect<void, GhError>;
 	/** Turns a ready PR back into a draft. */
 	readonly markDraft: (repo: GitRepo, url: string) => Effect.Effect<void, GhError>;
+	/**
+	 * Checks out the PR `ref` names in `repo`, as `gh pr checkout` does: it switches to the
+	 * PR's branch, creating it or fast-forwarding it to the PR's head.
+	 */
+	readonly checkoutPr: (repo: GitRepo, ref: string) => Effect.Effect<void, GhError>;
 	/** The PR `ref` names: a number in `repo`'s GitHub repository, or a PR URL. */
 	readonly viewPr: (repo: GitRepo, ref: string) => Effect.Effect<PrDetails, GhError>;
 	/** Posts one review on a PR and returns the review's URL. */
@@ -463,6 +468,10 @@ const make = Effect.gen(function* () {
 		} satisfies PrDetails;
 	});
 
+	const checkoutPr = Effect.fn('Gh.checkoutPr')(function* (repo: GitRepo, ref: string) {
+		yield* run(repo, ['pr', 'checkout', ref]);
+	});
+
 	const submitReview = Effect.fn('Gh.submitReview')(function* (
 		repo: GitRepo,
 		input: SubmitReviewInput
@@ -655,6 +664,7 @@ const make = Effect.gen(function* () {
 		createPr,
 		editPr,
 		markDraft,
+		checkoutPr,
 		viewPr,
 		submitReview,
 		findReview,

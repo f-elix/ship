@@ -4,8 +4,8 @@
  * and the PR states it reads from GitHub.
  */
 import type { RunId, RunInfo } from '@ship/core/contract';
-import type { PrState } from '@ship/core/gh';
-import { Git } from '@ship/core/git';
+import { Gh, type PrState } from '@ship/core/gh';
+import { Git, type GitRepo } from '@ship/core/git';
 import { DaemonClient, processEnv } from '@ship/daemon/client';
 import { Context, Effect, Layer, Queue, Schema, Stream } from 'effect';
 import type { RpcClientError } from 'effect/rpc';
@@ -51,6 +51,11 @@ export class DeliverableNotFound extends Schema.TaggedError<DeliverableNotFound>
 	}
 }
 
+/** `gh pr checkout` failed to bring the checkout to the PR's head before a fix or recheck. */
+class CheckoutFailed extends Schema.TaggedError<CheckoutFailed>()('CheckoutFailed', {
+	detail: Schema.String
+}) {}
+
 /**
  * How an action went. A refusal is expected, a value the UI shows: the daemon's own
  * refusals, plus a deliverable that is gone or does not offer the action any more.
@@ -64,6 +69,7 @@ export type ActResult =
 				| 'InvalidRunStatus'
 				| 'SnapshotNotResumable'
 				| 'RunNotFound'
+				| 'CheckoutFailed'
 				| 'DeliverableNotFound'
 				| 'ActionUnavailable';
 			readonly detail: string;
@@ -120,10 +126,11 @@ const refused = (_tag: Extract<ActResult, { ok: false }>['_tag'], detail: string
 	detail
 });
 
-/** The inbox over the `DaemonClient`, `Git`, `Archive` and `PrStates` in context. */
+/** The inbox over the `DaemonClient`, `Git`, `Gh`, `Archive` and `PrStates` in context. */
 export const make = Effect.gen(function* () {
 	const rpc = yield* DaemonClient;
 	const git = yield* Git;
+	const gh = yield* Gh;
 	const archive = yield* Archive;
 	const prStates = yield* PrStates;
 
@@ -241,6 +248,27 @@ export const make = Effect.gen(function* () {
 		return detailOf(found, runs, yield* archive.current, yield* prStates.current, files);
 	});
 
+	/**
+	 * Moves the checkout to the head of the deliverable's PR, which may have moved on since
+	 * its latest run, as `gh pr checkout` does. A checkout with uncommitted changes is left
+	 * alone; the daemon refuses it.
+	 */
+	const toPrHead = (deliverable: Deliverable, checkout: GitRepo) =>
+		Effect.gen(function* () {
+			if (deliverable.prUrl === null || !(yield* git.isClean(checkout))) return;
+			yield* gh.checkoutPr(checkout, deliverable.prUrl);
+		}).pipe(
+			Effect.catchTags({
+				GitError: Effect.die,
+				GhError: (error) =>
+					Effect.fail(
+						new CheckoutFailed({
+							detail: `Could not check out ${deliverable.prUrl} in ${checkout.cwd}: ${error.stderr.trim()}`
+						})
+					)
+			})
+		);
+
 	/** Starts the action `deliverable` offers on it. */
 	const start = (deliverable: Deliverable, offer: Offer) => {
 		const latest = deliverable.runs[0]!;
@@ -248,14 +276,18 @@ export const make = Effect.gen(function* () {
 		const checkout = { cwd: latest.cwd, env: processEnv() };
 		switch (offer.action) {
 			case 'fix':
-				return Effect.map(
-					rpc.fix({ source: offer.source, local: false, checks: true, ...checkout }),
-					started
+				return toPrHead(deliverable, checkout).pipe(
+					Effect.andThen(
+						rpc.fix({ source: offer.source, local: false, checks: true, ...checkout })
+					),
+					Effect.map(started)
 				);
 			case 'recheck':
-				return Effect.map(
-					rpc.recheck({ source: offer.source, local: false, ...checkout }),
-					started
+				return toPrHead(deliverable, checkout).pipe(
+					Effect.andThen(
+						rpc.recheck({ source: offer.source, local: false, ...checkout })
+					),
+					Effect.map(started)
 				);
 			case 'post':
 				return Effect.map(rpc.post({ review: offer.review, ...checkout }), started);
@@ -292,6 +324,7 @@ export const make = Effect.gen(function* () {
 			Effect.catchTags({
 				RpcClientError: (error) => Effect.fail(unreachable(error)),
 				DeliverableNotFound: (error) => Effect.succeed(refused(error._tag, error.message)),
+				CheckoutFailed: (error) => Effect.succeed(refused(error._tag, error.detail)),
 				PreconditionFailed: (error) => Effect.succeed(refused(error._tag, error.detail)),
 				InvalidRunStatus: (error) =>
 					Effect.succeed(refused(error._tag, `The run is ${error.status} now.`)),
@@ -308,10 +341,10 @@ export const make = Effect.gen(function* () {
 /** The deliverables of the daemon `DaemonClient` reaches. */
 export class Inbox extends Context.Service<Inbox, InboxApi>()('@ship/ui/Inbox') {
 	/**
-	 * With real git, the archive file and PR states read with `gh`. It still needs the
+	 * With real git and `gh`, and the archive file. It still needs the
 	 * `DaemonClient`, connected to the daemon `runtime.ts` finds, and the platform services.
 	 */
 	static readonly layer = Layer.effect(this, make).pipe(
-		Layer.provide([Git.layer, Archive.layer, PrStates.layer])
+		Layer.provide([Git.layer, Gh.layer, Archive.layer, PrStates.layer])
 	);
 }

@@ -581,6 +581,10 @@ export interface GhFakeShape {
 	readonly resolveCalls: Effect.Effect<ReadonlyArray<string>>;
 	/** Merges or closes a PR, or reopens it, as someone on GitHub would. */
 	readonly setState: (url: string, state: PrState) => Effect.Effect<void>;
+	/** Every `checkoutPr` call, in order. */
+	readonly checkoutCalls: Effect.Effect<
+		ReadonlyArray<{ readonly cwd: string; readonly ref: string }>
+	>;
 	/** Lists the URLs that each `prStates` call asked for, in call order. */
 	readonly prStatesCalls: Effect.Effect<ReadonlyArray<ReadonlyArray<string>>>;
 	/** Makes `method` fail with a `GhError` carrying `stderr`, until cleared with `succeed`. */
@@ -611,6 +615,9 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 			const resolveHook = yield* Ref.make<Effect.Effect<void>>(Effect.void);
 			const resolveCalls = yield* Ref.make<ReadonlyArray<string>>([]);
 			const prStatesCalls = yield* Ref.make<ReadonlyArray<ReadonlyArray<string>>>([]);
+			const checkoutCalls = yield* Ref.make<
+				ReadonlyArray<{ readonly cwd: string; readonly ref: string }>
+			>([]);
 
 			const addThread: GhFakeShape['addThread'] = (thread) =>
 				Ref.modify(threads, (current): [FakeThread, ReadonlyArray<FakeThread>] => {
@@ -667,6 +674,10 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 				markDraft: (_repo, url) =>
 					Effect.andThen(guard('markDraft'), () =>
 						update(url, (pr) => ({ ...pr, draft: true }))
+					),
+				checkoutPr: (repo, ref) =>
+					Effect.andThen(guard('checkoutPr'), () =>
+						Ref.update(checkoutCalls, (current) => [...current, { cwd: repo.cwd, ref }])
 					),
 				viewPr: (_repo, ref) =>
 					Effect.andThen(guard('viewPr'), () =>
@@ -815,6 +826,7 @@ export class GhFake extends Context.Service<GhFake, GhFakeShape>()('@ship/core/G
 				resolveCalls: Ref.get(resolveCalls),
 				setState: (url, state) => update(url, (pr) => ({ ...pr, state })),
 				prStatesCalls: Ref.get(prStatesCalls),
+				checkoutCalls: Ref.get(checkoutCalls),
 				fail: (method, stderr) =>
 					Ref.update(failures, (current) => ({
 						...current,

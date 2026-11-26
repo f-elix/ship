@@ -314,14 +314,16 @@ describe('Inbox.act', () => {
 		}).pipe(withInboxTest())
 	);
 
-	it.effect('rechecks the stored review from the latest run’s checkout', () =>
+	it.effect('rechecks the stored review from the latest run’s checkout, at the PR’s head', () =>
 		Effect.gen(function* () {
 			const inbox = yield* Inbox;
 			const daemon = yield* DaemonFake;
+			const github = yield* GhFake;
 			yield* daemon.put(shipRun(1, { prUrl: PR_URL }), []);
 			yield* daemon.put({ ...unposted(2), cwd: '/checkout' }, []);
 
 			expect(yield* inbox.act(FEATURE_ID, 'recheck')).toEqual({ ok: true, runId: 'run-new' });
+			expect(yield* github.checkoutCalls).toEqual([{ cwd: '/checkout', ref: PR_URL }]);
 			expect(yield* daemon.calls).toEqual([
 				{
 					rpc: 'recheck',
@@ -370,6 +372,37 @@ describe('Inbox.act', () => {
 				['resume', expect.objectContaining({ runId: 'run-2' })],
 				['cancel', { runId: 'run-2' }]
 			]);
+		}).pipe(withInboxTest())
+	);
+
+	it.effect('leaves a checkout with uncommitted changes for the daemon to refuse', () =>
+		Effect.gen(function* () {
+			const inbox = yield* Inbox;
+			const daemon = yield* DaemonFake;
+			const github = yield* GhFake;
+			yield* daemon.put(shipRun(1, { prUrl: PR_URL }), []);
+			yield* daemon.put(unposted(2), []);
+
+			expect(yield* inbox.act(FEATURE_ID, 'recheck')).toEqual({ ok: true, runId: 'run-new' });
+			expect(yield* github.checkoutCalls).toEqual([]);
+		}).pipe(withInboxTest({ git: { dirty: true } }))
+	);
+
+	it.effect('refuses to fix when the PR cannot be checked out', () =>
+		Effect.gen(function* () {
+			const inbox = yield* Inbox;
+			const daemon = yield* DaemonFake;
+			const github = yield* GhFake;
+			yield* daemon.put(shipRun(1, { prUrl: PR_URL }), []);
+			yield* daemon.put({ ...unposted(2), cwd: '/checkout' }, []);
+			yield* github.fail('checkoutPr', 'Not possible to fast-forward\n');
+
+			expect(yield* inbox.act(FEATURE_ID, 'fix')).toEqual({
+				ok: false,
+				_tag: 'CheckoutFailed',
+				detail: `Could not check out ${PR_URL} in /checkout: Not possible to fast-forward`
+			});
+			expect(yield* daemon.calls).toEqual([]);
 		}).pipe(withInboxTest())
 	);
 
