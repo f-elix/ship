@@ -264,6 +264,28 @@ describe('Git', () => {
 		}).pipe(Effect.scoped, Effect.provide(GitLive))
 	);
 
+	it.effect('squashes only the commits after the pushed branch', () =>
+		Effect.gen(function* () {
+			const { git: run, write, repo } = yield* tempRepo;
+			const git = yield* Git;
+			const base = sha(run('rev-parse', 'HEAD'));
+			write('a.txt', 'a\n');
+			yield* git.commit(repo, 'One');
+			const pushed = yield* git.squash(repo, { base, message: 'Feature' });
+			yield* git.push(repo, 'feature');
+
+			write('b.txt', 'b\n');
+			yield* git.commit(repo, 'Two');
+			write('c.txt', 'c\n');
+			yield* git.commit(repo, 'Three');
+			yield* git.squash(repo, { base, message: 'Feature' });
+			expect(run('rev-parse', 'HEAD~1')).toBe(pushed);
+			expect(run('log', '-1', '--format=%s')).toBe('Feature');
+			yield* git.push(repo, 'feature');
+			expect(run('rev-parse', 'origin/feature')).toBe(run('rev-parse', 'HEAD'));
+		}).pipe(Effect.scoped, Effect.provide(GitLive))
+	);
+
 	it.effect('pushes the branch with upstream tracking', () =>
 		Effect.gen(function* () {
 			const { git: run, write, repo, origin } = yield* tempRepo;

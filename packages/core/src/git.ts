@@ -111,8 +111,10 @@ export interface GitShape {
 	readonly commit: (repo: GitRepo, message: string) => Effect.Effect<GitSha | null, GitError>;
 	/**
 	 * Replaces the commits in `base..HEAD` with one commit with `message`, skipping hooks.
-	 * Safe to repeat: a single commit that already has `message` is kept as is, as is a
-	 * HEAD with no commits since `base`. Returns HEAD.
+	 * Commits the branch already pushed to `origin` are kept, so a push after it needs no
+	 * force: only those after `origin/<branch>` are squashed. Safe to repeat: a single
+	 * commit that already has `message` is kept as is, as is a HEAD with no commits to
+	 * squash. Returns HEAD.
 	 */
 	readonly squash: (
 		repo: GitRepo,
@@ -514,18 +516,35 @@ const make = Effect.gen(function* () {
 		return yield* headSha(repo);
 	});
 
+	/**
+	 * The tip of `origin/<branch>`, as this clone last fetched or pushed it, when it lies
+	 * between `base` and `head`: the commits up to it are published. `null` otherwise.
+	 */
+	const pushedSince = Effect.fnUntraced(function* (repo: GitRepo, base: GitSha, head: GitSha) {
+		const branch = yield* currentBranch(repo);
+		const ref = `refs/remotes/origin/${branch}`;
+		if (branch === null || !(yield* refExists(repo, ref))) return null;
+		const pushed = yield* revParse(repo, ref);
+		const between =
+			pushed !== base &&
+			(yield* isAncestor(repo, base, pushed)) &&
+			(yield* isAncestor(repo, pushed, head));
+		return between ? pushed : null;
+	});
+
 	const squash = Effect.fn('Git.squash')(function* (
 		repo: GitRepo,
 		options: { readonly base: GitSha; readonly message: string }
 	) {
 		const head = yield* headSha(repo);
-		const since = yield* commits(repo, { from: options.base, to: head });
+		const base = (yield* pushedSince(repo, options.base, head)) ?? options.base;
+		const since = yield* commits(repo, { from: base, to: head });
 		if (since.length === 0) return head;
 		if (since.length === 1) {
 			const fullMessage = yield* run(repo, ['log', '-1', '--format=%B', head]);
 			if (fullMessage.trim() === options.message.trim()) return head;
 		}
-		yield* run(repo, ['reset', '--soft', options.base]);
+		yield* run(repo, ['reset', '--soft', base]);
 		yield* commitStaged(repo, options.message);
 		return yield* headSha(repo);
 	});
