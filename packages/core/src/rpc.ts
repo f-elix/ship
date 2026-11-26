@@ -33,7 +33,6 @@ export const PreconditionReason = Schema.Literals([
 	'not-a-git-repo',
 	'detached-head',
 	'unknown-default-branch',
-	'on-default-branch',
 	'missing-plan-files',
 	'dirty-tree',
 	'unknown-project-config',

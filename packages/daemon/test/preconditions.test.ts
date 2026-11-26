@@ -194,12 +194,19 @@ describe('checkBranchPreconditions', () => {
 		)
 	);
 
-	it.effect('refuses checks on the default branch, without a config or with a dirty tree', () =>
+	it.effect('passes checks on the default branch', () =>
+		withHarness({ config: true, repo: { branch: 'main' } }, () =>
+			Effect.gen(function* () {
+				expect(yield* outcome(checkBranchPreconditions('checks', request))).toMatchObject({
+					passed: { branch: 'main' }
+				});
+			})
+		)
+	);
+
+	it.effect('refuses checks without a config or with a dirty tree', () =>
 		Effect.gen(function* () {
 			const checks = outcome(checkBranchPreconditions('checks', request));
-			expect(
-				yield* withHarness({ config: true, repo: { branch: 'main' } }, () => checks)
-			).toEqual({ failed: 'on-default-branch' });
 			expect(yield* withHarness({}, () => checks)).toEqual({
 				failed: 'unknown-project-config'
 			});

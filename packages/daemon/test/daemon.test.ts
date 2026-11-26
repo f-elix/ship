@@ -112,8 +112,6 @@ describe('daemon', () => {
 				expect(yield* preconditionOf(rpc, fx.request)).toBe('dirty-tree');
 				unlinkSync(join(fx.work, 'dirty.txt'));
 
-				fx.git('switch', '--quiet', 'main');
-				expect(yield* preconditionOf(rpc, fx.request)).toBe('on-default-branch');
 				fx.git('switch', '--quiet', '--detach', 'HEAD');
 				expect(yield* preconditionOf(rpc, fx.request)).toBe('detached-head');
 				fx.git('switch', '--quiet', 'feature');
@@ -1034,11 +1032,6 @@ describe('ship implement, ship checks, ship pr and ship post', () => {
 				expect(
 					yield* reasonOf(rpc.post({ review: ReviewId.make('run-r1'), cwd, env }))
 				).toBe('review-not-found');
-				fx.git('switch', '--quiet', 'main');
-				expect(yield* reasonOf(rpc.pr({ planDir: null, cwd, env }))).toBe(
-					'on-default-branch'
-				);
-
 				expect(yield* rpc.list({})).toEqual([]);
 			}).pipe(Effect.scoped),
 		TIMEOUT

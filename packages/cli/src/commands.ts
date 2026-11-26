@@ -344,7 +344,7 @@ const checks = Command.make(
 	}, Effect.scoped)
 ).pipe(
 	Command.withDescription(
-		`Run the checks on the files the branch changed since it left its base branch, fix failing ones, and commit the fixes. Needs a clean tree on a feature branch. ${STREAMS}`
+		`Run the checks on the files the branch changed since it left its base branch, fix failing ones, and commit the fixes. Needs a clean tree on a branch. ${STREAMS}`
 	)
 );
 
@@ -373,7 +373,7 @@ const pr = Command.make(
 	}, Effect.scoped)
 ).pipe(
 	Command.withDescription(
-		`Push the current branch and open or update its PR, following the \`pr\` skill. Never squashes. Needs a clean tree on a feature branch. ${STREAMS}`
+		`Push the current branch and open or update its PR, following the \`pr\` skill; on the default branch, only push. Never squashes. Needs a clean tree on a branch. ${STREAMS}`
 	)
 );
 

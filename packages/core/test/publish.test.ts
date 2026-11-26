@@ -113,6 +113,27 @@ describe('prStep', () => {
 			twoCommits
 		)
 	);
+
+	it.effect('pushes the default branch as it is and opens no PR', () =>
+		withSteps(
+			Effect.gen(function* () {
+				const recorded = yield* recordingKit;
+
+				const url = yield* prStep.run(
+					{ ...prInput({ squash: true }), branch: 'main' },
+					recorded.kit
+				);
+
+				expect(url).toBeNull();
+				const git = yield* (yield* GitFake).state;
+				expect(git.commits).toHaveLength(2);
+				expect(git.pushes).toEqual(['main']);
+				expect(yield* (yield* GhFake).prs).toEqual([]);
+				expect(yield* recorded.tags).toEqual(['BranchPushed']);
+			}),
+			twoCommits
+		)
+	);
 });
 
 describe('escalateStep', () => {
@@ -134,6 +155,29 @@ describe('escalateStep', () => {
 				const [pr] = yield* (yield* GhFake).prs;
 				expect(pr?.draft).toBe(true);
 				expect(yield* recorded.tags).toEqual(['Escalated', 'CommitCreated', 'PrOpened']);
+			}),
+			{ ...twoCommits, dirty: true }
+		)
+	);
+
+	it.effect('keeps the unfinished work local on the default branch', () =>
+		withSteps(
+			Effect.gen(function* () {
+				const recorded = yield* recordingKit;
+
+				const url = yield* escalateStep.run(
+					{ ...prInput(), branch: 'main', reason: 'review-cap' },
+					recorded.kit
+				);
+
+				expect(url).toBeNull();
+				const git = yield* (yield* GitFake).state;
+				expect(git.commits.at(-1)?.message).toBe(
+					'WIP: unfinished work (ship escalated: review-cap)'
+				);
+				expect(git.pushes).toEqual([]);
+				expect(yield* (yield* GhFake).prs).toEqual([]);
+				expect(yield* recorded.tags).toEqual(['Escalated', 'CommitCreated']);
 			}),
 			{ ...twoCommits, dirty: true }
 		)

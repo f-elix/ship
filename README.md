@@ -42,7 +42,7 @@ ship init --write /tmp/ship-draft.json      # validate, save, run every check on
 
 ## Usage
 
-Run from a feature branch with a clean working tree, with a plan dir holding `spec.md` and `implementation-plan.md`:
+Run from a branch with a clean working tree, with a plan dir holding `spec.md` and `implementation-plan.md`:
 
 ```sh
 ship run .plans/my-feature
@@ -54,7 +54,7 @@ Events stream to stderr as one line each: state changes, check results, lock wai
 
 | Code | Meaning                                                  |
 | ---- | -------------------------------------------------------- |
-| 0    | done: the PR is up                                       |
+| 0    | done: the PR is up, or the default branch is pushed      |
 | 2    | escalated: a draft PR lists the unresolved findings      |
 | 1    | failed, cancelled, interrupted, or the run did not start |
 | 130  | Ctrl-C (or SIGTERM): a started run keeps going           |
@@ -113,9 +113,9 @@ Events and the summary JSON go to stderr and stdout like `ship run`; the summary
 
 Four commands each run one part of `ship run` on its own, in the checkout you run them from. Like `ship run`, they stream events to stderr, print the summary JSON (`"kind"` is the command) on stdout, and exit 0 when done, 1 when the run failed, was cancelled or did not start, and 130 on Ctrl-C. `ship resume` continues any of them.
 
-- `ship implement <plan-dir>` runs the baseline, the implementer, then the checks, fixing failing ones, and commits with the implementer's subject. It needs what `ship run` needs: a feature branch, a clean tree outside the plan dir, the plan files and the project config. With `--no-checks` it skips the baseline and the checks and commits the implementer's work as it is. It opens no PR and requests no review.
-- `ship checks` runs every check on the files the branch changed since it left its base branch (its upstream when that is another branch, else the default branch), has the check-fix agent fix failing ones, and commits the fixes as one commit, `Fix failing checks`. There is no baseline: every failing check is the branch's to fix. Failing checks after the last fix attempt fail the run and leave the fixes uncommitted. It needs a feature branch, a clean tree and the project config.
-- `ship pr` pushes the branch and has the PR agent open or update its PR, as described in [The pull request](#the-pull-request). It never squashes, whatever `pr.squash` says: the commits go up as they are. `--plan <dir>` gives the agent a spec and plan to describe the change with; without one, the commits and the diff describe it. It needs a feature branch and a clean tree outside the plan dir, and uses the project config when there is one and the defaults otherwise.
+- `ship implement <plan-dir>` runs the baseline, the implementer, then the checks, fixing failing ones, and commits with the implementer's subject. It needs what `ship run` needs: a branch, a clean tree outside the plan dir, the plan files and the project config. With `--no-checks` it skips the baseline and the checks and commits the implementer's work as it is. It opens no PR and requests no review.
+- `ship checks` runs every check on the files the branch changed since it left its base branch (its upstream when that is another branch, else the default branch), has the check-fix agent fix failing ones, and commits the fixes as one commit, `Fix failing checks`. There is no baseline: every failing check is the branch's to fix. Failing checks after the last fix attempt fail the run and leave the fixes uncommitted. It needs a branch, a clean tree and the project config.
+- `ship pr` pushes the branch and has the PR agent open or update its PR, as described in [The pull request](#the-pull-request). It never squashes, whatever `pr.squash` says: the commits go up as they are. `--plan <dir>` gives the agent a spec and plan to describe the change with; without one, the commits and the diff describe it. It needs a branch and a clean tree outside the plan dir, and uses the project config when there is one and the defaults otherwise.
 - `ship post <review-id>` posts a review `ship review` stored, as `ship review --post` would. It needs `HEAD` at the reviewed head (`gh pr checkout <n>`), and refuses a review with no PR, of another repository, or with no findings.
 
 ## Clef decisions
@@ -152,6 +152,8 @@ The PR's base is the branch's upstream when it tracks another branch, else the d
 ship pushes the branch, then has an agent open or update the PR by following a `pr` skill: the repo's own, at `.agents/skills/pr/SKILL.md` or `.claude/skills/pr/SKILL.md`, or ship's, in `packages/core/src/skills/pr/`. Nobody is there to answer, so ship tells the agent the branch, the base and whether to open a draft, and the agent asks nothing: where the skill would wait for an answer, it takes the default or leaves the choice out. It does every other step, including the skill's writes to GitHub, such as labels and comments. The agent may run commands, and ship refuses its PR when the head is no longer the commit ship pushed.
 
 ship then adds its own parts to the body, between `<!-- ship:… -->` comments, replacing the ones an earlier run added: a warning on top when the run escalated, and at the end the checks that failed before the change and the review findings left for a human.
+
+On the default branch there is no PR to open: ship pushes the branch to `origin` without squashing, whatever `pr.squash` says, and the summary's `prUrl` is `null`. A run that escalates there keeps its commits, the unfinished work included, local and pushes nothing. `ship checks` there runs on the commits `origin` does not have yet.
 
 ## Develop
 

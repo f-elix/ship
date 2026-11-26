@@ -1,7 +1,8 @@
 /**
  * The publishing steps: `pr` opens or updates the pull request for the run's branch,
  * and `escalate` commits unfinished work and publishes it as a draft that says why the
- * run stopped.
+ * run stopped. On the default branch there is no PR to open: `pr` pushes the branch
+ * as it is, and `escalate` keeps its commits local, so unfinished work never reaches it.
  */
 import { Effect, Schema } from 'effect';
 import { agentContext } from './agent-context.ts';
@@ -30,7 +31,10 @@ export const PrInput = Schema.Struct({
 });
 export interface PrInput extends Schema.Schema.Type<typeof PrInput> {}
 
-/** Squashes when configured and allowed, pushes, then opens or updates the PR. Returns its URL. */
+/**
+ * Squashes when configured and allowed, pushes, then opens or updates the PR. Returns its
+ * URL, or `null` on the default branch, see {@link publishToDefaultBranch}.
+ */
 const publish = (
 	step: Extract<StepName, 'pr' | 'escalate'>,
 	input: PrInput,
@@ -39,6 +43,9 @@ const publish = (
 ) =>
 	Effect.gen(function* () {
 		const git = yield* Git;
+		if (input.branch === (yield* git.defaultBranch(input))) {
+			return yield* publishToDefaultBranch(input, kit, escalation);
+		}
 		const pr = yield* Pr;
 		const { squashMessage } = input;
 		if (
@@ -70,14 +77,35 @@ const publish = (
 		return result.url;
 	});
 
-/** `pr`: squashes when configured, pushes the branch and opens or updates its PR. */
+/**
+ * No PR can target the default branch: pushes it without squashing and reports
+ * `BranchPushed`. An escalation pushes nothing, so unfinished work stays local.
+ */
+const publishToDefaultBranch = (
+	input: PrInput,
+	kit: StepKit,
+	escalation: EscalationReason | null
+) =>
+	Effect.gen(function* () {
+		if (escalation !== null) return null;
+		const git = yield* Git;
+		yield* git.push(input, input.branch);
+		const sha = yield* git.headSha(input);
+		yield* kit.report({ _tag: 'BranchPushed', sha, remote: 'origin', ref: input.branch });
+		return null;
+	});
+
+/**
+ * `pr`: squashes when configured, pushes the branch and opens or updates its PR. On the
+ * default branch it only pushes.
+ */
 export const prStep = {
 	name: 'pr',
 	input: PrInput,
-	output: Url,
+	output: Schema.NullOr(Url),
 	timeoutMs: (config) => config.timeouts.pr,
 	run: (input, kit) => publish('pr', input, kit, null)
-} satisfies Step<PrInput, string, unknown>;
+} satisfies Step<PrInput, string | null, unknown>;
 
 export const EscalateInput = Schema.Struct({
 	...PrInput.fields,
@@ -88,12 +116,12 @@ export interface EscalateInput extends Schema.Schema.Type<typeof EscalateInput> 
 
 /**
  * `escalate`: commits any unfinished work, then publishes a draft PR that says why the run
- * stopped and lists what is unresolved.
+ * stopped and lists what is unresolved. On the default branch it only commits.
  */
 export const escalateStep = {
 	name: 'escalate',
 	input: EscalateInput,
-	output: Url,
+	output: Schema.NullOr(Url),
 	timeoutMs: (config) => config.timeouts.escalate,
 	run: (input, kit) =>
 		Effect.gen(function* () {
@@ -108,4 +136,4 @@ export const escalateStep = {
 			if (sha !== null) yield* kit.report({ _tag: 'CommitCreated', sha, message });
 			return yield* publish('escalate', input, kit, reason);
 		})
-} satisfies Step<EscalateInput, string, unknown>;
+} satisfies Step<EscalateInput, string | null, unknown>;

@@ -72,17 +72,17 @@ export const loadProjectConfig = Effect.fn('loadProjectConfig')(function* (key: 
 
 /**
  * Checks that a run can start in the caller's repo, with the caller's env: a git repo on a
- * branch other than the default one, a plan dir holding the plan files, a project config
- * whose lock resources the daemon has, and a clean working tree. The plan dir is added to
- * `.git/info/exclude` before the tree is checked, so plan files are never committed and never
- * make the tree dirty. `ship implement` starts from the same checks.
+ * branch, a plan dir holding the plan files, a project config whose lock resources the
+ * daemon has, and a clean working tree. The plan dir is added to `.git/info/exclude` before
+ * the tree is checked, so plan files are never committed and never make the tree dirty.
+ * `ship implement` starts from the same checks.
  *
  * Git failures past the first check are not precondition failures, so they are defects.
  */
 export const checkPreconditions = Effect.fn('checkPreconditions')(
 	function* (request: RunRequest) {
 		const repo = { cwd: request.cwd, env: request.env };
-		const branch = yield* requireFeatureBranch(repo);
+		const branch = yield* requireBranch(repo);
 		yield* requirePlanFiles(request.planDir);
 		const projectKey = yield* (yield* Git).projectKey(repo);
 		const config = yield* loadProjectConfig(projectKey);
@@ -113,7 +113,7 @@ export const checkBranchPreconditions = Effect.fn('checkBranchPreconditions')(
 	function* (command: 'checks' | 'pr', request: BranchRequest) {
 		const git = yield* Git;
 		const repo = { cwd: request.cwd, env: request.env };
-		const branch = yield* requireFeatureBranch(repo);
+		const branch = yield* requireBranch(repo);
 		if (request.planDir !== null) yield* requirePlanFiles(request.planDir);
 		const projectKey = yield* git.projectKey(repo);
 		const config =
@@ -127,15 +127,19 @@ export const checkBranchPreconditions = Effect.fn('checkBranchPreconditions')(
 	Effect.catchTags({ GitError: Effect.die, PlatformError: Effect.die })
 );
 
-/** Fails unless the repo is on a branch other than the default one; returns the branch. */
-const requireFeatureBranch = Effect.fnUntraced(function* (repo: Repo) {
+/**
+ * Fails unless the repo is on a branch and has a default branch, which publishing compares
+ * the branch to; returns the branch. The default branch itself is allowed: publishing on
+ * it pushes without opening a PR.
+ */
+const requireBranch = Effect.fnUntraced(function* (repo: Repo) {
 	const git = yield* Git;
 	yield* git
 		.repoRoot(repo)
 		.pipe(Effect.mapError((error) => failed('not-a-git-repo', error.message)));
 	const branch = yield* git.currentBranch(repo);
 	if (branch === null) return yield* failed('detached-head', `HEAD is detached in ${repo.cwd}`);
-	const defaultBranch = yield* git
+	yield* git
 		.defaultBranch(repo)
 		.pipe(
 			Effect.mapError(() =>
@@ -145,12 +149,6 @@ const requireFeatureBranch = Effect.fnUntraced(function* (repo: Repo) {
 				)
 			)
 		);
-	if (branch === defaultBranch) {
-		return yield* failed(
-			'on-default-branch',
-			`${branch} is the default branch; switch to a feature branch first`
-		);
-	}
 	return branch;
 });
 

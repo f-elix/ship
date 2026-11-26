@@ -9,7 +9,7 @@ ship runs the whole loop in its daemon: baseline checks → implement → checks
 
 1. **Prepare.**
     - **Plan dir**: the dir the `plan-out` skill wrote, holding `spec.md` and `implementation-plan.md`. The implementer sees only these files and the repo, so both must be self-contained. Use the dir the user points to, or the one `plan-out` wrote in this session. When there is none, run `plan-out` with the user first. ship excludes the dir from git when it sits inside the repo; it never commits plan files.
-    - **Branch**: ship refuses the default branch. Create a feature branch from the default branch with a name describing the change.
+    - **Branch**: on the default branch, ship pushes straight to it and opens no PR. Unless the user asked to work on the default branch, create a feature branch from it with a name describing the change.
     - **Clean tree**: commit or stash nothing on the user's behalf. When `git status` shows changes outside the plan dir, ask the user how to proceed.
     - **Config**: when the run fails with an unknown project config, run the `ship-init` skill, then start over.
 
@@ -46,7 +46,7 @@ ship runs the whole loop in its daemon: baseline checks → implement → checks
 
 ## Running one part of the loop
 
-When the user wants only one part of `ship run`, use the matching command from the repo root. Each needs a feature branch and a clean tree, streams like `ship run`, and exits 0 done, 1 failed, 130 detached; hand the user the logs command the same way.
+When the user wants only one part of `ship run`, use the matching command from the repo root. Each needs a branch and a clean tree, streams like `ship run`, and exits 0 done, 1 failed, 130 detached; hand the user the logs command the same way.
 
 - `ship implement <plan-dir> [--no-checks]`: implement a plan and commit it, with the baseline and the checks unless `--no-checks`. No review, no PR. Report the commit.
 - `ship checks`: run the checks on the branch's changes, fix failing ones and commit the fixes. Report the commit, or the checks that still fail.

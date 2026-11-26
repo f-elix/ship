@@ -393,15 +393,6 @@ describe('ship run', () => {
 					stderr: `ship: cannot start the run (missing-plan-files): ${join(fx.work, 'no-such-plan')} has no spec.md or implementation-plan.md`
 				});
 
-				fx.git('switch', '--quiet', 'main');
-				const onMain = yield* shipIn(fx, ['run', fx.planDir]);
-				expect(onMain).toEqual({
-					code: 1,
-					stdout: '',
-					stderr: 'ship: cannot start the run (on-default-branch): main is the default branch; switch to a feature branch first'
-				});
-
-				fx.git('switch', '--quiet', 'feature');
 				fx.write('README.md', 'changed\n');
 				const dirty = yield* shipIn(fx, ['run', fx.planDir]);
 				expect(dirty.code).toBe(1);

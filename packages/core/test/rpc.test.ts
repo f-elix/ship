@@ -16,7 +16,7 @@ const Handlers = ShipRpcs.toLayer({
 	checks: notUsed,
 	pr: notUsed,
 	post: notUsed,
-	run: () => Effect.fail(new PreconditionFailed({ reason: 'on-default-branch', detail: 'main' })),
+	run: () => Effect.fail(new PreconditionFailed({ reason: 'dirty-tree', detail: '/repo' })),
 	resume: notUsed,
 	cancel: notUsed,
 	status: (payload) => Effect.fail(new RunNotFound({ runId: payload.runId })),
@@ -39,7 +39,7 @@ describe('ShipRpcs', () => {
 			const error = yield* Effect.flip(
 				client.run({ planDir: '/plans/feature', cwd: '/repo', env: {} })
 			);
-			assert.strictEqual(error.reason, 'on-default-branch');
+			assert.strictEqual(error.reason, 'dirty-tree');
 
 			const missing = yield* Effect.flip(client.status({ runId }));
 			assert.strictEqual(missing._tag, 'RunNotFound');
